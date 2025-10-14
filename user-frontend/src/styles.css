@@ -1,0 +1,523 @@
+@import "assets/support-styles.css";
+
+:root {
+  --background: transparent !important; 
+  --card-background: #ffffff;
+  --text-primary: rgba(0, 0, 0, 0.87);
+  --text-secondary: rgba(0, 0, 0, 0.6);
+  --divider: rgba(0, 0, 0, 0.12);
+  --primary: #2196f3;
+  --primary-light: #bbdefb;
+  --primary-dark: #1976d2;
+  --accent: #ff4081;
+  --warn: #f44336;
+}
+
+.dark-theme {
+  --background: transparent !important;
+  --card-background: #1e1e1e;
+  --text-primary: rgba(255, 255, 255, 0.87);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+  --divider: rgba(255, 255, 255, 0.12);
+  --primary: #90caf9;
+  --primary-light: #1e88e5;
+  --primary-dark: #0d47a1;
+  --accent: #ff80ab;
+  --warn: #f44336;
+}
+
+body {
+  margin: 0;
+  font-family: Roboto, "Helvetica Neue", sans-serif;
+  background-color: transparent !important; 
+  color: var(--text-primary);
+  transition: background-color 0.3s ease;
+}
+
+
+body.login-page {
+  background-color: #f5f5f5;
+}
+
+body.dashboard-page {
+  background-color: #ffffff;
+}
+
+body.widget-page {
+  background-color: transparent !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.mat-mdc-card {
+  background-color: var(--card-background) !important;
+  color: var(--text-primary) !important;
+}
+
+.mat-mdc-form-field {
+  color: var(--text-primary) !important;
+}
+
+.mat-mdc-input-element {
+  color: var(--text-primary) !important;
+}
+
+.mat-mdc-button {
+  color: var(--text-primary) !important;
+}
+
+.mat-mdc-raised-button.mat-primary {
+  background-color: var(--primary) !important;
+}
+
+.mat-mdc-raised-button.mat-accent {
+  background-color: var(--accent) !important;
+}
+
+.mat-mdc-raised-button.mat-warn {
+  background-color: var(--warn) !important;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.text-center {
+  text-align: center;
+}
+
+.mt-2 {
+  margin-top: 16px;
+}
+
+.mb-2 {
+  margin-bottom: 16px;
+}
+
+/* ================================
+   FIXED WIDGET POSITION + VISIBILITY
+   ================================ */
+.rag-widget {
+  position: fixed !important;
+  bottom: 20px !important;
+  right: 20px !important;
+  z-index: 9999 !important;
+  font-family: Roboto, sans-serif !important;
+  background-color: transparent !important;
+  max-height: 90vh;
+  max-width: 420px;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+
+/* ✅ Re-enable visibility for iframe-hosted content */
+app-widget-embed,
+app-root {
+  display: block !important;
+  height: auto !important;
+  width: auto !important;
+  background: transparent !important;
+  overflow: visible !important;
+}
+
+/* ✅ Make sure HTML/BODY don’t hide iframe or clip widget */
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  overflow: visible !important;
+}
+
+/* Prevent overlay bleed */
+.cdk-overlay-container,
+.cdk-overlay-backdrop,
+.cdk-global-overlay-wrapper {
+  background: transparent !important;
+}
+
+/* ================================
+   SOLID CHAT AREA (NO GLASS)
+   ================================ */
+
+.rag-widget .widget-body,
+.rag-widget .chat-container,
+.rag-widget .chat-section,
+.rag-widget .messages-area {
+  background: #ffffff !important;
+  color: #000 !important;
+  border-radius: 16px !important;
+  opacity: 1 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15) !important;
+  border: 1px solid rgba(0, 0, 0, 0.05) !important;
+}
+
+/* HEADER (title bar) */
+.rag-widget .widget-header {
+  background: linear-gradient(135deg, #4a6cf7, #d84ef4) !important;
+  color: #fff !important;
+  border-top-left-radius: 16px !important;
+  border-top-right-radius: 16px !important;
+  opacity: 1 !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* CHAT MESSAGES */
+.rag-widget .chat-messages,
+.rag-widget .chat-content {
+  background: #ffffff !important;
+  color: #000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  opacity: 1 !important;
+}
+
+/* INPUT FOOTER */
+.rag-widget .widget-footer,
+.rag-widget .input-container {
+  background: #ffffff !important;
+  border-top: 1px solid #ddd !important;
+  border-radius: 0 0 16px 16px !important;
+  padding: 8px !important;
+  opacity: 1 !important;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Bubbles */
+.rag-widget .message.user {
+  background: #e0ebff !important;
+  color: #000 !important;
+}
+.rag-widget .message.bot {
+  background: #f5f5f5 !important;
+  color: #000 !important;
+}
+
+/* Dark mode */
+.dark-theme .rag-widget .widget-body,
+.dark-theme .rag-widget .chat-section {
+  background: #1e1e1e !important;
+  color: #fff !important;
+}
+.dark-theme .rag-widget .widget-footer {
+  background: #2a2a2a !important;
+  color: #fff !important;
+}
+
+/* Disable all glass effects */
+.rag-widget *,
+.cdk-overlay-container .rag-widget *,
+.cdk-overlay-pane .rag-widget * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background-blend-mode: normal !important;
+  mix-blend-mode: normal !important;
+}
+/* ===========================
+   WIDGET TRANSPARENCY FIXES
+   Put this at the END of your compiled stylesheet
+   =========================== */
+
+/* Ensure the embedding root & overlay containers are transparent */
+html, body,
+app-root, app-widget-embed, app-rag-widget,
+.cdk-overlay-container, .cdk-overlay-backdrop, .cdk-global-overlay-wrapper,
+.embed-wrapper, .widget-root {
+  background: transparent !important;
+  background-color: transparent !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+
+/* Make iframe (hosted widgets) transparent where applicable */
+iframe, embed, object {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+
+/* Remove any stray pseudo-element ghost/backdrop that could introduce white */
+.rag-widget::before, .widget-content::before,
+.rag-widget::after, .widget-content::after {
+  content: none !important;
+  display: none !important;
+}
+
+/* Make the visible chat area use transparent background so it blends with page */
+.widget-body,
+.widget-footer,
+.rag-widget .chat-container,
+.rag-widget .chat-section,
+.rag-widget .messages-area,
+.app-chat {
+  border: none !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  overflow: visible !important;
+}
+
+/* If you want the chat *interior* (message bubbles) to remain readable, style bubbles explicitly.
+   Keep bubbles solid, but avoid borders / semi-transparent outside strokes which cause halos. */
+.rag-widget .message .bubble,
+.widget-body .message .bubble {
+  /* keep bubble filling, but no outer white border */
+  background-clip: padding-box !important;
+  border: none !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08) !important;
+}
+
+/* Header gradient is allowed — ensure it has no white stroke */
+.widget-header {
+  background: linear-gradient(135deg, var(--primary, #4a6cf7), var(--accent, #d84ef4)) !important;
+  border: none !important;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.12) !important;
+  border-radius: 18px 18px 0 0 !important;
+  background-clip: padding-box !important; /* prevents border from bleeding */
+}
+
+/* Remove any subtle borders that are visible as white lines around rounded corners */
+.rag-widget * {
+  border-color: transparent !important;
+  outline: none !important;
+}
+
+/* Final safety for Angular Material / MDC elements inside widget */
+.mat-mdc-card,
+.mat-card,
+.mat-mdc-dialog-container,
+.mat-mdc-menu-panel,
+.cdk-overlay-pane,
+.mdc-surface {
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* When the widget is embedded in an iframe, the host iframe must also allow transparency.
+   If you have control of the <iframe> tag add:
+   <iframe src="..." style="background:transparent" allowTransparency="true"></iframe>
+*/
+
+/* Small anti-aliasing trick for crisp rounded corners (prevents fringing on some browsers) */
+.rag-widget, .widget-panel {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+body.widget-embed-only .rag-widget,
+body.widget-embed-only .widget-content {
+  background: transparent !important;
+}
+/* ==============================
+   FINAL FIX — Stop background bleed
+   ============================== */
+
+.rag-widget .widget-content,
+.rag-widget .widget-body,
+.rag-widget .chat-container,
+.rag-widget .messages-area {
+  overflow: hidden !important;       /* outer containers must remain non-scrolling */
+  background: #ffffff !important;
+  color: #000 !important;
+  border-radius: 16px !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.15) !important;
+  border: 1px solid rgba(0,0,0,0.05) !important;
+  isolation: isolate !important;     /* prevents blending with host */
+}
+.rag-widget .widget-body .chat-messages {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  -webkit-overflow-scrolling: touch !important;
+  scroll-behavior: smooth !important;
+  padding: 12px 12px 96px 12px !important; /* bottom padding >= footer height */
+}
+
+/* 2️⃣ Header gradient stays opaque */
+.rag-widget .widget-header {
+  background: linear-gradient(135deg, #4a6cf7, #d84ef4) !important;
+  color: #fff !important;
+  border-radius: 18px 18px 0 0 !important;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.2) !important;
+  backdrop-filter: none !important;
+}
+.rag-widget .widget-footer {
+  position: relative !important;
+  z-index: 60 !important;
+  background: #ffffff !important;
+  border-top: 1px solid rgba(0,0,0,0.04) !important;
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.08) !important;
+}
+.rag-widget .message.user,
+.rag-widget .message-group.user,
+.rag-widget .bubble.user {
+  background: linear-gradient(90deg, var(--primary), var(--accent)) !important;
+  color: #fff !important;
+  border-radius: 12px 12px 6px 12px !important;
+}
+.rag-widget .message.bot,
+.rag-widget .message-group.bot,
+.rag-widget .bubble.bot {
+  background: #f5f5f5 !important;
+  color: #0f1724 !important;
+  border-radius: 12px 12px 12px 6px !important;
+}
+.rag-widget .chat-form input {
+  background: #ffffff !important;       /* explicit white background for readability */
+  color: #0f1724 !important;
+  border: 1px solid rgba(12,16,28,0.08) !important;
+  padding: 10px 12px !important;
+  border-radius: 10px !important;
+  box-shadow: 0 6px 18px rgba(75,108,183,0.04) !important;
+  outline: none !important;
+}
+.rag-widget .chat-form input::placeholder {
+  color: #9aa4b2 !important;
+  opacity: 1 !important;
+}
+.rag-widget .step-image img,
+.rag-widget .chat-step-image,
+.rag-widget .images-grid img,
+.rag-widget .gallery-item img,
+.rag-widget .step-thumb img {
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  object-fit: cover !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.12) !important;
+}
+.rag-widget .chat-messages::-webkit-scrollbar {
+  width: 8px !important;
+}
+.rag-widget .chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,0.18) !important;
+  border-radius: 6px !important;
+}
+.rag-widget :focus {
+  outline: 2px solid rgba(75,108,183,0.9) !important;
+  outline-offset: 2px !important;
+}
+
+/* 3️⃣ Disable transparency recursion from global rules */
+.rag-widget * {
+  background-color: inherit !important;
+  background-clip: border-box !important;
+  mix-blend-mode: normal !important;
+  isolation: isolate !important;
+}
+
+/* 4️⃣ Dark theme fix */
+.dark-theme .rag-widget .widget-content,
+.dark-theme .rag-widget .widget-body,
+.dark-theme .rag-widget .widget-footer {
+  background: #1e1e1e !important;
+  color: #fff !important;
+}
+
+/* 5️⃣ Prevent global transparency from leaking back in */
+body.widget-page .rag-widget,
+body.widget-page .rag-widget * {
+  background: none !important;
+  background-color: transparent !important;
+}
+
+/* ===============================
+   🧭 CHAT SCROLL + BULLET FIX
+   =============================== */
+
+/* Re-enable scrolling only for chat messages area */
+.rag-widget .widget-body,
+.rag-widget .chat-messages,
+.rag-widget .messages-area {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  max-height: 420px !important; /* adjust if widget taller */
+  scroll-behavior: smooth !important;
+  background: #ffffff !important;
+  border-radius: 0 0 16px 16px !important;
+  padding: 10px 14px !important;
+}
+
+/* Ensure chat expands only inside panel */
+.rag-widget .widget-content {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 520px !important;
+  overflow: hidden !important;
+}
+
+/* Steps / bullet list layout (point type formatting) */
+.rag-widget ol.steps,
+.rag-widget ul.steps {
+  list-style: decimal !important;
+  padding-left: 20px !important;
+  margin: 10px 0 !important;
+  color: var(--text-primary);
+}
+
+.rag-widget ol.steps li,
+.rag-widget ul.steps li {
+  margin-bottom: 8px !important;
+  line-height: 1.45 !important;
+  font-size: 14px !important;
+  position: relative;
+}
+
+.rag-widget ol.steps li::marker {
+  color: #4a6cf7; /* point number color */
+  font-weight: 600;
+}
+
+/* Step image thumbnails */
+.rag-widget .step-image img,
+.rag-widget .chat-step-image {
+  width: 100% !important;
+  max-height: 180px !important;
+  border-radius: 10px !important;
+  object-fit: contain !important;
+  margin-top: 6px !important;
+  cursor: pointer !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Fix image grid alignment (top-level bot images) */
+.rag-widget .images-grid {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  margin-top: 8px !important;
+}
+
+.rag-widget .images-grid img {
+  width: 90px !important;
+  height: 70px !important;
+  object-fit: cover !important;
+  border-radius: 8px !important;
+}
+
+/* Improve scroll smoothness for chat */
+.rag-widget .chat-messages::-webkit-scrollbar {
+  width: 8px !important;
+}
+.rag-widget .chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.25) !important;
+  border-radius: 4px !important;
+}
+.rag-widget .chat-messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.45) !important;
+}
+
+/* Keep header/footer fixed while body scrolls */
+.rag-widget .widget-header {
+  flex-shrink: 0 !important;
+}
+.rag-widget .widget-footer {
+  flex-shrink: 0 !important;
+}

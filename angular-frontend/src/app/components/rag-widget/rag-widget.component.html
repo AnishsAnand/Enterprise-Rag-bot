@@ -1,0 +1,577 @@
+<div class="rag-widget" [class.expanded]="isExpanded">
+  <button class="widget-toggle" (click)="toggleWidget()">
+    <mat-icon>{{ isExpanded ? 'close' : 'smart_toy' }}</mat-icon>
+  </button>
+
+  <div class="widget-content" *ngIf="isExpanded">
+    <div class="widget-header">
+      <div class="header-info">
+        <mat-icon>smart_toy</mat-icon>
+        <div>
+          <h3>Enterprise RAG Bot</h3>
+        </div>
+      </div>
+
+      <div class="widget-header-actions">
+        <button mat-icon-button matTooltip="Minimize" (click)="toggleWidget()">
+          <mat-icon>minimize</mat-icon>
+        </button>
+        <button *ngIf="!isLoginPage" mat-icon-button color="warn" matTooltip="Logout" (click)="logout()">
+          <mat-icon>logout</mat-icon>
+        </button>
+      </div>
+    </div>
+
+    <mat-tab-group>
+      <!-- CHAT TAB -->
+      <mat-tab label="Chat">
+        <div class="chat-container">
+          <div class="chat-messages" #chatMessages>
+            <div
+              *ngFor="let message of chatHistory"
+              class="message-row"
+              [ngClass]="{ 'user-message': message.type === 'user', 'bot-message': message.type === 'bot' }"
+            >
+              <div class="message-body">
+                <div class="message-content">
+
+                  <!-- Stepwise rendering for bot -->
+                  <ng-container *ngIf="message.type === 'bot' && message.steps?.length; else normalMessageBlock">
+                    <ol class="step-list">
+                      <li class="step-item" *ngFor="let step of message.steps">
+                        <div class="step-text">{{ step.text }}</div>
+
+                        <div class="step-image" *ngIf="step.image">
+                          <div class="image-container" (click)="openImageInNewTab(step.image.url)">
+                            <img
+                              [src]="step.image.url"
+                              [alt]="step.image.alt || 'Image'"
+                              (error)="onImageError($event)"
+                              loading="lazy"
+                              class="chat-image"
+                            />
+                            <div class="image-overlay">
+                              <mat-icon>open_in_new</mat-icon>
+                            </div>
+                          </div>
+                          <div class="image-description" *ngIf="step.image.alt || step.image.caption">
+                            <p class="image-alt" *ngIf="step.image.alt">{{ step.image.alt }}</p>
+                            <p class="image-caption" *ngIf="step.image.caption">{{ step.image.caption }}</p>
+                          </div>
+                        </div>
+                      </li>
+                    </ol>
+                  </ng-container>
+
+                  <!-- Normal message / fallback -->
+                  <ng-template #normalMessageBlock>
+                    <div class="message-text">{{ message.content }}</div>
+
+                    <!-- Bot images (before summary) -->
+                    <div class="message-images" *ngIf="message.type === 'bot' && message.images?.length">
+                      <div class="images-grid">
+                        <div *ngFor="let image of message.images" class="image-item">
+                          <div class="image-container" (click)="openImageInNewTab(image.url)">
+                            <img
+                              [src]="image.url"
+                              [alt]="image.alt || 'Image'"
+                              (error)="onImageError($event)"
+                              loading="lazy"
+                              class="chat-image"
+                            />
+                            <div class="image-overlay">
+                              <mat-icon>open_in_new</mat-icon>
+                            </div>
+                          </div>
+                          <div class="image-description" *ngIf="image.alt || image.caption">
+                            <p class="image-alt" *ngIf="image.alt">{{ image.alt }}</p>
+                            <p class="image-caption" *ngIf="image.caption">{{ image.caption }}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </ng-template>
+
+                  <!-- ✅ Quick Summary (always last, bullet points) -->
+                  <div class="summary-block" *ngIf="message.type === 'bot' && message.summary">
+                    <mat-card class="summary-card">
+                      <mat-card-header>
+                        <mat-card-title>
+                          <mat-icon>article</mat-icon>
+                          Quick Summary
+                        </mat-card-title>
+                      </mat-card-header>
+                      <mat-card-content>
+                        <ul class="summary-list">
+                          <li *ngFor="let point of message.summary.split('\n')">
+                            {{ point }}
+                          </li>
+                        </ul>
+                      </mat-card-content>
+                    </mat-card>
+                  </div>
+
+                  <!-- Admin-only expanded context -->
+                  <div class="expanded-context" *ngIf="isAdmin && message.type === 'bot' && message.expanded_context">
+                    <mat-expansion-panel class="context-panel">
+                      <mat-expansion-panel-header>
+                        <mat-panel-title>
+                          <mat-icon>inventory_2</mat-icon>
+                          Expanded Context (Admin)
+                        </mat-panel-title>
+                      </mat-expansion-panel-header>
+                      <pre class="context-pre">{{ message.expanded_context }}</pre>
+                    </mat-expansion-panel>
+                  </div>
+
+                  <div class="message-time">{{ message.timestamp | date: 'short' }}</div>
+                </div>
+
+                <!-- Sources (admin only) -->
+                <div class="message-sources" *ngIf="isAdmin && message.type === 'bot' && message.sources?.length">
+                  <mat-expansion-panel class="source-panel">
+                    <mat-expansion-panel-header>
+                      <mat-panel-title>
+                        <mat-icon>source</mat-icon>
+                        Sources ({{ message?.sources?.length }})
+                      </mat-panel-title>
+                      <mat-panel-description>
+                        <mat-chip-set>
+                          <mat-chip *ngIf="hasAnySourceWithImages(message.sources)">
+                            <mat-icon>image</mat-icon>
+                            Images Available
+                          </mat-chip>
+                        </mat-chip-set>
+                      </mat-panel-description>
+                    </mat-expansion-panel-header>
+
+                    <div class="sources-list">
+                      <div *ngFor="let source of message.sources" class="source-item">
+                        <div class="source-header">
+                          <div class="source-info">
+                            <a [href]="source.url" target="_blank" class="source-link">
+                              <mat-icon>link</mat-icon>
+                              {{ source.title || source.url }}
+                            </a>
+                            <!-- <span class="relevance-badge">{{ (source.relevance_score * 100) | number: '1.0-0' }}%</span> -->
+                          </div>
+
+                          <div class="image-indicator" *ngIf="hasImages(source)">
+                            <mat-chip>
+                              <mat-icon>{{ getImageTypeIcon('content') }}</mat-icon>
+                              {{ getImageCount(source) }} Images
+                            </mat-chip>
+                          </div>
+                        </div>
+
+                        <div class="source-images" *ngIf="hasImages(source)">
+                          <div class="images-grid">
+                            <div
+                              *ngFor="let image of source.images; let i = index"
+                              class="image-item"
+                              [class.image-diagram]="image.type === 'diagram'"
+                              [class.image-logo]="image.type === 'logo/icon'"
+                            >
+                              <div class="image-container" (click)="openImageInNewTab(image.url)">
+                                <img
+                                  [src]="image.url"
+                                  [alt]="image.alt || 'Image'"
+                                  (error)="onImageError($event)"
+                                  loading="lazy"
+                                  class="source-image"
+                                />
+                                <div class="image-overlay">
+                                  <mat-icon>open_in_new</mat-icon>
+                                </div>
+
+                                <div class="image-type-badge" *ngIf="image.type">
+                                  <mat-icon>{{ getImageTypeIcon(image.type) }}</mat-icon>
+                                </div>
+                              </div>
+
+                              <div class="image-description" *ngIf="image.alt || image.caption">
+                                <p class="image-alt" *ngIf="image.alt">{{ image.alt }}</p>
+                                <p class="image-caption" *ngIf="image.caption">{{ image.caption }}</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </mat-expansion-panel>
+                </div>
+              </div>
+            </div>
+
+            <div *ngIf="isTyping" class="typing-indicator">
+              <div class="typing-dots"><span></span><span></span><span></span></div>
+              <span>Bot is typing...</span>
+            </div>
+          </div>
+
+          <div class="chat-input">
+            <mat-form-field appearance="outline" class="message-input">
+              <input
+                matInput
+                [(ngModel)]="currentMessage"
+                (keyup.enter)="sendMessage()"
+                placeholder="Ask a question..."
+                [disabled]="isTyping"
+              />
+            </mat-form-field>
+            <button mat-fab color="primary" (click)="sendMessage()" [disabled]="!currentMessage.trim() || isTyping">
+              <mat-icon>send</mat-icon>
+            </button>
+          </div>
+        </div>
+      </mat-tab>
+      
+      <mat-tab *ngIf="isAdmin" label="Scrape">
+        <div class="scrape-container">
+          <div class="scrape-section">
+            <h4>Single URL</h4>
+            <div class="input-group">
+              <mat-form-field appearance="outline" class="url-input">
+                <mat-label>Website URL</mat-label>
+                <input matInput [(ngModel)]="scrapeUrl" placeholder="https://example.com" type="url" />
+              </mat-form-field>
+              <button mat-raised-button color="primary" (click)="scrapeSingleUrl()" [disabled]="!scrapeUrl || isScraping">
+                <mat-icon *ngIf="isScraping">hourglass_empty</mat-icon>
+                <mat-icon *ngIf="!isScraping">download</mat-icon>
+                {{ isScraping ? 'Scraping...' : 'Scrape' }}
+              </button>
+            </div>
+
+            <!-- Scrape summary (when available) -->
+            <mat-card *ngIf="scrapeStatus?.summary" class="summary-card mt-8">
+              <mat-card-header>
+                <mat-card-title>
+                  <mat-icon>article</mat-icon>
+                  Page Summary
+                </mat-card-title>
+              </mat-card-header>
+              <mat-card-content>
+                <p>{{ scrapeStatus?.summary }}</p>
+              </mat-card-content>
+            </mat-card>
+          </div>
+
+          <div class="scrape-section">
+            <h4>Bulk Scrape</h4>
+            <div class="input-group">
+              <mat-form-field appearance="outline" class="url-input">
+                <mat-label>Base URL</mat-label>
+                <input matInput [(ngModel)]="bulkScrapeUrl" placeholder="https://example.com" type="url" />
+              </mat-form-field>
+              <button mat-raised-button color="accent" (click)="bulkScrape()" [disabled]="!bulkScrapeUrl || isBulkScraping">
+                <mat-icon *ngIf="isBulkScraping">hourglass_empty</mat-icon>
+                <mat-icon *ngIf="!isBulkScraping">cloud_download</mat-icon>
+                {{ isBulkScraping ? 'Bulk Scraping...' : 'Bulk Scrape' }}
+              </button>
+            </div>
+            <p class="help-text">Auto discovers and scrapes multiple pages with images.</p>
+          </div>
+
+          <div class="scrape-section" *ngIf="isAdmin">
+            <h4>Upload File</h4>
+            <div class="upload-dropzone" (drop)="handleDrop($event)" (dragover)="allowDrop($event)">
+              <p>Drag and drop file here</p>
+              <p>or</p>
+              <button mat-stroked-button color="primary" (click)="fileInput.click()">Browse</button>
+              <input #fileInput type="file" hidden (change)="handleFileInput($event)" />
+            </div>
+            <mat-progress-spinner *ngIf="uploading" [value]="progress" mode="determinate"></mat-progress-spinner>
+            <div *ngIf="uploadStatus" class="upload-success">{{ uploadStatus }}</div>
+            <div *ngIf="uploadError" class="upload-error">{{ uploadError }}</div>
+
+            <!-- Upload summary (when available) -->
+            <mat-card *ngIf="uploadSummary" class="summary-card mt-8">
+              <mat-card-header>
+                <mat-card-title>
+                  <mat-icon>description</mat-icon>
+                  Document Summary
+                </mat-card-title>
+              </mat-card-header>
+              <mat-card-content>
+                <p>{{ uploadSummary }}</p>
+              </mat-card-content>
+            </mat-card>
+          </div>
+
+          <div class="scrape-status" *ngIf="scrapeStatus">
+            <mat-card>
+              <mat-card-content>
+                <h4>{{ scrapeStatus.title }}</h4>
+                <p>{{ scrapeStatus.message }}</p>
+                <small *ngIf="scrapeStatus.details">{{ scrapeStatus.details }}</small>
+              </mat-card-content>
+            </mat-card>
+          </div>
+        </div>
+      </mat-tab>
+
+      <mat-tab *ngIf="isAdmin" label="Knowledge">
+        <div class="knowledge-container">
+          <mat-card>
+            <mat-card-header>
+              <mat-card-title>Knowledge Base</mat-card-title>
+              <button mat-icon-button (click)="refreshStats()"><mat-icon>refresh</mat-icon></button>
+            </mat-card-header>
+            <mat-card-content>
+              <div class="stats-grid">
+                <div class="stat-item">
+                  <span class="stat-number">{{ knowledgeStats.document_count }} </span>
+                  <span class="stat-label"> Documents</span>
+                </div>
+                <div class="stat-item">
+                  <span class="stat-number">{{ knowledgeStats.status }} </span>
+                  <span class="stat-label"> Status</span>
+                </div>
+              </div>
+            </mat-card-content>
+            <mat-card-actions>
+              <button mat-raised-button color="warn" (click)="clearKnowledge()">
+                <mat-icon>delete_forever</mat-icon>
+                Clear Knowledge
+              </button>
+            </mat-card-actions>
+          </mat-card>
+        </div>
+      </mat-tab>
+    </mat-tab-group>
+    <mat-tab *ngIf="isAdmin" label="API Config">
+  <div class="api-config-container">
+    <!-- Header with refresh button -->
+    <div class="config-header">
+      <h4>AI Service Configuration</h4>
+      <button mat-icon-button (click)="loadAPIKeyStatus()" [disabled]="apiKeyLoading">
+        <mat-icon [class.spinning]="apiKeyLoading">refresh</mat-icon>
+      </button>
+    </div>
+
+    <!-- Overall Status -->
+    <mat-card class="status-card" *ngIf="apiKeyStatus">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon [style.color]="apiKeyStatus.service_health.overall_status === 'healthy' ? 'green' : 
+                                   apiKeyStatus.service_health.overall_status === 'partial' ? 'orange' : 'red'">
+            {{ apiKeyStatus.service_health.overall_status === 'healthy' ? 'check_circle' : 
+               apiKeyStatus.service_health.overall_status === 'partial' ? 'warning' : 'error' }}
+          </mat-icon>
+          Overall Status: {{ apiKeyStatus.service_health.overall_status | titlecase }}
+        </mat-card-title>
+      </mat-card-header>
+      <mat-card-actions>
+        <button mat-raised-button color="primary" (click)="testAPIKeys()" [disabled]="apiKeyLoading">
+          <mat-icon>network_check</mat-icon>
+          Test All Services
+        </button>
+        <button mat-raised-button color="warn" (click)="clearAllAPIKeys()" [disabled]="apiKeyLoading">
+          <mat-icon>delete_forever</mat-icon>
+          Clear All Keys
+        </button>
+      </mat-card-actions>
+    </mat-card>
+
+    <!-- Error Display -->
+    <mat-card class="error-card" *ngIf="apiKeyError">
+      <mat-card-content>
+        <div class="error-content">
+          <mat-icon color="warn">error</mat-icon>
+          <span>{{ apiKeyError }}</span>
+        </div>
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Loading Spinner -->
+    <div class="loading-container" *ngIf="apiKeyLoading && !apiKeyStatus">
+      <mat-spinner diameter="40"></mat-spinner>
+      <p>Loading API configuration...</p>
+    </div>
+
+    <!-- Service Configuration Cards -->
+    <div class="services-grid" *ngIf="apiKeyStatus">
+      
+      <!-- OpenRouter Configuration -->
+      <mat-card class="service-card">
+        <mat-card-header>
+          <mat-card-title>
+            <div class="service-header">
+              <span>OpenRouter (LLM)</span>
+              <mat-icon [style.color]="getServiceStatusColor(apiKeyStatus.service_health.services.openrouter)">
+                {{ getServiceStatusIcon(apiKeyStatus.service_health.services.openrouter) }}
+              </mat-icon>
+            </div>
+          </mat-card-title>
+          <mat-card-subtitle>
+            Status: {{ apiKeyStatus.service_health.services.openrouter.status | titlecase }}
+          </mat-card-subtitle>
+        </mat-card-header>
+        
+        <mat-card-content>
+          <div class="key-display" *ngIf="editingService !== 'openrouter'">
+            <div class="key-info">
+              <mat-icon>{{ isServiceConfigured('openrouter_api_key') ? 'vpn_key' : 'vpn_key_off' }}</mat-icon>
+              <span class="key-value">
+                {{ apiKeyStatus.keys.openrouter_api_key || 'Not configured' }}
+              </span>
+            </div>
+            <button mat-icon-button (click)="startEditing('openrouter')">
+              <mat-icon>edit</mat-icon>
+            </button>
+          </div>
+
+          <div class="key-edit" *ngIf="editingService === 'openrouter'">
+            <mat-form-field appearance="outline" class="api-key-input">
+              <mat-label>OpenRouter API Key</mat-label>
+              <input matInput type="password" [(ngModel)]="openrouterKey" 
+                     placeholder="sk-or-v1-..." autocomplete="new-password">
+              <mat-hint>Get your key from openrouter.ai</mat-hint>
+            </mat-form-field>
+            <div class="edit-actions">
+              <button mat-raised-button color="primary" (click)="updateAPIKey('openrouter')" 
+                      [disabled]="apiKeyLoading">
+                <mat-icon>save</mat-icon>
+                Save
+              </button>
+              <button mat-button (click)="cancelEditing()">Cancel</button>
+            </div>
+          </div>
+        </mat-card-content>
+      </mat-card>
+
+      <!-- Voyage Configuration -->
+      <mat-card class="service-card">
+        <mat-card-header>
+          <mat-card-title>
+            <div class="service-header">
+              <span>Voyage AI (Embeddings)</span>
+              <mat-icon [style.color]="getServiceStatusColor(apiKeyStatus.service_health.services.voyage)">
+                {{ getServiceStatusIcon(apiKeyStatus.service_health.services.voyage) }}
+              </mat-icon>
+            </div>
+          </mat-card-title>
+          <mat-card-subtitle>
+            Status: {{ apiKeyStatus.service_health.services.voyage.status | titlecase }}
+          </mat-card-subtitle>
+        </mat-card-header>
+        
+        <mat-card-content>
+          <div class="key-display" *ngIf="editingService !== 'voyage'">
+            <div class="key-info">
+              <mat-icon>{{ isServiceConfigured('voyage_api_key') ? 'vpn_key' : 'vpn_key_off' }}</mat-icon>
+              <span class="key-value">
+                {{ apiKeyStatus.keys.voyage_api_key || 'Not configured' }}
+              </span>
+            </div>
+            <button mat-icon-button (click)="startEditing('voyage')">
+              <mat-icon>edit</mat-icon>
+            </button>
+          </div>
+
+          <div class="key-edit" *ngIf="editingService === 'voyage'">
+            <mat-form-field appearance="outline" class="api-key-input">
+              <mat-label>Voyage API Key</mat-label>
+              <input matInput type="password" [(ngModel)]="voyageKey" 
+                     placeholder="pa-..." autocomplete="new-password">
+              <mat-hint>Get your key from voyageai.com</mat-hint>
+            </mat-form-field>
+            <div class="edit-actions">
+              <button mat-raised-button color="primary" (click)="updateAPIKey('voyage')" 
+                      [disabled]="apiKeyLoading">
+                <mat-icon>save</mat-icon>
+                Save
+              </button>
+              <button mat-button (click)="cancelEditing()">Cancel</button>
+            </div>
+          </div>
+        </mat-card-content>
+      </mat-card>
+
+      <!-- Ollama Configuration -->
+      <mat-card class="service-card">
+        <mat-card-header>
+          <mat-card-title>
+            <div class="service-header">
+              <span>Ollama (Local LLM)</span>
+              <mat-icon [style.color]="getServiceStatusColor(apiKeyStatus.service_health.services.ollama)">
+                {{ getServiceStatusIcon(apiKeyStatus.service_health.services.ollama) }}
+              </mat-icon>
+            </div>
+          </mat-card-title>
+          <mat-card-subtitle>
+            Status: {{ apiKeyStatus.service_health.services.ollama.status | titlecase }}
+            <span *ngIf="apiKeyStatus.service_health.services.ollama.models?.length">
+              ({{ apiKeyStatus.service_health.services.ollama.models?.length }} models)
+            </span>
+          </mat-card-subtitle>
+        </mat-card-header>
+        
+        <mat-card-content>
+          <div class="key-display" *ngIf="editingService !== 'ollama'">
+            <div class="key-info">
+              <mat-icon>{{ isServiceConfigured('ollama_base_url') ? 'computer' : 'computer_off' }}</mat-icon>
+              <span class="key-value">
+                {{ apiKeyStatus.keys.ollama_base_url || 'Not configured' }}
+              </span>
+            </div>
+            <button mat-icon-button (click)="startEditing('ollama')">
+              <mat-icon>edit</mat-icon>
+            </button>
+          </div>
+
+          <div class="key-edit" *ngIf="editingService === 'ollama'">
+            <mat-form-field appearance="outline" class="api-key-input">
+              <mat-label>Ollama Base URL</mat-label>
+              <input matInput type="url" [(ngModel)]="ollamaUrl" 
+                     placeholder="http://localhost:11434">
+              <mat-hint>Local Ollama server URL</mat-hint>
+            </mat-form-field>
+            <div class="edit-actions">
+              <button mat-raised-button color="primary" (click)="updateAPIKey('ollama')" 
+                      [disabled]="apiKeyLoading">
+                <mat-icon>save</mat-icon>
+                Save
+              </button>
+              <button mat-button (click)="cancelEditing()">Cancel</button>
+            </div>
+          </div>
+
+          <!-- Show available models for Ollama -->
+          <div class="models-list" *ngIf="apiKeyStatus.service_health.services.ollama.models?.length">
+            <h5>Available Models:</h5>
+            <mat-chip-set>
+              <mat-chip *ngFor="let model of apiKeyStatus.service_health?.services?.ollama?.models?.slice(0, 3) || []">
+                {{ model }}
+              </mat-chip>
+             <mat-chip *ngIf="(apiKeyStatus?.service_health?.services?.ollama?.models?.length || 0) > 3">
+  +{{ (apiKeyStatus?.service_health?.services?.ollama?.models?.length ?? 0) - 3 }} more
+</mat-chip>
+            </mat-chip-set>
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+
+    <!-- Configuration Tips -->
+    <mat-card class="tips-card">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon>lightbulb</mat-icon>
+          Configuration Tips
+        </mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <ul class="tips-list">
+          <li><strong>OpenRouter:</strong> Primary LLM service for chat responses. Get API key from openrouter.ai</li>
+          <li><strong>Voyage AI:</strong> High-quality embeddings for better search. Get API key from voyageai.com</li>
+          <li><strong>Ollama:</strong> Local LLM fallback. Install Ollama and pull models like 'deepseek-v2:latest'</li>
+          <li><strong>Fallback:</strong> Services will fallback to each other if one fails</li>
+          <li><strong>Security:</strong> API keys are encrypted and stored securely in the container</li>
+        </ul>
+      </mat-card-content>
+    </mat-card>
+  </div>
+</mat-tab>
+  </div>
+</div>

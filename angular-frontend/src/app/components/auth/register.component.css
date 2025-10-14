@@ -1,0 +1,15 @@
+.register-container {
+  max-width: 400px;
+  margin: auto;
+  padding: 2rem;
+}
+
+.full-width {
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+.error-message {
+  color: red;
+  margin-top: 1rem;
+}

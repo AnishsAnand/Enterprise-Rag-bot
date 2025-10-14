@@ -1,0 +1,118 @@
+<div class="support-widget" [class.expanded]="isExpanded">
+  <button class="widget-toggle" (click)="toggleWidget()" mat-fab color="primary">
+    <mat-icon>{{ isExpanded ? 'close' : 'support_agent' }}</mat-icon>
+  </button>
+
+  <div class="widget-content" *ngIf="isExpanded">
+    <mat-card>
+      <mat-card-header>
+        <mat-card-title>Support Center</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <mat-tab-group>
+          <mat-tab label="Chat">
+            <div class="chat-container">
+              <div class="chat-messages" #chatMessages>
+                <div *ngFor="let message of chatHistory" 
+                     class="message" 
+                     [class.user-message]="message.sender === 'user'"
+                     [class.agent-message]="message.sender === 'agent'">
+                  <div class="message-content">{{ message.message }}</div>
+                  <div class="message-time">{{ message.timestamp | date:'short' }}</div>
+                </div>
+                <div *ngIf="chatLoading" class="message agent-message">
+                  <div class="message-content">
+                    <mat-icon class="typing-indicator">hourglass_empty</mat-icon>
+                    Typing...
+                  </div>
+                </div>
+              </div>
+              
+              <form [formGroup]="chatForm" (ngSubmit)="sendMessage()" class="chat-input">
+                <mat-form-field appearance="outline" class="message-input">
+                  <input matInput formControlName="message" placeholder="Type your message..." #messageInput>
+                </mat-form-field>
+                <button mat-icon-button type="submit" [disabled]="chatForm.invalid || chatLoading">
+                  <mat-icon>send</mat-icon>
+                </button>
+              </form>
+            </div>
+          </mat-tab>
+          <mat-tab label="Help">
+            <div class="help-container">
+              <div class="articles-list">
+                <mat-accordion>
+                  <mat-expansion-panel *ngFor="let article of helpArticles">
+                    <mat-expansion-panel-header>
+                      <mat-panel-title>{{ article.title }}</mat-panel-title>
+                      <mat-panel-description>{{ article.category }}</mat-panel-description>
+                    </mat-expansion-panel-header>
+                    <div class="article-content">
+                      <p>{{ article.content }}</p>
+                      <div class="article-tags">
+                        <span *ngFor="let tag of article.tags" class="tag">#{{ tag }}</span>
+                      </div>
+                    </div>
+                  </mat-expansion-panel>
+                </mat-accordion>
+              </div>
+            </div>
+          </mat-tab>
+          <mat-tab label="Contact">
+            <div class="contact-container">
+              <form [formGroup]="contactForm" (ngSubmit)="submitTicket()">
+                <mat-form-field appearance="outline">
+                  <mat-label>Name</mat-label>
+                  <input matInput formControlName="name">
+                </mat-form-field>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>Email</mat-label>
+                  <input matInput type="email" formControlName="email">
+                </mat-form-field>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>Issue Type</mat-label>
+                  <mat-select formControlName="type">
+                    <mat-option value="technical">Technical Issue</mat-option>
+                    <mat-option value="billing">Billing Question</mat-option>
+                    <mat-option value="feature">Feature Request</mat-option>
+                    <mat-option value="other">Other</mat-option>
+                  </mat-select>
+                </mat-form-field>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>Priority</mat-label>
+                  <mat-select formControlName="priority">
+                    <mat-option value="low">Low</mat-option>
+                    <mat-option value="medium">Medium</mat-option>
+                    <mat-option value="high">High</mat-option>
+                    <mat-option value="urgent">Urgent</mat-option>
+                  </mat-select>
+                </mat-form-field>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>Subject</mat-label>
+                  <input matInput formControlName="subject">
+                </mat-form-field>
+
+                <mat-form-field appearance="outline">
+                  <mat-label>Description</mat-label>
+                  <textarea matInput formControlName="description" rows="4"></textarea>
+                </mat-form-field>
+
+                <div class="form-actions">
+                  <button mat-raised-button color="primary" type="submit" [disabled]="contactForm.invalid || ticketLoading">
+                    <mat-icon *ngIf="ticketLoading">hourglass_empty</mat-icon>
+                    <mat-icon *ngIf="!ticketLoading">send</mat-icon>
+                    {{ ticketLoading ? 'Submitting...' : 'Submit Ticket' }}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </mat-tab>
+        </mat-tab-group>
+      </mat-card-content>
+    </mat-card>
+  </div>
+</div>

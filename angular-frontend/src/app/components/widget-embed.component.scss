@@ -1,0 +1,30 @@
+:host {
+  all: initial;
+}
+
+html, body {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.rag-widget {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.widget-content {
+  background: transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+/* Override any Angular Material backgrounds */
+::ng-deep .mat-mdc-card,
+::ng-deep .mat-mdc-dialog-container,
+::ng-deep .mat-mdc-tab-body-content {
+  background: transparent !important;
+  box-shadow: none !important;
+}

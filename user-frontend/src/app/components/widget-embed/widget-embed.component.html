@@ -1,0 +1,31 @@
+<!-- embed wrapper fills the iframe viewport -->
+<div class="embed-wrapper">
+  <!-- widget-root is used as a host for overlays (CDK) via the custom OverlayContainer -->
+  <div class="widget-root" role="application" aria-label="RAG Widget">
+    <!-- The visible panel — this is the one that must have a controlled semi-opaque background -->
+    <div class="widget-panel">
+      <header class="widget-header">
+        <div class="header-left">
+          <strong>RAG Chat</strong>
+        </div>
+        <div class="header-right">v1</div>
+      </header>
+      <div class="widget-overlay-container">
+  <div class="widget-content">
+    <app-chat></app-chat>
+  </div>
+</div>
+
+      <main class="widget-body">
+        <app-chat></app-chat>
+      </main>
+
+      <footer class="widget-footer">
+        <div class="footer-form">
+          <input type="text" placeholder="Type a message…" aria-label="Type a message" />
+          <button class="send-btn" aria-label="Send">Send</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,149 @@
+/* ======================
+   WIDGET TRANSPARENCY FIX
+   ====================== */
+
+/* Material Design components - keep transparent */
+.mat-mdc-card,
+.mat-mdc-dialog-container,
+.mat-mdc-snack-bar-container,
+.mdc-dialog__surface {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Root and wrapper elements - MUST be transparent */
+html,
+body,
+app-root,
+app-rag-widget,
+app-widget-embed,
+.rag-widget-host,
+.rag-widget,
+.rw,
+.frame-wrap {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  isolation: isolate !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Iframe containers - transparent */
+iframe,
+iframe[id*="rag-widget"] {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+}
+
+/* Only the actual widget content panel should have background */
+.widget-content {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  border-radius: 18px !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18) !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  opacity: 1 !important;
+  isolation: isolate !important;
+}
+
+/* Widget header with gradient */
+.widget-header {
+  background: linear-gradient(135deg, #4a6cf7, #d84ef4) !important;
+  color: #fff !important;
+  border-radius: 18px 18px 0 0 !important;
+  opacity: 1 !important;
+}
+
+/* Widget body and footer - keep opaque for readability */
+.widget-body {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  opacity: 1 !important;
+  padding: 12px 16px !important;
+}
+
+.widget-footer {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  border-top: 1px solid rgba(0, 0, 0, 0.1) !important;
+  border-radius: 0 0 18px 18px !important;
+  padding: 10px 12px !important;
+  opacity: 1 !important;
+}
+
+/* Chat sections within widget */
+.widget-body .chat-section,
+.widget-body .messages-area,
+.widget-body .chat-container {
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Dark theme adjustments */
+.dark-theme .widget-content {
+  background: #1f1f1f !important;
+  background-color: #1f1f1f !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark-theme .widget-body,
+.dark-theme .widget-footer {
+  background: #1f1f1f !important;
+  background-color: #1f1f1f !important;
+  color: #fff !important;
+}
+
+.dark-theme .widget-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Remove any wrapper backgrounds that might cause bleed */
+.widget-wrapper,
+.widget-container,
+.chat-wrapper,
+.embed-wrapper,
+.widget-root,
+.cdk-overlay-container,
+.cdk-overlay-backdrop,
+.cdk-global-overlay-wrapper {
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+
+/* Hide ghost elements */
+.ghost,
+.glass,
+.panel-ghost,
+.transparent-backdrop,
+.widget-preview,
+.widget-ghost {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Ensure page-level transparency */
+@supports (backdrop-filter: none) {
+  html,
+  body {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+
+/* High specificity rule to ensure transparency of outer containers */
+html body app-root,
+html body app-widget-embed,
+html body app-rag-widget,
+html body .rag-widget-host,
+html body .rag-widget {
+  background: transparent !important;
+  background-color: transparent !important;
+}

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ChatBot</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:0;background:#f3f4f6}
+    .chat{max-width:800px;margin:30px auto;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.08);padding:16px}
+    .messages{height:450px;overflow:auto;border:1px solid #e5e7eb;padding:12px;border-radius:6px;background:#fafafa}
+    .msg{margin-bottom:10px}
+    .msg.user{text-align:right}
+    .msg .bubble{display:inline-block;padding:8px 12px;border-radius:12px;max-width:80%;}
+    .msg.user .bubble{background:#0ea5a4;color:#fff}
+    .msg.bot .bubble{background:#e6e6e6;color:#111}
+    .controls{display:flex;gap:8px;margin-top:12px}
+    input[type="text"]{flex:1;padding:10px;border-radius:6px;border:1px solid #d1d5db}
+    button{padding:10px 14px;border-radius:6px;border:none;background:#0ea5a4;color:#fff;cursor:pointer}
+    .small{font-size:12px;color:#6b7280}
+  </style>
+</head>
+<body>
+  <div class="chat">
+    <h2>RAG Chat — User</h2>
+    <div class="messages" id="messages"></div>
+    <div class="controls">
+      <input id="input" type="text" placeholder="Ask anything..." />
+      <button id="send">Send</button>
+    </div>
+    <div class="small">This client calls <code>/api/chat/query</code> on the same origin.</div>
+  </div>
+<script>
+const messagesEl = document.getElementById('messages');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+
+function addMessage(text,who='bot'){
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  const b = document.createElement('div');
+  b.className = 'bubble';
+  b.textContent = text;
+  div.appendChild(b);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function sendQuery(){
+  const q = input.value.trim();
+  if(!q) return;
+  addMessage(q,'user');
+  input.value = '';
+  addMessage('… thinking','bot');
+  try{
+    const res = await fetch('/api/chat/query', {
+      method:'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({query: q, max_results: 10, include_sources: false, search_depth: 'balanced'})
+    });
+    const data = await res.json();
+    messagesEl.lastChild.remove(); // remove '… thinking'
+    if(res.ok){
+      addMessage(data.answer || data.response || JSON.stringify(data),'bot');
+    } else {
+      addMessage('Error: ' + (data.detail || JSON.stringify(data)),'bot');
+    }
+  }catch(e){
+    messagesEl.lastChild.remove();
+    addMessage('Network error: ' + e,'bot');
+  }
+}
+
+send.addEventListener('click', sendQuery);
+input.addEventListener('keydown', (e)=>{ if(e.key==='Enter') sendQuery(); });
+
+addMessage('Welcome! Ask me something about the knowledge base.','bot');
+</script>
+</body>
+</html>

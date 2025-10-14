@@ -1,0 +1,164 @@
+/* Global reset for transparency only where needed */
+:host,
+html,
+body {
+  background: transparent !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  height: 100%;
+  width: 100%;
+  overflow: hidden !important;
+  color: var(--text-primary, #111);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Solid color variables */
+:root {
+  --card-background: #ffffff; /* ✅ solid white — removes glass effect */
+  --panel-radius: 16px;
+  --panel-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  --text-primary: rgba(0,0,0,0.87);
+  --text-secondary: rgba(0,0,0,0.6);
+  --divider: rgba(0,0,0,0.12);
+  --primary: #667eea;
+  --accent: #805ad5;
+}
+
+.dark-theme {
+  --card-background: #1e1e1e; /* ✅ dark mode solid background */
+  --text-primary: rgba(255,255,255,0.92);
+  --divider: rgba(255,255,255,0.08);
+  --primary: #90caf9;
+  --accent: #d3aaff;
+}
+
+/* wrapper without extra spacing */
+.embed-wrapper {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: auto;
+  height: auto;
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: flex-end;
+  z-index: 99999;
+}
+
+/* Correct alignment to bottom-right corner */
+.widget-root {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  background: transparent !important;
+  width: auto;
+  height: auto;
+  pointer-events: auto;
+}
+
+/* ✅ Main visible panel (no glass, solid background, restored position) */
+.widget-panel {
+  width: 380px;
+  max-width: 92vw;
+  height: 520px;
+  background: #ffffff !important;         /* SOLID white */
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18) !important;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid rgba(0,0,0,0.06) !important;
+  color: var(--text-primary);
+}
+
+/* header / body / footer */
+.widget-header {
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #fff;
+  font-weight: 600;
+}
+
+.widget-body {
+  flex: 1;
+  padding: 12px;
+  overflow-y: auto;
+  background: #ffffff !important;
+  color: var(--text-primary);
+  margin: 0 !important;
+  border-radius: 0 0 18px 18px !important;
+}
+.widget-footer {
+  padding: 10px 12px;
+  border-top: 1px solid var(--divider);
+  background: #f9f9f9 !important;
+}
+
+/* Keep internal Angular Material transparent if used inside */
+.mat-card,
+.mat-mdc-card,
+.mdc-surface,
+.mat-card *,
+.mat-mdc-card *,
+.mdc-surface * {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Chat container */
+app-chat {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Footer form styling */
+.footer-form {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.footer-form input[type="text"] {
+  flex: 1;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,0,0,0.1);
+  background: #ffffff;
+  color: var(--text-primary);
+}
+
+.footer-form .send-btn {
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+  border: none;
+  color: white;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: opacity 0.3s ease;
+}
+
+.footer-form .send-btn:hover {
+  opacity: 0.85;
+}
+
+/* Responsive */
+@media (max-width: 480px) {
+  .widget-panel {
+    width: 94vw;
+    height: 78vh;
+  }
+}
+.dark-theme .widget-panel {
+  background: rgba(18, 18, 18, 0.05); /* very light transparent dark */
+  border: 1px solid rgba(255,255,255,0.08);
+}

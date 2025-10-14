@@ -1,0 +1,1445 @@
+from typing import List, Dict, Any, Optional, Tuple
+import os
+import re
+import json
+import openai
+import time
+import asyncio
+import httpx
+from datetime import datetime
+import logging
+from dotenv import load_dotenv
+from functools import partial, lru_cache
+from httpx import TimeoutException, ConnectError
+import difflib
+import hashlib
+
+load_dotenv()
+
+HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "45"))
+MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "3"))
+RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
+EMBEDDING_SIZE_FALLBACK = int(os.getenv("EMBEDDING_SIZE_FALLBACK", "1536"))
+HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "avsolatorio/GIST-Embedding-v0")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "meta/Llama-4-Scout-17B-16E-Instruct")
+GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.ERROR)
+
+
+class AIServiceError(Exception):
+    """Custom exception for AI service errors"""
+    pass
+
+
+def _exp_backoff_sleep(attempt: int):
+    """Exponential backoff with jitter"""
+    import random
+    sleep_for = (RETRY_BACKOFF_BASE ** (attempt - 1)) + random.uniform(0, 0.5)
+    time.sleep(min(sleep_for, 30))
+
+
+async def _async_exp_backoff_sleep(attempt: int):
+    """Async exponential backoff with jitter"""
+    import random
+    sleep_for = (RETRY_BACKOFF_BASE ** (attempt - 1)) + random.uniform(0, 0.5)
+    await asyncio.sleep(min(sleep_for, 30))
+
+
+class AIService:
+    def __init__(self):
+        self.grok_client: Optional[Any] = None
+        self.http_client: Optional[httpx.AsyncClient] = None
+        self.is_healthy: bool = False
+        self.last_error: Optional[str] = None
+        self._embedding_cache: Dict[str, List[float]] = {}
+        self._max_cache_size = 1000
+        self.setup_clients()
+
+        # Enhanced response templates with quality markers
+        self.response_templates = {
+            "informational": (
+                "Provide a comprehensive and accurate answer based on the context below. "
+                "Focus on factual information and cite specific details from the sources. "
+                "Structure your response logically with clear sections. "
+                "If information is insufficient, clearly state what's missing."
+            ),
+            "instructional": (
+                "Give clear, step-by-step instructions based on the information provided. "
+                "Ensure accuracy and completeness. Number each step clearly. "
+                "Include warnings or important notes where relevant. "
+                "Verify all technical details against the provided context."
+            ),
+            "troubleshooting": (
+                "Analyze the issue systematically and provide a structured solution with clear steps. "
+                "Reference specific technical details from the context. "
+                "Prioritize the most common solutions first. "
+                "Include diagnostic steps if applicable."
+            ),
+            "explanatory": (
+                "Explain the concept clearly with examples and practical applications. "
+                "Use the provided context to ensure accuracy. "
+                "Break down complex ideas into understandable parts. "
+                "Include relevant analogies or comparisons when helpful."
+            ),
+        }
+
+        self.image_styles = {
+            "technical": "clean, professional technical diagram with clear labels and arrows",
+            "instructional": "clear step-by-step visual guide with numbered steps and annotations",
+            "conceptual": "modern clean illustration with good contrast and clear visual hierarchy",
+            "troubleshooting": "problem-solution visual with before/after comparison and clear indicators",
+        }
+
+    # ------------------ Setup & Health ------------------
+
+    def setup_clients(self) -> None:
+        """Initialize HTTP client and OpenAI-compatible Grok SDK client"""
+        try:
+            limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+            timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=15.0, read=HTTP_TIMEOUT_SECONDS)
+            self.http_client = httpx.AsyncClient(
+                timeout=timeout, 
+                limits=limits, 
+                trust_env=True,
+                follow_redirects=True
+            )
+            logger.info("✅ HTTP client initialized with enhanced settings")
+        except Exception as e:
+            logger.error(f"❌ HTTP client setup failed: {e}")
+            self.http_client = None
+
+        grok_key = os.getenv("GROK_API_KEY")
+        if not grok_key:
+            logger.critical("❌ CRITICAL: GROK_API_KEY not found in environment variables")
+            self.last_error = "GROK_API_KEY not configured"
+            self.grok_client = None
+            self.is_healthy = False
+            return
+
+        try:
+            self.grok_client = openai.OpenAI(
+                base_url=GROK_BASE_URL, 
+                api_key=grok_key, 
+                timeout=HTTP_TIMEOUT_SECONDS,
+                max_retries=0  # We handle retries manually
+            )
+            logger.info("✅ Grok client initialized")
+
+            ok = self._test_grok_connection()
+            if ok:
+                logger.info("✅ Grok service is healthy and ready")
+                self.is_healthy = True
+                self.last_error = None
+            else:
+                logger.warning("⚠️ Grok service connection test failed")
+                self.is_healthy = False
+                if not self.last_error:
+                    self.last_error = "Grok connection test failed"
+        except Exception as e:
+            logger.error(f"❌ Grok client setup failed: {e}")
+            self.last_error = str(e)
+            self.grok_client = None
+            self.is_healthy = False
+
+    def _test_grok_connection(self) -> bool:
+        """Test Grok connection with minimal request"""
+        if not self.grok_client:
+            self.last_error = "Grok client not initialized"
+            return False
+
+        try:
+            resp = self.grok_client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=5,
+                timeout=10
+            )
+            
+            if resp and (getattr(resp, "choices", None) or (isinstance(resp, dict) and resp.get("choices"))):
+                return True
+            
+            self.last_error = "Unexpected response structure from Grok"
+            return False
+            
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "permission" in err_str.lower():
+                self.last_error = "No credits/permission for Grok API (403)"
+                logger.error("❌ Grok API permission denied")
+            elif "401" in err_str or "unauthorized" in err_str.lower():
+                self.last_error = "Invalid Grok API key (401)"
+                logger.error("❌ Grok API authentication failed")
+            else:
+                self.last_error = f"Connection test failure: {err_str[:200]}"
+            return False
+
+    def _ensure_service_available(self) -> None:
+        """Raise if Grok SDK client isn't available"""
+        if not self.grok_client:
+            error_msg = f"Grok service unavailable: {self.last_error or 'Not initialized'}"
+            logger.error(error_msg)
+            raise AIServiceError(error_msg)
+
+    # ------------------ Utilities ------------------
+
+    def _get_text_hash(self, text: str) -> str:
+        """Generate hash for caching"""
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+    def strip_markdown(self, text: str) -> str:
+        """Enhanced markdown removal"""
+        if not text:
+            return ""
+        
+        # Remove code blocks
+        text = re.sub(r"```[\s\S]*?```", "", text)
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        
+        # Remove formatting
+        text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)  # bold+italic
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # bold
+        text = re.sub(r"\*(.+?)\*", r"\1", text)  # italic
+        text = re.sub(r"__(.+?)__", r"\1", text)  # bold alt
+        text = re.sub(r"_(.+?)_", r"\1", text)  # italic alt
+        
+        # Remove links but keep text
+        text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+        
+        # Remove HTML tags
+        text = re.sub(r"<[^>]+>", "", text)
+        
+        # Remove headers
+        text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+        
+        # Normalize lists
+        text = re.sub(r"^[\-\*\+]\s*", "• ", text, flags=re.MULTILINE)
+        text = re.sub(r"^\d+\.\s*", "", text, flags=re.MULTILINE)
+        
+        # Normalize whitespace
+        text = re.sub(r"\r\n?", "\n", text)
+        text = re.sub(r"\n\s*\n", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        
+        return text.strip()
+
+    def _classify_query_type(self, query: str) -> str:
+        """Enhanced query classification"""
+        query_lower = (query or "").lower()
+        
+        # Instructional patterns
+        if any(word in query_lower for word in [
+            "how to", "steps", "guide", "tutorial", "instructions", 
+            "procedure", "process", "way to", "method"
+        ]):
+            return "instructional"
+        
+        # Troubleshooting patterns
+        if any(word in query_lower for word in [
+            "error", "problem", "issue", "fix", "troubleshoot", "debug", 
+            "not working", "broken", "failed", "crash", "bug"
+        ]):
+            return "troubleshooting"
+        
+        # Explanatory patterns
+        if any(word in query_lower for word in [
+            "what is", "explain", "define", "meaning", "concept", 
+            "theory", "why", "understand", "difference between"
+        ]):
+            return "explanatory"
+        
+        # Default to informational
+        return "informational"
+
+    def _extract_message_content(self, choice_entry: Any) -> Optional[str]:
+        """Safely extract content from various response shapes"""
+        try:
+            # Try object attributes first
+            message_obj = getattr(choice_entry, "message", None)
+            if message_obj is not None:
+                content = getattr(message_obj, "content", None)
+                if content:
+                    return content
+                if isinstance(message_obj, dict):
+                    content = message_obj.get("content")
+                    if content:
+                        return content
+            
+            # Try text attribute
+            text_attr = getattr(choice_entry, "text", None)
+            if text_attr:
+                return text_attr
+            
+            # Try dict-like access
+            if isinstance(choice_entry, dict):
+                if "message" in choice_entry and isinstance(choice_entry["message"], dict):
+                    return choice_entry["message"].get("content")
+                if "text" in choice_entry:
+                    return choice_entry.get("text")
+        except Exception as e:
+            logger.debug(f"Error extracting message content: {e}")
+            return None
+        
+        return None
+
+    # ------------------ Embeddings with Caching ------------------
+
+    async def _generate_embeddings_http(self, texts: List[str], model: str) -> List[List[float]]:
+        """HTTP fallback for embeddings with retry logic"""
+        if not self.http_client:
+            raise AIServiceError("HTTP client unavailable for embedding")
+
+        grok_key = os.getenv("GROK_API_KEY")
+        if not grok_key:
+            raise AIServiceError("GROK_API_KEY not available")
+
+        headers = {
+            "Authorization": f"Bearer {grok_key}",
+            "Content-Type": "application/json"
+        }
+        embeddings: List[List[float]] = []
+
+        for i, text in enumerate(texts):
+            # Check cache first
+            text_hash = self._get_text_hash(text)
+            if text_hash in self._embedding_cache:
+                embeddings.append(self._embedding_cache[text_hash])
+                continue
+
+            last_exc: Optional[Exception] = None
+            payload_text = text if text and text.strip() else " "
+            
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    payload = {"input": payload_text, "model": model}
+                    resp = await self.http_client.post(
+                        f"{GROK_BASE_URL}/embeddings",
+                        headers=headers,
+                        json=payload,
+                        timeout=30
+                    )
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, dict) and data.get("data"):
+                            emb = data["data"][0].get("embedding")
+                            if emb and isinstance(emb, list) and len(emb) > 0:
+                                # Cache the embedding
+                                if len(self._embedding_cache) < self._max_cache_size:
+                                    self._embedding_cache[text_hash] = emb
+                                embeddings.append(emb)
+                                break
+                            else:
+                                last_exc = RuntimeError("Invalid embedding content")
+                        else:
+                            last_exc = RuntimeError(f"Invalid response: {resp.text[:200]}")
+                    else:
+                        last_exc = RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+                        
+                except Exception as e:
+                    last_exc = e
+                    logger.debug(f"Embedding attempt {attempt} failed: {e}")
+
+                if attempt < MAX_RETRIES:
+                    await _async_exp_backoff_sleep(attempt)
+                else:
+                    logger.error(f"❌ HTTP embedding failed for index {i}: {last_exc}")
+                    embeddings.append([0.0] * EMBEDDING_SIZE_FALLBACK)
+
+        return embeddings
+
+    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings with caching and fallback strategies"""
+        if not texts:
+            logger.warning("Empty texts provided for embedding generation")
+            return []
+
+        # Clean and validate texts
+        cleaned_texts: List[str] = []
+        for text in texts:
+            if text is None:
+                cleaned_texts.append(" ")
+            elif isinstance(text, bytes):
+                cleaned_texts.append(text.decode("utf-8", errors="replace")[:8000])
+            else:
+                s = str(text).strip()
+                if not s:
+                    s = " "
+                cleaned_texts.append(s[:8000])
+
+        # Try SDK path first
+        if self.grok_client:
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    # Try batch embedding first
+                    try:
+                        result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                partial(
+                                    self.grok_client.embeddings.create,
+                                    input=cleaned_texts,
+                                    model=EMBEDDING_MODEL
+                                )
+                            ),
+                            timeout=HTTP_TIMEOUT_SECONDS
+                        )
+                        
+                        data = getattr(result, "data", None) or (
+                            result.get("data") if isinstance(result, dict) else None
+                        )
+                        
+                        if data and len(data) == len(cleaned_texts):
+                            embeddings: List[List[float]] = []
+                            for entry in data:
+                                if isinstance(entry, dict):
+                                    emb = entry.get("embedding")
+                                else:
+                                    emb = getattr(entry, "embedding", None)
+                                
+                                if emb and isinstance(emb, list):
+                                    embeddings.append(emb)
+                                else:
+                                    embeddings.append([0.0] * EMBEDDING_SIZE_FALLBACK)
+                            
+                            logger.info(f"✅ Generated {len(embeddings)} embeddings via SDK (attempt {attempt})")
+                            return embeddings
+                            
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Batch embedding timeout on attempt {attempt}")
+                        raise
+                    except Exception as batch_error:
+                        logger.debug(f"Batch embedding failed: {batch_error}, trying per-item")
+                        
+                        # Fallback to per-item embedding
+                        embeddings = []
+                        for t in cleaned_texts:
+                            try:
+                                res = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        partial(
+                                            self.grok_client.embeddings.create,
+                                            input=t,
+                                            model=EMBEDDING_MODEL
+                                        )
+                                    ),
+                                    timeout=30
+                                )
+                                
+                                data = getattr(res, "data", None) or (
+                                    res.get("data") if isinstance(res, dict) else None
+                                )
+                                
+                                if data and len(data) > 0:
+                                    entry = data[0]
+                                    emb = entry.get("embedding") if isinstance(entry, dict) else getattr(entry, "embedding", None)
+                                    if emb and isinstance(emb, list):
+                                        embeddings.append(emb)
+                                        continue
+                            except Exception as item_error:
+                                logger.debug(f"Per-item embedding failed: {item_error}")
+                            
+                            embeddings.append([0.0] * EMBEDDING_SIZE_FALLBACK)
+                        
+                        logger.info(f"✅ Generated {len(embeddings)} embeddings via SDK per-item (attempt {attempt})")
+                        return embeddings
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ SDK embedding attempt {attempt} failed: {e}")
+                    if attempt < MAX_RETRIES:
+                        await _async_exp_backoff_sleep(attempt)
+                        continue
+                    else:
+                        logger.warning("⚠️ All SDK attempts failed, falling back to HTTP")
+                        break
+
+        # HTTP fallback
+        if self.http_client:
+            try:
+                logger.info(f"Attempting HTTP embedding with model: {EMBEDDING_MODEL}")
+                embeddings = await self._generate_embeddings_http(cleaned_texts, EMBEDDING_MODEL)
+                
+                # Check if all embeddings are zero (model failure)
+                all_zero = all(
+                    len(e) == EMBEDDING_SIZE_FALLBACK and all(v == 0.0 for v in e)
+                    for e in embeddings
+                )
+                
+                if all_zero and HOSTED_EMBEDDING_MODEL:
+                    logger.warning(f"⚠️ Primary model produced zeros, trying hosted fallback: {HOSTED_EMBEDDING_MODEL}")
+                    hosted_embeddings = await self._generate_embeddings_http(cleaned_texts, HOSTED_EMBEDDING_MODEL)
+                    return hosted_embeddings
+                
+                return embeddings
+                
+            except Exception as e:
+                logger.error(f"HTTP embedding with primary model failed: {e}")
+                if self.http_client and HOSTED_EMBEDDING_MODEL:
+                    try:
+                        logger.info(f"Attempting hosted fallback model: {HOSTED_EMBEDDING_MODEL}")
+                        hosted_embeddings = await self._generate_embeddings_http(cleaned_texts, HOSTED_EMBEDDING_MODEL)
+                        return hosted_embeddings
+                    except Exception as e2:
+                        logger.error(f"Hosted embedding fallback also failed: {e2}")
+
+        raise AIServiceError("All embedding generation methods failed")
+
+    # ------------------ Chat with Enhanced Error Handling ------------------
+
+    def _llm_chat(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, 
+                  system_message: str = None) -> str:
+        """Synchronous LLM chat call"""
+        if not prompt:
+            logger.warning("Empty prompt provided to _llm_chat")
+            return ""
+
+        self._ensure_service_available()
+
+        if system_message is None:
+            system_message = (
+                "You are a helpful AI assistant that provides accurate, comprehensive, and well-structured responses. "
+                "Focus on being practical and actionable while maintaining clarity. Always base your responses on the provided context. "
+                "Be precise, thorough, and verify facts before presenting them."
+            )
+
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            resp = self.grok_client.chat.completions.create(
+                model=CHAT_MODEL,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=0.9,
+                presence_penalty=0.1,  # Encourage diverse responses
+                frequency_penalty=0.1   # Reduce repetition
+            )
+            
+            # Extract content
+            if hasattr(resp, "choices") and resp.choices:
+                content = self._extract_message_content(resp.choices[0])
+                return content or ""
+            
+            if isinstance(resp, dict) and resp.get("choices"):
+                first = resp["choices"][0]
+                if isinstance(first, dict):
+                    if "message" in first and isinstance(first["message"], dict):
+                        return first["message"].get("content") or ""
+                    if "text" in first:
+                        return first.get("text") or ""
+            
+            return ""
+            
+        except Exception as e:
+            logger.error(f"LLM chat error: {e}")
+            raise
+
+    async def _call_chat_with_retries(self, prompt: str, max_tokens: int = 1500, 
+                                     temperature: float = 0.2, system_message: str = None,
+                                     timeout: float = None) -> str:
+        """Async wrapper with timeout and retries"""
+        if timeout is None:
+            timeout = HTTP_TIMEOUT_SECONDS
+
+        last_exc = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                fut = asyncio.to_thread(
+                    partial(self._llm_chat, prompt, max_tokens, temperature, system_message)
+                )
+                result = await asyncio.wait_for(fut, timeout=timeout)
+                
+                if result is None:
+                    result = ""
+                
+                # Validate response quality
+                if len(result.strip()) < 20:
+                    logger.warning(f"Response too short ({len(result)} chars) on attempt {attempt}")
+                    if attempt < MAX_RETRIES:
+                        await _async_exp_backoff_sleep(attempt)
+                        continue
+                
+                return result
+                
+            except asyncio.TimeoutError as te:
+                last_exc = te
+                logger.warning(f"⚠️ Chat attempt {attempt} timed out after {timeout}s")
+            except Exception as e:
+                last_exc = e
+                logger.warning(f"⚠️ Chat attempt {attempt} failed: {e}")
+
+            if attempt < MAX_RETRIES:
+                await _async_exp_backoff_sleep(attempt)
+            else:
+                logger.error(f"❌ All chat attempts failed: {last_exc}")
+                raise AIServiceError(f"Failed to generate response after {MAX_RETRIES} attempts: {last_exc}")
+
+    # ------------------ High-level Response Generation ------------------
+
+    async def generate_response(self, query: str, context: List[str]) -> str:
+        """Compatibility method for legacy code"""
+        try:
+            enhanced = await self.generate_enhanced_response(query, context, query_type=None)
+            if isinstance(enhanced, dict):
+                return enhanced.get("text", "") or ""
+            if isinstance(enhanced, str):
+                return enhanced
+            return ""
+        except Exception as e:
+            logger.error(f"generate_response failed: {e}")
+            try:
+                # Best-effort fallback
+                fallback_prompt = f"Question: {query}\n\nProvide a helpful answer based on general knowledge."
+                raw = await self._call_chat_with_retries(
+                    fallback_prompt,
+                    max_tokens=800,
+                    temperature=0.3,
+                    timeout=30
+                )
+                return raw or "I'm unable to generate a response at this time."
+            except Exception as inner:
+                logger.error(f"Fallback also failed: {inner}")
+                return "I apologize, but I'm unable to generate a response at this time due to a service error."
+
+    async def generate_expanded_context(self, query: str, context: List[str]) -> str:
+        """Generate expanded, enriched context from raw context"""
+        if not context:
+            logger.debug("No context provided for expansion")
+            return ""
+
+        # Limit context to manageable size
+        limited_context = context[:8]  # Increased from 5
+        context_text = "\n\n---\n\n".join(limited_context)
+        
+        # Smart truncation
+        if len(context_text) > 8000:
+            sentences = context_text.split(". ")
+            truncated = ""
+            for sentence in sentences:
+                if len(truncated + sentence) > 7500:
+                    break
+                truncated += sentence + ". "
+            context_text = truncated or context_text[:8000]
+
+        prompt = (
+            f"Analyze the following context and create a comprehensive, accurate summary that directly relates to the user's query.\n\n"
+            f"User Query: {query}\n\n"
+            f"Context to analyze:\n{context_text}\n\n"
+            "Instructions:\n"
+            "1. Extract ALL key facts and information that directly answer or relate to the query\n"
+            "2. Organize information logically with clear structure\n"
+            "3. Maintain absolute accuracy - don't add information not present in the context\n"
+            "4. Be comprehensive but concise - include technical details and specific examples\n"
+            "5. Focus on actionable information when applicable\n"
+            "6. Preserve important numbers, dates, and technical specifications\n"
+            "7. If there are multiple perspectives or approaches, include them all\n\n"
+            "Expanded Context:"
+        )
+
+        system_msg = (
+            "You are an expert at analyzing and synthesizing information. "
+            "Provide accurate, well-organized summaries based solely on the provided context. "
+            "Never invent facts. Preserve technical accuracy and important details."
+        )
+
+        try:
+            expanded = await self._call_chat_with_retries(
+                prompt,
+                max_tokens=1200,  # Increased for more comprehensive summaries
+                temperature=0.1,
+                system_message=system_msg,
+                timeout=HTTP_TIMEOUT_SECONDS
+            )
+            
+            # Validate expanded context
+            if expanded and len(expanded.strip()) > 50:
+                return expanded
+            else:
+                logger.warning("Expanded context too short, using original")
+                return context_text
+                
+        except AIServiceError as e:
+            logger.error(f"Failed to generate expanded context: {e}")
+            return context_text
+        except Exception as e:
+            logger.error(f"Unexpected error in context expansion: {e}")
+            return context_text
+
+    async def generate_enhanced_response(self, query: str, context: List[str], 
+                                        query_type: str = None) -> Dict[str, Any]:
+        """Generate enhanced response with quality scoring"""
+        if not query_type:
+            query_type = self._classify_query_type(query)
+
+        # Expand context
+        try:
+            expanded_context = await self.generate_expanded_context(query, context)
+        except Exception as e:
+            logger.error(f"Context expansion failed: {e}")
+            expanded_context = "\n\n".join(context[:5]) if context else ""
+
+        # Get template for query type
+        template = self.response_templates.get(query_type, self.response_templates["informational"])
+
+        prompt = (
+            f"{template}\n\n"
+            f"Expanded Context:\n{expanded_context}\n\n"
+            f"User Question: {query}\n\n"
+            "Instructions for your response:\n"
+            "1. Base your answer STRICTLY on the provided context\n"
+            "2. Be specific and cite relevant details from the sources\n"
+            "3. Structure your response clearly with appropriate sections\n"
+            "4. If the context doesn't contain sufficient information, clearly state this\n"
+            "5. Provide actionable information when possible\n"
+            "6. Maintain professional accuracy and thoroughness\n"
+            "7. Use examples from the context when available\n"
+            "8. Include relevant warnings or important notes\n\n"
+            "Response:"
+        )
+
+        system_msg = (
+            f"You are an expert assistant specializing in {query_type} responses. "
+            "Provide detailed, accurate, and actionable information based strictly on the provided context. "
+            "Be thorough and comprehensive. Never invent information."
+        )
+
+        try:
+            raw_response = await self._call_chat_with_retries(
+                prompt,
+                max_tokens=2000,  # Increased for more comprehensive responses
+                temperature=0.1,
+                system_message=system_msg,
+                timeout=HTTP_TIMEOUT_SECONDS
+            )
+        except AIServiceError as e:
+            logger.error(f"Response generation failed: {e}")
+            return {
+                "text": f"AI service is currently unavailable: {self.last_error}. Please check service configuration and try again.",
+                "quality_score": 0.0,
+                "query_type": query_type,
+                "context_used": False,
+                "expanded_context": expanded_context,
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in response generation: {e}")
+            return {
+                "text": "An unexpected error occurred while generating the response. Please try again.",
+                "quality_score": 0.0,
+                "query_type": query_type,
+                "context_used": False,
+                "expanded_context": expanded_context,
+                "error": str(e),
+            }
+
+        if not raw_response or len(raw_response.strip()) < 30:
+            logger.warning("Empty or very short response generated")
+            return {
+                "text": "I apologize, but I'm unable to generate a comprehensive response based on the available information. Please provide additional context or rephrase your question.",
+                "quality_score": 0.0,
+                "query_type": query_type,
+                "context_used": False,
+                "expanded_context": expanded_context,
+            }
+
+        clean_response = self.strip_markdown(raw_response)
+        quality_score = self._calculate_response_quality(clean_response, query, context)
+
+        return {
+            "text": clean_response,
+            "quality_score": quality_score,
+            "query_type": query_type,
+            "context_used": bool(expanded_context),
+            "expanded_context": expanded_context,
+        }
+
+    # ------------------ Stepwise & Summaries ------------------
+
+    def _extract_candidate_images_from_context(self, context_text: str) -> List[Dict[str, Any]]:
+        """Extract candidate images with enhanced pattern matching"""
+        candidates: List[Dict[str, Any]] = []
+
+        try:
+            # Markdown images: ![alt](url)
+            for m in re.finditer(
+                r'!\[([^\]]*)\]\((https?://[^\)]+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?[^\)]*)?)\)',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                alt = m.group(1).strip()
+                url = m.group(2).strip()
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                candidates.append({
+                    "url": url,
+                    "alt": alt,
+                    "caption": "",
+                    "text": excerpt
+                })
+
+            # HTML img tags
+            for m in re.finditer(
+                r'<img[^>]+src=["\'](https?://[^"\']+)["\'][^>]*>',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                url = m.group(1).strip()
+                tag = m.group(0)
+                alt_match = re.search(r'alt=["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
+                alt = alt_match.group(1).strip() if alt_match else ""
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                candidates.append({
+                    "url": url,
+                    "alt": alt,
+                    "caption": "",
+                    "text": excerpt
+                })
+
+            # Plain image URLs
+            for m in re.finditer(
+                r'(https?://\S+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?\S*)?)',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                url = m.group(1).strip().rstrip('),.;')
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                if not any(c["url"] == url for c in candidates):
+                    candidates.append({
+                        "url": url,
+                        "alt": "",
+                        "caption": "",
+                        "text": excerpt
+                    })
+
+        except Exception as e:
+            logger.debug(f"Error extracting candidate images: {e}")
+
+        # Deduplicate by URL
+        unique = []
+        seen = set()
+        for c in candidates:
+            if c["url"] not in seen:
+                seen.add(c["url"])
+                unique.append(c)
+        
+        return unique
+
+    def _score_text_similarity(self, a: str, b: str) -> float:
+        """Enhanced text similarity scoring"""
+        if not a or not b:
+            return 0.0
+        
+        a_norm = " ".join(a.lower().split())
+        b_norm = " ".join(b.lower().split())
+        
+        # Sequence matching
+        seq = difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+        
+        # Token overlap
+        a_words = set(a_norm.split())
+        b_words = set(b_norm.split())
+        overlap = len(a_words & b_words) / (len(a_words | b_words) or 1)
+        
+        # Substring bonus
+        substring_bonus = 0.0
+        if len(a_norm) > 10 and len(b_norm) > 10:
+            if a_norm in b_norm or b_norm in a_norm:
+                substring_bonus = 0.2
+        
+        return min(1.0, 0.5 * seq + 0.4 * overlap + 0.1 * substring_bonus)
+
+    def _assign_images_to_steps(self, steps: List[Dict[str, Any]], 
+                                candidate_images: List[Dict[str, Any]],
+                                query_type: str) -> List[Dict[str, Any]]:
+        """Intelligently assign images to steps with fallback to prompts"""
+        enhanced = []
+        used_image_indices = set()
+        
+        for i, step in enumerate(steps):
+            s_text = step.get("text", "") or ""
+            s_type = step.get("type", "action")
+            step_img = step.get("image") or step.get("image_url") or step.get("image_prompt")
+
+            assigned = None
+
+            # Priority 1: Use explicit image from step
+            if isinstance(step_img, dict) and step_img.get("url"):
+                assigned = {
+                    "url": step_img.get("url"),
+                    "alt": step_img.get("alt", "") or "",
+                    "caption": step_img.get("caption", "") or "",
+                }
+            elif isinstance(step_img, str) and step_img.startswith("http"):
+                assigned = {"url": step_img, "alt": "", "caption": ""}
+
+            # Priority 2: Find best matching candidate image
+            if not assigned and candidate_images:
+                best_score = 0.0
+                best_img = None
+                best_idx = None
+                
+                for idx, img in enumerate(candidate_images):
+                    if idx in used_image_indices:
+                        continue
+                    
+                    # Combine all image text for matching
+                    text_blob = " ".join([
+                        img.get("alt", ""),
+                        img.get("caption", ""),
+                        img.get("text", "")
+                    ])
+                    
+                    score = self._score_text_similarity(s_text, text_blob)
+                    
+                    # Boost score for technical images
+                    url_lower = (img.get("url") or "").lower()
+                    if any(k in url_lower for k in [
+                        "diagram", "chart", "screenshot", "flow", "graph",
+                        "architecture", "schematic", "blueprint"
+                    ]):
+                        score += 0.08
+                    
+                    # Boost for numbered/step images
+                    if f"step{i+1}" in url_lower or f"step-{i+1}" in url_lower:
+                        score += 0.15
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_img = img
+                        best_idx = idx
+                
+                # Use best match if score is reasonable
+                if best_img and best_score >= 0.15:
+                    assigned = {
+                        "url": best_img.get("url"),
+                        "alt": best_img.get("alt", ""),
+                        "caption": best_img.get("caption", "")
+                    }
+                    if best_idx is not None:
+                        used_image_indices.add(best_idx)
+
+            # Priority 3: Generate image prompt if no URL available
+            if not assigned:
+                # Check for explicit image_prompt
+                lp = step.get("image_prompt") or step.get("image_desc") or step.get("image_description")
+                if lp and isinstance(lp, str) and lp.strip():
+                    assigned = {"image_prompt": lp.strip()}
+                else:
+                    # Auto-generate descriptive prompt
+                    style = self.image_styles.get(query_type, self.image_styles["instructional"])
+                    prompt = (
+                        f"Create a clear, professional illustration for: {s_text.strip()}. "
+                        f"Style: {style}. Focus on clarity, proper labeling, and visual hierarchy. "
+                        f"The image should be self-explanatory and directly support the step description."
+                    )
+                    assigned = {"image_prompt": prompt}
+
+            # Build step output
+            step_out = {
+                "text": s_text,
+                "type": s_type,
+                "step_number": step.get("step_number", i + 1)
+            }
+            
+            if assigned:
+                step_out["image"] = assigned
+
+            enhanced.append(step_out)
+        
+        return enhanced
+
+    async def generate_stepwise_response(self, query: str, context: List[str]) -> List[Dict[str, Any]]:
+        """Generate comprehensive stepwise instructions with image assignment"""
+        organized_context = self._organize_context(context, query)
+        candidate_images = self._extract_candidate_images_from_context(organized_context)
+
+        # Prepare available images for LLM reference
+        available_images_json = json.dumps(candidate_images[:30], ensure_ascii=False, indent=2)
+        
+        query_type = self._classify_query_type(query)
+        
+        prompt = (
+            "Provide clear, actionable step-by-step instructions based on the context.\n\n"
+            f"Context:\n{organized_context}\n\n"
+            f"Available Images (reference by URL when appropriate):\n{available_images_json}\n\n"
+            f"Question: {query}\n\n"
+            "Return ONLY a JSON array of steps in this exact format:\n"
+            '[\n'
+            '  {\n'
+            '    "text": "Clear, specific step description",\n'
+            '    "type": "action",\n'
+            '    "image": {"url": "https://example.com/image.png", "alt": "Description", "caption": "Optional caption"}\n'
+            '  },\n'
+            '  {\n'
+            '    "text": "Another step",\n'
+            '    "type": "action",\n'
+            '    "image_prompt": "Description of desired illustration if no URL available"\n'
+            '  }\n'
+            ']\n\n'
+            "Requirements:\n"
+            "1. If an available image matches a step, reference it by including the URL in the image object\n"
+            "2. If no suitable image exists, provide an image_prompt describing the desired visual\n"
+            "3. Use 5-12 steps depending on complexity\n"
+            "4. Each step must be specific, clear, and actionable\n"
+            "5. Use 'action' for actionable steps, 'note' for important warnings/tips, 'info' for context\n"
+            "6. Number steps implicitly through array order\n"
+            "7. Ensure each step builds logically on previous steps\n"
+            "8. Include technical details and specifications where relevant\n\n"
+            "Output ONLY valid JSON - no additional text or explanation."
+        )
+
+        try:
+            raw = await self._call_chat_with_retries(
+                prompt,
+                max_tokens=1500,
+                temperature=0.1,
+                timeout=HTTP_TIMEOUT_SECONDS
+            )
+            steps = self._extract_json_array_safe(raw)
+        except AIServiceError as e:
+            logger.error(f"Failed to generate stepwise response: {e}")
+            return [{
+                "text": f"AI service unavailable: {self.last_error}",
+                "type": "error",
+                "step_number": 1
+            }]
+        except Exception as e:
+            logger.error(f"Unexpected error in stepwise response: {e}")
+            return [{
+                "text": "Unable to generate steps at this time.",
+                "type": "error",
+                "step_number": 1
+            }]
+
+        # Normalize steps
+        enhanced_steps = []
+        for i, step in enumerate(steps[:12]):
+            if isinstance(step, dict) and "text" in step:
+                normalized = {
+                    "text": step["text"].strip(),
+                    "type": step.get("type", "action"),
+                    "step_number": i + 1
+                }
+                
+                # Propagate image information
+                if "image" in step and isinstance(step["image"], dict):
+                    normalized["image"] = step["image"]
+                elif "image_url" in step and isinstance(step["image_url"], str):
+                    normalized["image"] = {"url": step["image_url"]}
+                elif "image_prompt" in step and isinstance(step["image_prompt"], str):
+                    normalized["image_prompt"] = step["image_prompt"]
+                
+                enhanced_steps.append(normalized)
+
+        # Fallback parsing if JSON extraction failed
+        if not enhanced_steps:
+            try:
+                fallback_steps = []
+                lines = raw.splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Try various step patterns
+                    # Try various step patterns
+                    m = re.match(
+                    r'^(?:\d+[\.\)]\s*)?(?:Step\s*\d+:)?\s*(.+)',
+                    line,
+                    re.IGNORECASE
+                    )
+                    if m:
+                        text = m.group(1).strip()
+                        if len(text) > 5:
+                            fallback_steps.append({
+                            "text": text,
+                            "type": "action",
+                            "step_number": len(fallback_steps) + 1
+                            })
+                            if len(fallback_steps) >= 12:
+                                break
+
+                    if m:
+                        text = m.group(1).strip()
+                        if len(text) > 5:
+                            fallback_steps.append({
+                                "text": text,
+                                "type": "action",
+                                "step_number": len(fallback_steps) + 1})
+                            if len(fallback_steps) >= 12:
+                                break
+                
+                enhanced_steps = fallback_steps if fallback_steps else [{
+                    "text": "No steps available.",
+                    "type": "info",
+                    "step_number": 1
+                }]
+            except Exception:
+                enhanced_steps = [{
+                    "text": "Unable to parse steps.",
+                    "type": "info",
+                    "step_number": 1
+                }]
+
+        # Assign images to steps
+        final_steps = self._assign_images_to_steps(
+            enhanced_steps,
+            candidate_images,
+            query_type
+        )
+
+        return final_steps
+
+    async def generate_summary(self, text: str, max_sentences: int = 3, max_chars: int = 600) -> str:
+        """Generate concise, informative summary"""
+        if not text or len(text.strip()) < 50:
+            return text[:max_chars] if text else ""
+
+        # Smart truncation for long texts
+        if len(text) > 10000:
+            sentences = text.split(". ")
+            truncated = ""
+            for sentence in sentences:
+                if len(truncated + sentence) > 9000:
+                    break
+                truncated += sentence + ". "
+            text = truncated or text[:10000]
+
+        prompt = (
+            f"Create a concise, informative summary of the following content.\n\n"
+            f"Requirements:\n"
+            f"- Maximum {max_sentences} sentences\n"
+            f"- Focus on key points and main ideas\n"
+            f"- Use clear, professional language\n"
+            f"- Avoid repetition and filler words\n"
+            f"- Include specific details and facts when relevant\n"
+            f"- Make it actionable and useful\n\n"
+            f"Content:\n{text}\n\n"
+            f"Summary:"
+        )
+
+        system_msg = (
+            "You are an expert at creating clear, concise summaries that capture essential information. "
+            "Focus on accuracy and utility. Never invent information."
+        )
+
+        try:
+            raw = await self._call_chat_with_retries(
+                prompt,
+                max_tokens=500,
+                temperature=0.2,
+                system_message=system_msg,
+                timeout=30
+            )
+            
+            if raw:
+                summary = self.strip_markdown(raw).strip()
+                
+                # Validate summary quality
+                if len(summary) > len(text):
+                    summary = text[:max_chars]
+                elif len(summary) < 20:
+                    # Summary too short, use beginning of text
+                    summary = text[:max_chars]
+                
+                return summary
+                
+        except (AIServiceError, Exception) as e:
+            logger.error(f"Summary generation failed: {e}")
+
+        # Fallback: extract first few sentences
+        sentences = text.split(". ")
+        summary_parts = []
+        current_length = 0
+        
+        for sentence in sentences[:max_sentences * 2]:
+            if current_length + len(sentence) > max_chars:
+                break
+            summary_parts.append(sentence)
+            current_length += len(sentence)
+        
+        return ". ".join(summary_parts) + "." if summary_parts else text[:max_chars]
+
+    # ------------------ Helpers ------------------
+
+    def _extract_json_array_safe(self, raw: str) -> List[Dict[str, Any]]:
+        """Robust JSON array extraction with multiple strategies"""
+        if not raw:
+            return []
+
+        # Strategy 1: Direct JSON parse
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            if isinstance(data, dict):
+                if "steps" in data and isinstance(data["steps"], list):
+                    return [item for item in data["steps"] if isinstance(item, dict)]
+                return [data]
+        except Exception:
+            pass
+
+        # Strategy 2: Find JSON array in text
+        try:
+            json_match = re.search(r'\[[\s\S]*\]', raw)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+        except Exception:
+            pass
+
+        # Strategy 3: Find JSON objects
+        try:
+            objects = re.findall(r'\{[\s\S]*?\}', raw)
+            steps = []
+            for obj_str in objects:
+                try:
+                    obj = json.loads(obj_str)
+                    if isinstance(obj, dict) and "text" in obj:
+                        steps.append(obj)
+                except Exception:
+                    continue
+            if steps:
+                return steps
+        except Exception:
+            pass
+
+        # Strategy 4: Parse as plain text steps
+        steps: List[Dict[str, Any]] = []
+        lines = raw.split("\n")
+        
+        patterns = [
+            r'^\s*(?:\d+[\.\)]\s*)(.+)',  # Numbered: 1. or 1)
+            r'^\s*[-*•]\s*(.+)',  # Bullet points
+            r'^\s*Step\s*\d+\s*:\s*(.+)',  # Step N:
+            r'^\s*\[?\d+\]?\s*(.+)',  # [1] or just text
+        ]
+        
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+            
+            matched = False
+            for pattern in patterns:
+                m = re.match(pattern, line, re.IGNORECASE)
+                if m:
+                    text = m.group(1).strip()
+                    if len(text) > 5:
+                        steps.append({
+                            "text": text,
+                            "type": "action"
+                        })
+                        matched = True
+                        break
+            
+            # If no pattern matched but line looks like a step, include it
+            if not matched and len(line) > 15:
+                steps.append({
+                    "text": line,
+                    "type": "action"
+                })
+            
+            if len(steps) >= 15:
+                break
+        
+        return steps[:12]
+
+    def _organize_context(self, context: List[str], query: str) -> str:
+        """Organize context by relevance with enhanced scoring"""
+        if not context:
+            return "No specific context provided."
+
+        query_terms = set(re.findall(r'\b\w+\b', (query or "").lower()))
+        
+        # Remove common stopwords from query terms
+        stopwords = {
+            'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
+            'had', 'her', 'was', 'one', 'our', 'out', 'get', 'has', 'how'
+        }
+        query_terms = query_terms - stopwords
+
+        def relevance_score(text: str) -> float:
+            if not text:
+                return 0.0
+            
+            text_lower = text.lower()
+            text_terms = set(re.findall(r'\b\w+\b', text_lower))
+            
+            # Term overlap score
+            term_overlap = len(query_terms.intersection(text_terms))
+            
+            # Length score (prefer substantial content)
+            length_score = min(len(text) / 2000.0, 1.0)
+            
+            # Phrase matching
+            phrase_matches = sum(1 for term in query_terms if term in text_lower)
+            
+            # Position bonus (first occurrence of query terms)
+            position_score = 0.0
+            for term in query_terms:
+                pos = text_lower.find(term)
+                if pos != -1:
+                    # Earlier is better
+                    position_score += max(0, 1.0 - (pos / len(text_lower)))
+            
+            return (
+                term_overlap * 3.0 +
+                phrase_matches * 2.0 +
+                length_score +
+                position_score * 0.5
+            )
+
+        # Sort by relevance
+        sorted_context = sorted(context[:12], key=relevance_score, reverse=True)
+        
+        # Format organized context
+        organized = []
+        for i, ctx in enumerate(sorted_context, 1):
+            if ctx and len(ctx.strip()) > 30:
+                # Truncate very long individual contexts
+                if len(ctx) > 3000:
+                    ctx = ctx[:3000] + "... [truncated]"
+                organized.append(f"Source {i}:\n{ctx.strip()}")
+        
+        return "\n\n".join(organized) if organized else "Limited relevant context available."
+
+    def _calculate_response_quality(self, response: str, query: str, context: List[str]) -> float:
+        """Enhanced response quality calculation"""
+        if not response or len(response.strip()) < 10:
+            return 0.0
+        
+        score = 0.2  # Base score
+        
+        # Length score (optimal range)
+        length = len(response)
+        if 300 <= length <= 2500:
+            score += 0.25
+        elif 150 <= length < 300:
+            score += 0.15
+        elif 2500 < length <= 4000:
+            score += 0.20
+        elif length > 4000:
+            score += 0.10
+
+        # Query term coverage
+        query_terms = set(re.findall(r'\b\w+\b', (query or "").lower()))
+        response_terms = set(re.findall(r'\b\w+\b', response.lower()))
+        coverage = len(query_terms.intersection(response_terms)) / max(len(query_terms), 1)
+        score += coverage * 0.25
+
+        # Structure score (paragraphs, sentences)
+        if "\n\n" in response or ". " in response:
+            paragraph_count = response.count("\n\n") + 1
+            if 2 <= paragraph_count <= 6:
+                score += 0.15
+            elif paragraph_count > 1:
+                score += 0.10
+
+        # Context utilization
+        if context:
+            context_text = " ".join(context).lower()
+            context_terms = set(re.findall(r'\b\w+\b', context_text))
+            context_usage = len(response_terms.intersection(context_terms)) / max(len(context_terms), 1)
+            score += context_usage * 0.15
+
+        return min(score, 1.0)
+
+    # ------------------ Health ------------------
+
+    async def get_service_health(self) -> Dict[str, Any]:
+        """Comprehensive service health check"""
+        health_status: Dict[str, Any] = {
+            "timestamp": datetime.now().isoformat(),
+            "service": {
+                "name": "grok",
+                "available": bool(self.grok_client),
+                "healthy": self.is_healthy,
+                "status": "unknown",
+                "last_error": self.last_error,
+                "models": {
+                    "chat": CHAT_MODEL,
+                    "embeddings": EMBEDDING_MODEL
+                },
+                "cache_size": len(self._embedding_cache),
+            },
+            "overall_status": "unknown",
+        }
+
+        if self.grok_client:
+            try:
+                ok = self._test_grok_connection()
+                if ok:
+                    health_status["service"]["status"] = "healthy"
+                    health_status["service"]["healthy"] = True
+                    health_status["overall_status"] = "healthy"
+                    self.is_healthy = True
+                    self.last_error = None
+                    logger.info("✅ Grok service health check: HEALTHY")
+                else:
+                    health_status["service"]["status"] = "unhealthy"
+                    health_status["service"]["healthy"] = False
+                    health_status["overall_status"] = "unhealthy"
+                    health_status["service"]["last_error"] = self.last_error
+                    logger.warning(f"⚠️ Grok service health check: UNHEALTHY - {self.last_error}")
+            except Exception as e:
+                health_status["service"]["status"] = "error"
+                health_status["service"]["healthy"] = False
+                health_status["overall_status"] = "error"
+                health_status["error"] = str(e)
+                self.last_error = str(e)
+                logger.error(f"❌ Grok service health check error: {e}")
+        else:
+            health_status["overall_status"] = "unavailable"
+            health_status["service"]["last_error"] = self.last_error or "Service not initialized"
+            logger.error("❌ Grok client not initialized")
+
+        logger.info(f"Service health check completed - Status: {health_status['overall_status']}")
+        return health_status
+
+    # ------------------ Cleanup ------------------
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.http_client:
+            try:
+                await self.http_client.aclose()
+                logger.info("✅ HTTP client closed successfully")
+            except Exception as e:
+                logger.warning(f"Failed to close HTTP client: {e}")
+
+        if self.grok_client:
+            try:
+                if hasattr(self.grok_client, "aclose"):
+                    await self.grok_client.aclose()
+                elif hasattr(self.grok_client, "close"):
+                    self.grok_client.close()
+                logger.info("✅ Grok client closed successfully")
+            except Exception as e:
+                logger.debug(f"Grok client close attempt raised: {e}")
+
+
+# ------------------ Production singleton ------------------
+
+try:
+    ai_service = AIService()
+    logger.info("✅ AI Service instance created (best-effort initialization)")
+except Exception as e:
+    logger.critical(f"❌ CRITICAL: Unexpected exception creating AI service instance: {e}")
+    try:
+        ai_service = AIService()
+    except Exception:
+        ai_service = None

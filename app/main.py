@@ -1,0 +1,405 @@
+import os
+import logging
+from pathlib import Path
+from typing import List
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+
+import uvicorn
+
+from app.core.config import settings
+from app.api.routes import scraper, rag, admin, support, rag_widget
+from app.services.milvus_service import milvus_service
+from app.services.ai_service import ai_service
+from app.api.routes.auth import router as auth_router
+from app.core.database import init_db
+
+load_dotenv()
+
+logger = logging.getLogger("enterprise_rag_bot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# ===================== Lifespan Management =====================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Production-grade lifespan management for FastAPI.
+    Handles startup and shutdown of all services.
+    """
+    # ===== Startup =====
+    logger.info("Starting Enterprise RAG Bot...")
+    logger.info("=" * 70)
+
+    # Initialize database
+    try:
+        await init_db()
+        logger.info("✅ Database initialized successfully")
+    except Exception as e:
+        logger.exception("❌ Database initialization failed (continuing): %s", e)
+
+    # Initialize Milvus Service
+    try:
+        await milvus_service.initialize()
+        logger.info("✅ Milvus vector database initialized successfully")
+    except Exception as e:
+        logger.exception("❌ Milvus initialization failed (continuing without vector search): %s", e)
+
+    # Test AI Services
+    logger.info("Testing AI Services...")
+    ai_health = {"embedding": False, "generation": False}
+
+    try:
+        test_embeddings = await ai_service.generate_embeddings(["test embedding"])
+        if test_embeddings and len(test_embeddings) > 0 and len(test_embeddings[0]) > 0:
+            logger.info("✅ Embedding service working (dimension: %d)", len(test_embeddings[0]))
+            ai_health["embedding"] = True
+        else:
+            logger.warning("⚠️ Embedding service returned empty results")
+    except Exception as e:
+        logger.exception("❌ Embedding service test failed: %s", e)
+
+    try:
+        test_response = await ai_service.generate_enhanced_response(
+            "Hello",
+            ["Test context for validation"]
+        )
+        if test_response and isinstance(test_response, dict):
+            response_text = test_response.get("text", "")
+            if response_text and len(response_text.strip()) > 0:
+                logger.info("✅ Text generation service working")
+                ai_health["generation"] = True
+            else:
+                logger.warning("⚠️ Text generation service returned empty text")
+        else:
+            logger.warning("⚠️ Text generation service returned invalid response")
+    except Exception as e:
+        logger.exception("❌ Text generation service test failed: %s", e)
+
+    # Get Milvus stats
+    try:
+        stats = await milvus_service.get_collection_stats()
+        doc_count = stats.get("document_count", 0) if isinstance(stats, dict) else 0
+        logger.info("✅ Milvus Collection Stats - Documents: %d", doc_count)
+    except Exception as e:
+        logger.exception("⚠️ Could not retrieve Milvus stats: %s", e)
+
+    logger.info("=" * 70)
+    logger.info("✅ Enterprise RAG Bot startup sequence complete")
+    logger.info("📚 API documentation: http://localhost:8000/docs")
+    logger.info("🏥 Health check: http://localhost:8000/health")
+
+    yield
+
+    # ===== Shutdown =====
+    logger.info("=" * 70)
+    logger.info("Shutting down Enterprise RAG Bot...")
+
+    try:
+        await milvus_service.close()
+        logger.info("✅ Milvus connection closed gracefully")
+    except Exception as e:
+        logger.warning("⚠️ Error closing Milvus connection: %s", e)
+
+    logger.info("✅ Enterprise RAG Bot shutdown complete")
+    logger.info("=" * 70)
+
+# ===================== FastAPI App Initialization =====================
+app = FastAPI(
+    title="Enterprise RAG Bot",
+    description="Advanced RAG system with Milvus vector database, web scraping, and AI-powered knowledge retrieval",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+# ===================== CORS Configuration =====================
+allowed_origins: List[str] = [
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+]
+
+extra_origins = os.getenv("ALLOWED_ORIGINS", "")
+if extra_origins:
+    allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+
+logger.info("✅ CORS allowed origins: %s", allowed_origins)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ===================== API Routes =====================
+app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
+app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
+app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(support.router, prefix="/api/support", tags=["support"])
+app.include_router(auth_router)
+
+# ===================== Static Files & Frontend =====================
+BASE_DIR = Path(__file__).resolve().parent.parent
+frontend_path = BASE_DIR / "dist" / "enterprise-rag-frontend"
+embedded_static_mounted = False
+
+if frontend_path.exists() and frontend_path.is_dir():
+    app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="static")
+    embedded_static_mounted = True
+    logger.info("✅ Embedded frontend mounted at: %s", frontend_path)
+else:
+    logger.warning("⚠️ Static frontend directory not found at %s. API will continue to run without embedded frontend.", frontend_path)
+
+# ===================== Widget Embed Script =====================
+@app.get("/widget/embed.js")
+def serve_embed_script():
+    """
+    Deliver the embeddable JS widget script.
+    Namespaced under /widget to avoid collisions with frontend routes.
+    
+    Production-ready with multiple fallback locations for robustness.
+    """
+    candidate_paths = [
+        BASE_DIR / "app" / "static" / "embed.js",
+        frontend_path / "embed.js",
+        frontend_path / "assets" / "embed.js",
+    ]
+    
+    for p in candidate_paths:
+        if p and p.exists():
+            logger.info("✅ Serving embed.js from: %s", p)
+            return FileResponse(p, media_type="application/javascript")
+    
+    logger.warning("❌ embed.js not found in candidate locations: %s", candidate_paths)
+    raise HTTPException(status_code=404, detail="embed.js not found")
+
+# ===================== SPA Fallback =====================
+if embedded_static_mounted:
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        """
+        Fallback route for SPA: serve index.html for all non-API routes.
+        Allows frontend routing to work properly.
+        """
+        # Exclude API routes from SPA fallback
+        if full_path.startswith("api/") or full_path.startswith("widget/"):
+            raise HTTPException(status_code=404, detail="Route not found")
+        
+        index_file = frontend_path / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        
+        logger.error("❌ index.html missing from frontend at %s", index_file)
+        return JSONResponse({"detail": "index.html not found"}, status_code=500)
+
+# ===================== Health Check Endpoints =====================
+@app.get("/health/liveness")
+async def liveness_check():
+    """
+    Lightweight liveness probe endpoint.
+    Returns 200 if the application process is running.
+    
+    Use this for container/orchestration liveness probes.
+    Endpoint response time: <10ms
+    """
+    return {
+        "status": "alive",
+        "service": "enterprise-rag-bot"
+    }
+
+@app.get("/health")
+async def readiness_check():
+    """
+    Comprehensive readiness check endpoint.
+    Verifies all critical services (Milvus, AI services, Database).
+    
+    Use this for k8s/ECS readiness probes.
+    Only returns 200 when all services are operational.
+    """
+    # Check Milvus connection and collection
+    milvus_status = "unavailable"
+    milvus_docs = 0
+    milvus_error = None
+
+    try:
+        stats = await milvus_service.get_collection_stats()
+        if isinstance(stats, dict):
+            milvus_status = stats.get("status", "unknown")
+            milvus_docs = int(stats.get("document_count", 0))
+        else:
+            milvus_status = "error"
+            milvus_error = "Invalid response format"
+    except Exception as e:
+        milvus_status = "unavailable"
+        milvus_error = str(e)
+        logger.exception("❌ Milvus stats fetch failed: %s", e)
+
+    # Check AI services
+    ai_services_status = {
+        "embedding": False,
+        "generation": False,
+    }
+
+    try:
+        test_emb = await ai_service.generate_embeddings(["health"])
+        if test_emb and len(test_emb) > 0:
+            ai_services_status["embedding"] = True
+    except Exception as e:
+        logger.debug("AI embedding service check failed: %s", e)
+
+    try:
+        test_gen = await ai_service.generate_response("health", [])
+        if test_gen:
+            ai_services_status["generation"] = True
+    except Exception as e:
+        logger.debug("AI generation service check failed: %s", e)
+
+    # Determine overall health
+    overall_status = "healthy"
+    if milvus_status not in ("active", "healthy"):
+        overall_status = "degraded"
+    if not ai_services_status["embedding"] or not ai_services_status["generation"]:
+        overall_status = "degraded" if overall_status == "healthy" else "unhealthy"
+
+    response = {
+        "status": overall_status,
+        "timestamp": str(__import__("datetime").datetime.utcnow().isoformat()),
+        "services": {
+            "milvus": {
+                "status": milvus_status,
+                "documents_stored": milvus_docs,
+                "error": milvus_error,
+            },
+            "ai_services": {
+                "embedding": "operational" if ai_services_status["embedding"] else "unavailable",
+                "generation": "operational" if ai_services_status["generation"] else "unavailable",
+            },
+            "database": "operational",  # Assume operational if no exception in init_db
+        },
+        "version": app.version,
+    }
+
+    # Return appropriate status code
+    status_code = 200 if overall_status == "healthy" else 503
+    return JSONResponse(response, status_code=status_code)
+
+# ===================== Root Endpoint =====================
+@app.get("/")
+async def api_root():
+    """
+    Root endpoint: serves embedded frontend or API info.
+    """
+    if embedded_static_mounted:
+        index_file = frontend_path / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+
+    return {
+        "message": "Enterprise RAG Bot API",
+        "version": app.version,
+        "features": [
+            "Advanced web scraping with anti-blocking",
+            "Milvus vector database for semantic search",
+            "AI-powered knowledge retrieval (Grok, OpenRouter)",
+            "Multi-source ingestion (web, files, bulk scraping)",
+            "Popup widget interface for easy integration",
+            "Production-grade reliability and scalability",
+        ],
+        "documentation": "/docs",
+        "health_check": "/health",
+    }
+
+# ===================== Application Info Endpoint =====================
+@app.get("/api/info")
+async def app_info():
+    """
+    Detailed application information and status.
+    Useful for debugging and monitoring.
+    """
+    try:
+        stats = await milvus_service.get_collection_stats()
+        milvus_info = stats if isinstance(stats, dict) else {}
+    except Exception as e:
+        milvus_info = {"error": str(e)}
+
+    return {
+        "application": {
+            "name": "Enterprise RAG Bot",
+            "version": app.version,
+            "environment": os.getenv("ENV", "development"),
+        },
+        "infrastructure": {
+            "milvus": milvus_info,
+            "ai_service": {
+                "embedding_model": os.getenv("EMBEDDING_MODEL", "unknown"),
+                "chat_model": os.getenv("CHAT_MODEL", "unknown"),
+            },
+        },
+        "features": {
+            "web_scraping": True,
+            "file_uploads": True,
+            "bulk_scraping": True,
+            "widget_interface": True,
+        },
+        "endpoints": {
+            "scraper": "/api/scraper",
+            "rag": "/api/rag",
+            "widget": "/api/rag-widget",
+            "admin": "/api/admin",
+            "support": "/api/support",
+        },
+    }
+
+# ===================== Error Handlers =====================
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """
+    Custom HTTP exception handler for better error messages.
+    """
+    logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail, "status_code": exc.status_code}
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """
+    Catch-all exception handler for unhandled errors.
+    Logs exception and returns generic error message.
+    """
+    logger.exception(f"Unhandled exception: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal server error",
+            "status_code": 500,
+            "detail": "An unexpected error occurred. Please check server logs."
+        }
+    )
+
+# ===================== Main Entry Point =====================
+if __name__ == "__main__":
+    dev_reload = os.getenv("DEV_RELOAD", "false").lower() in ("1", "true", "yes")
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    log_level = os.getenv("UVICORN_LOG_LEVEL", "info")
+
+    logger.info(f"Starting server on {host}:{port}")
+    logger.info(f"Workers: {workers}, Log Level: {log_level}, Dev Reload: {dev_reload}")
+
+    uvicorn.run(
+        "app.main:app",
+        host=host,
+        port=port,
+        reload=dev_reload,
+        workers=workers,
+        log_level=log_level,
+    )

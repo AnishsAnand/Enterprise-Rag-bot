@@ -1,0 +1,111 @@
+<!-- User Chat Widget - Simplified Interface -->
+<div class="chat-widget-container" [class.expanded]="isExpanded">
+  <!-- Widget Toggle Button -->
+  <button 
+    mat-fab 
+    color="primary" 
+    class="chat-toggle-btn"
+    (click)="toggleWidget()"
+    [attr.aria-label]="isExpanded ? 'Close chat' : 'Open chat'">
+    <mat-icon>{{ isExpanded ? 'close' : 'chat' }}</mat-icon>
+  </button>
+
+  <!-- Chat Window -->
+  <div class="chat-window" *ngIf="isExpanded">
+    <!-- Header -->
+    <div class="chat-header">
+      <div class="header-content">
+        <mat-icon>support_agent</mat-icon>
+        <div class="header-text">
+          <h3>Chat Support</h3>
+          <span class="status-indicator" [class.online]="stats.status === 'online'">
+            {{ stats.status === 'online' ? 'Online' : 'Limited' }}
+          </span>
+        </div>
+      </div>
+      <button mat-icon-button (click)="toggleWidget()" aria-label="Close chat">
+        <mat-icon>close</mat-icon>
+      </button>
+    </div>
+
+    <!-- Messages Container -->
+    <div class="chat-messages" #chatMessages>
+      <div *ngFor="let message of chatHistory" 
+           class="message-wrapper"
+           [class.user-message]="message.type === 'user'"
+           [class.bot-message]="message.type === 'bot'">
+        
+        <div class="message-bubble">
+          <div class="message-content">
+            {{ message.content }}
+          </div>
+          
+          <!-- Sources (only for bot messages) -->
+          <div class="message-sources" *ngIf="message.type === 'bot' && hasSources(message)">
+            <div class="sources-header">
+              <mat-icon class="source-icon">link</mat-icon>
+              <span>Sources</span>
+            </div>
+            <div class="source-list">
+              <button 
+                mat-stroked-button 
+                *ngFor="let source of message.sources"
+                (click)="openSource(source.url)"
+                class="source-item"
+                [matTooltip]="source.title">
+                <mat-icon>article</mat-icon>
+                <span class="source-title">{{ source.title }}</span>
+                <span class="source-relevance">{{ (source.relevance * 100).toFixed(0) }}%</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="message-time">
+            {{ message.timestamp | date:'shortTime' }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Typing Indicator -->
+      <div class="typing-indicator" *ngIf="isTyping">
+        <div class="typing-dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="chat-input-container">
+      <mat-form-field appearance="outline" class="chat-input-field">
+        <textarea 
+          matInput
+          [(ngModel)]="currentMessage"
+          placeholder="Type your message..."
+          rows="2"
+          (keydown.enter)="!$event.shiftKey && sendMessage(); $event.preventDefault()"
+          [disabled]="isTyping"
+          aria-label="Message input">
+        </textarea>
+      </mat-form-field>
+      
+      <button 
+        mat-fab 
+        color="primary" 
+        class="send-btn"
+        (click)="sendMessage()"
+        [disabled]="!currentMessage.trim() || isTyping"
+        aria-label="Send message">
+        <mat-icon>send</mat-icon>
+      </button>
+    </div>
+
+    <!-- Footer Info -->
+    <div class="chat-footer">
+      <span class="footer-text">
+        {{ stats.documents_available }} documents available
+      </span>
+    </div>
+  </div>
+</div>

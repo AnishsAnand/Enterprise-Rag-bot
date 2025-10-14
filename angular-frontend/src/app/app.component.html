@@ -1,0 +1,7 @@
+<ng-container *ngIf="isPublicEmbed; else fullApp">
+  <app-rag-widget *ngIf="isPublicEmbed"></app-rag-widget>
+</ng-container>
+
+<ng-template #fullApp>
+  <router-outlet></router-outlet>
+</ng-template>

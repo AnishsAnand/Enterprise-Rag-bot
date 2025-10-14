@@ -1,0 +1,32 @@
+<div class="login-wrapper">
+  <mat-card>
+    <mat-card-title>Login</mat-card-title>
+
+    <form (ngSubmit)="login()">
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Username</mat-label>
+        <input matInput [(ngModel)]="username" name="username" required />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Password</mat-label>
+        <input matInput [(ngModel)]="password" name="password" type="password" required />
+      </mat-form-field>
+
+      <button mat-raised-button color="primary" type="submit" [disabled]="loading">
+        {{ loading ? 'Logging in...' : 'Login' }}
+      </button>
+
+      <div class="error" *ngIf="errorMessage">{{ errorMessage }}</div>
+    </form>
+  </mat-card>
+</div>
+
+
+<div class="auth-links">
+  <span>Don't have an account?
+    <a (click)="goToRegister()" style="cursor: pointer; color: #1976d2;">Register</a>
+  </span>
+</div>
+
+<app-rag-widget [forceUserRole]="'user'"></app-rag-widget>
