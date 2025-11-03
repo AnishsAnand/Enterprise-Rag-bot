@@ -16,21 +16,26 @@ import re
 import urllib.parse
 import difflib
 import inspect
+import json
 
 from app.services.scraper_service import scraper_service
-from app.services.milvus_service import milvus_service  # CHANGED: from chroma_service to milvus_service
+from app.services.milvus_service import milvus_service  
 from app.services.ai_service import ai_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# ---------- Request models ----------
+
+# ===================== Request Models =====================
+
 class WidgetQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500, description="The search query")
     max_results: int = Field(default=50, ge=1, le=100, description="Maximum number of results")
     include_sources: bool = Field(default=True, description="Include source information")
     enable_advanced_search: bool = Field(default=True, description="Enable advanced search features")
     search_depth: str = Field(default="balanced", pattern="^(quick|balanced|deep)$")
+    auto_execute: bool = Field(default=True, description="Auto-execute detected tasks")
+    store_interaction: bool = Field(default=True, description="Store interaction in knowledge base")
 
 class WidgetScrapeRequest(BaseModel):
     url: HttpUrl
@@ -45,7 +50,425 @@ class BulkScrapeRequest(BaseModel):
     auto_store: bool = True
     domain_filter: Optional[str] = None
 
-# ---------- Utilities ----------
+class TaskExecutionRequest(BaseModel):
+    task_description: str = Field(..., min_length=1, max_length=2000)
+    context: Optional[Dict[str, Any]] = None
+    auto_connect_services: bool = Field(default=True)
+    store_result: bool = Field(default=True)
+
+
+# ===================== Orchestration Service =====================
+
+class OrchestrationService:
+    """
+    Advanced orchestration service for automatic task detection,
+    service connection, and intelligent task execution.
+    """
+    
+    def __init__(self):
+        self.task_patterns = {
+            "scrape": [
+                r"scrape\s+(?:the\s+)?(?:website|url|page)\s+(.+)",
+                r"extract\s+(?:data|content|information)\s+from\s+(.+)",
+                r"fetch\s+(?:data|content)\s+from\s+(.+)",
+                r"get\s+information\s+from\s+(.+)",
+            ],
+            "search": [
+                r"search\s+(?:for|about)\s+(.+)",
+                r"find\s+(?:information|data)\s+(?:about|on)\s+(.+)",
+                r"lookup\s+(.+)",
+                r"what\s+(?:is|are)\s+(.+)",
+                r"tell\s+me\s+about\s+(.+)",
+            ],
+            "analyze": [
+                r"analyze\s+(.+)",
+                r"summarize\s+(.+)",
+                r"explain\s+(.+)",
+                r"compare\s+(.+)",
+            ],
+            "upload": [
+                r"process\s+(?:the\s+)?(?:file|document)\s+(.+)",
+                r"upload\s+(.+)",
+                r"read\s+(?:the\s+)?(?:file|document)\s+(.+)",
+            ],
+            "bulk_operation": [
+                r"scrape\s+(?:all|multiple)\s+(?:pages|urls)\s+from\s+(.+)",
+                r"bulk\s+(?:scrape|extract)\s+from\s+(.+)",
+                r"crawl\s+(.+)",
+            ]
+        }
+        
+        self.service_availability = {}
+        self.task_history = []
+        
+    async def detect_task_intent(self, query: str) -> Dict[str, Any]:
+        """
+        Detect user intent and extract task parameters from natural language.
+        """
+        query_lower = query.lower().strip()
+        
+        detected_tasks = []
+        
+        for task_type, patterns in self.task_patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, query_lower, re.IGNORECASE)
+                if match:
+                    detected_tasks.append({
+                        "type": task_type,
+                        "confidence": 0.8 if len(match.groups()) > 0 else 0.6,
+                        "extracted_params": match.groups(),
+                        "original_query": query
+                    })
+        
+        # Use AI to enhance intent detection if no clear pattern match
+        if not detected_tasks:
+            try:
+                ai_intent = await ai_service.detect_task_intent(query)
+                if ai_intent and ai_intent.get("confidence", 0) > 0.5:
+                    detected_tasks.append(ai_intent)
+            except Exception as e:
+                logger.warning(f"AI intent detection failed: {e}")
+        
+        return {
+            "query": query,
+            "detected_tasks": detected_tasks,
+            "primary_task": detected_tasks[0] if detected_tasks else None,
+            "requires_clarification": len(detected_tasks) == 0 or (
+                len(detected_tasks) > 1 and 
+                abs(detected_tasks[0]["confidence"] - detected_tasks[1]["confidence"]) < 0.2
+            )
+        }
+    
+    async def check_service_availability(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Check availability of all integrated services.
+        """
+        services = {
+            "milvus": {"available": False, "status": "unknown", "error": None},
+            "ai_service": {"available": False, "status": "unknown", "error": None},
+            "scraper": {"available": False, "status": "unknown", "error": None},
+        }
+        
+        # Check Milvus
+        try:
+            stats = await call_maybe_async(milvus_service.get_collection_stats)
+            if isinstance(stats, dict) and stats.get("status") in ("active", "healthy"):
+                services["milvus"]["available"] = True
+                services["milvus"]["status"] = "healthy"
+                services["milvus"]["documents"] = stats.get("document_count", 0)
+            else:
+                services["milvus"]["status"] = "degraded"
+        except Exception as e:
+            services["milvus"]["error"] = str(e)
+            logger.warning(f"Milvus availability check failed: {e}")
+        
+        # Check AI Service
+        try:
+            health = await ai_service.get_service_health()
+            if isinstance(health, dict):
+                is_healthy = health.get("overall_status") == "healthy"
+                services["ai_service"]["available"] = is_healthy
+                services["ai_service"]["status"] = health.get("overall_status", "unknown")
+                services["ai_service"]["model"] = health.get("service", {}).get("current_model")
+        except Exception as e:
+            services["ai_service"]["error"] = str(e)
+            logger.warning(f"AI service availability check failed: {e}")
+        
+        # Check Scraper
+        try:
+            test_result = await call_maybe_async(
+                scraper_service.scrape_url,
+                "https://example.com",
+                {"extract_text": True, "output_format": "json"}
+            )
+            services["scraper"]["available"] = test_result is not None
+            services["scraper"]["status"] = "healthy" if test_result else "unknown"
+        except Exception as e:
+            services["scraper"]["error"] = str(e)
+            logger.debug(f"Scraper availability check failed (expected): {e}")
+        
+        self.service_availability = services
+        return services
+    
+    async def execute_orchestrated_task(
+        self,
+        task_info: Dict[str, Any],
+        background_tasks: BackgroundTasks
+    ) -> Dict[str, Any]:
+        """
+        Execute detected task by orchestrating multiple services.
+        """
+        task_type = task_info.get("type")
+        params = task_info.get("extracted_params", [])
+        original_query = task_info.get("original_query", "")
+        
+        execution_log = {
+            "task_type": task_type,
+            "started_at": datetime.now().isoformat(),
+            "steps": [],
+            "result": None,
+            "error": None
+        }
+        
+        try:
+            # Check service availability
+            services = await self.check_service_availability()
+            execution_log["steps"].append({
+                "step": "service_availability_check",
+                "timestamp": datetime.now().isoformat(),
+                "services": services
+            })
+            
+            # Route to appropriate handler
+            if task_type == "scrape":
+                result = await self._handle_scrape_task(params, services, background_tasks)
+            elif task_type == "search":
+                result = await self._handle_search_task(params, services, original_query)
+            elif task_type == "analyze":
+                result = await self._handle_analyze_task(params, services, original_query)
+            elif task_type == "bulk_operation":
+                result = await self._handle_bulk_task(params, services, background_tasks)
+            else:
+                result = await self._handle_generic_task(original_query, services)
+            
+            execution_log["result"] = result
+            execution_log["completed_at"] = datetime.now().isoformat()
+            execution_log["status"] = "success"
+            
+        except Exception as e:
+            logger.exception(f"Task execution failed: {e}")
+            execution_log["error"] = str(e)
+            execution_log["status"] = "failed"
+            execution_log["completed_at"] = datetime.now().isoformat()
+        
+        # Store execution log in history
+        self.task_history.append(execution_log)
+        
+        return execution_log
+    
+    async def _handle_scrape_task(
+        self,
+        params: List[str],
+        services: Dict[str, Dict[str, Any]],
+        background_tasks: BackgroundTasks
+    ) -> Dict[str, Any]:
+        """Handle web scraping task."""
+        if not services["scraper"]["available"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Scraping service unavailable. Please check service configuration."
+            )
+        
+        # Extract URL from params
+        url = params[0] if params else None
+        if not url:
+            return {"error": "No URL provided for scraping"}
+        
+        # Clean and validate URL
+        url = url.strip().strip("'\"")
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        
+        # Perform scraping
+        scrape_params = {
+            "extract_text": True,
+            "extract_links": False,
+            "extract_images": True,
+            "extract_tables": True,
+            "output_format": "json",
+        }
+        
+        result = await call_maybe_async(scraper_service.scrape_url, url, scrape_params)
+        
+        if result and result.get("status") == "success" and services["milvus"]["available"]:
+            # Store in knowledge base
+            content = result.get("content", {})
+            page_text = content.get("text", "")
+            
+            if len(page_text) > 100:
+                documents = [{
+                    "content": page_text,
+                    "url": url,
+                    "title": content.get("title", f"Content from {url}"),
+                    "format": "text/html",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "orchestrated_scrape",
+                    "images": content.get("images", []),
+                }]
+                background_tasks.add_task(store_document_task, documents)
+        
+        return result
+    
+    async def _handle_search_task(
+        self,
+        params: List[str],
+        services: Dict[str, Dict[str, Any]],
+        original_query: str
+    ) -> Dict[str, Any]:
+        """Handle search/retrieval task."""
+        if not services["milvus"]["available"]:
+            return {
+                "error": "Vector database unavailable",
+                "fallback": "Using AI-only response",
+                "result": await self._ai_only_fallback(original_query, services)
+            }
+        
+        search_query = params[0] if params else original_query
+        
+        # Perform vector search
+        search_results = await call_maybe_async(
+            milvus_service.search_documents,
+            search_query,
+            n_results=50
+        )
+        
+        if not search_results and services["ai_service"]["available"]:
+            return await self._ai_only_fallback(search_query, services)
+        
+        # Generate enhanced response
+        context = [r.get("content", "") for r in search_results[:5]]
+        
+        if services["ai_service"]["available"]:
+            enhanced = await ai_service.generate_enhanced_response(
+                search_query,
+                context,
+                None
+            )
+            return {
+                "answer": enhanced.get("text") if isinstance(enhanced, dict) else enhanced,
+                "sources": search_results[:5],
+                "confidence": enhanced.get("quality_score", 0.8) if isinstance(enhanced, dict) else 0.8
+            }
+        
+        return {
+            "sources": search_results[:5],
+            "message": "AI service unavailable for enhanced response generation"
+        }
+    
+    async def _handle_analyze_task(
+        self,
+        params: List[str],
+        services: Dict[str, Dict[str, Any]],
+        original_query: str
+    ) -> Dict[str, Any]:
+        """Handle analysis/summarization task."""
+        if not services["ai_service"]["available"]:
+            raise HTTPException(
+                status_code=503,
+                detail="AI service unavailable for analysis tasks"
+            )
+        
+        subject = params[0] if params else original_query
+        
+        # Get context from knowledge base if available
+        context = []
+        if services["milvus"]["available"]:
+            search_results = await call_maybe_async(
+                milvus_service.search_documents,
+                subject,
+                n_results=10
+            )
+            context = [r.get("content", "") for r in search_results if r.get("content")]
+        
+        # Perform analysis
+        analysis = await ai_service.generate_enhanced_response(
+            original_query,
+            context,
+            "explanatory"
+        )
+        
+        return {
+            "analysis": analysis.get("text") if isinstance(analysis, dict) else analysis,
+            "quality_score": analysis.get("quality_score", 0.0) if isinstance(analysis, dict) else 0.0,
+            "sources_used": len(context)
+        }
+    
+    async def _handle_bulk_task(
+        self,
+        params: List[str],
+        services: Dict[str, Dict[str, Any]],
+        background_tasks: BackgroundTasks
+    ) -> Dict[str, Any]:
+        """Handle bulk operations."""
+        if not services["scraper"]["available"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Scraper service unavailable for bulk operations"
+            )
+        
+        base_url = params[0] if params else None
+        if not base_url:
+            return {"error": "No base URL provided for bulk operation"}
+        
+        # Clean URL
+        base_url = base_url.strip().strip("'\"")
+        if not base_url.startswith(("http://", "https://")):
+            base_url = f"https://{base_url}"
+        
+        # Discover URLs
+        discovered_urls = await call_maybe_async(
+            scraper_service.discover_urls,
+            base_url,
+            max_depth=2,
+            max_urls=50
+        )
+        
+        if discovered_urls:
+            background_tasks.add_task(
+                enhanced_bulk_scrape_task,
+                discovered_urls,
+                auto_store=services["milvus"]["available"],
+                max_depth=2
+            )
+        
+        return {
+            "status": "started",
+            "base_url": base_url,
+            "discovered_urls": len(discovered_urls) if discovered_urls else 0,
+            "urls_preview": discovered_urls[:5] if discovered_urls else []
+        }
+    
+    async def _handle_generic_task(
+        self,
+        query: str,
+        services: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Handle generic/unclassified task."""
+        if services["ai_service"]["available"]:
+            return await self._ai_only_fallback(query, services)
+        
+        return {
+            "error": "Unable to process task - no services available",
+            "query": query,
+            "services_status": services
+        }
+    
+    async def _ai_only_fallback(
+        self,
+        query: str,
+        services: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Fallback to AI-only response when services unavailable."""
+        if not services["ai_service"]["available"]:
+            raise HTTPException(
+                status_code=503,
+                detail="No services available to process this request"
+            )
+        
+        response = await ai_service.generate_response(query, [])
+        return {
+            "answer": response,
+            "source": "ai_only",
+            "note": "Response generated without knowledge base context"
+        }
+
+
+# Global orchestration service instance
+orchestration_service = OrchestrationService()
+
+
+# ===================== Utility Functions =====================
+
 def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[str]:
     """Chunk text with sentence/paragraph boundaries"""
     if not text:
@@ -68,13 +491,13 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[st
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
-        # compute next start with overlap but ensure forward progress
         next_start = end - overlap
         if next_start <= start:
             start = end
         else:
             start = next_start
     return chunks
+
 
 def _enhanced_similarity(query: str, text: str) -> float:
     """Return [0,1] similarity score"""
@@ -89,6 +512,7 @@ def _enhanced_similarity(query: str, text: str) -> float:
     score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
     return min(1.0, max(0.0, score))
 
+
 def _extract_key_concepts(text: str) -> List[str]:
     """Extract key terms from text"""
     if not text:
@@ -100,37 +524,78 @@ def _extract_key_concepts(text: str) -> List[str]:
     words = re.findall(r"\b[a-zA-Z]{5,}\b", text)
     stopwords = {"about", "after", "again", "before", "being", "could", "while", "would"}
     meaningful = [w.lower() for w in words if w.lower() not in stopwords]
-    combined = list(dict.fromkeys(concepts + meaningful))  # preserve order and dedupe
+    combined = list(dict.fromkeys(concepts + meaningful)) 
     return combined[:15]
 
-# helper to call methods that might be sync or async
+
 async def call_maybe_async(fn, *args, **kwargs):
-    """
-    Call a function that might be sync or async. If it returns an awaitable, await it.
-    This allows service objects (milvus_service, ai_service) to expose sync or async methods.
-    """
+    """Call a function that might be sync or async."""
     if not callable(fn):
         raise RuntimeError("Provided object is not callable")
     try:
         result = fn(*args, **kwargs)
     except TypeError:
-        # sometimes partial / bound methods require different invocation
         result = fn(*args, **kwargs)
     if inspect.isawaitable(result):
         return await result
     return result
 
-# ---------- Endpoints ----------
+
+# ===================== API Endpoints =====================
+
 @router.post("/widget/query")
-async def widget_query(request: WidgetQueryRequest):
-    """Enhanced query processing with improved search and relevance"""
+async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks):
+    """
+    Enhanced query processing with automatic orchestration.
+    Detects user intent and automatically executes appropriate tasks.
+    """
     try:
         query = request.query.strip()
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-        logger.info(f"Processing widget query: '{query}' (depth: {request.search_depth})")
+        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute})")
 
+        # Detect task intent
+        intent_analysis = await orchestration_service.detect_task_intent(query)
+        
+        # Auto-execute if enabled and intent is clear
+        if request.auto_execute and intent_analysis.get("primary_task"):
+            primary_task = intent_analysis["primary_task"]
+            
+            if primary_task["confidence"] > 0.7:
+                logger.info(f"Auto-executing task: {primary_task['type']}")
+                
+                execution_result = await orchestration_service.execute_orchestrated_task(
+                    primary_task,
+                    background_tasks
+                )
+                
+                # Store interaction if enabled
+                if request.store_interaction:
+                    interaction_doc = {
+                        "content": json.dumps({
+                            "query": query,
+                            "intent": intent_analysis,
+                            "execution": execution_result
+                        }),
+                        "url": f"interaction://{datetime.now().timestamp()}",
+                        "title": f"User Interaction: {query[:50]}",
+                        "format": "application/json",
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "widget_interaction",
+                    }
+                    background_tasks.add_task(store_document_task, [interaction_doc])
+                
+                return {
+                    "query": query,
+                    "intent_detected": intent_analysis,
+                    "auto_executed": True,
+                    "execution_result": execution_result,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+        # Standard search flow if no auto-execution
         search_params = {
             "quick": {"max_results": min(request.max_results, 30), "use_reranking": False},
             "balanced": {"max_results": request.max_results, "use_reranking": True},
@@ -138,10 +603,9 @@ async def widget_query(request: WidgetQueryRequest):
         }
         search_config = search_params.get(request.search_depth, search_params["balanced"])
 
-        # search_documents may be sync or async; use call_maybe_async
         try:
             search_results = await call_maybe_async(
-                getattr(milvus_service, "search_documents", milvus_service),
+                milvus_service.search_documents,
                 query,
                 n_results=search_config["max_results"]
             )
@@ -149,7 +613,6 @@ async def widget_query(request: WidgetQueryRequest):
             logger.exception(f"Error while searching documents: {e}")
             search_results = []
 
-        # If no search results, try LLM-only fallback (so widget doesn't always say "no info")
         if not search_results:
             logger.warning("No search results found; attempting LLM-only fallback.")
             try:
@@ -161,31 +624,34 @@ async def widget_query(request: WidgetQueryRequest):
             if answer:
                 summary = None
                 try:
-                    summary = await call_maybe_async(ai_service.generate_summary, answer, max_sentences=3, max_chars=600)
+                    summary = await call_maybe_async(
+                        ai_service.generate_summary,
+                        answer,
+                        max_sentences=3,
+                        max_chars=600
+                    )
                 except Exception:
                     summary = (answer[:600] + "...") if len(answer) > 600 else answer
 
                 return {
                     "query": query,
                     "answer": answer,
-                    "expanded_context": None,
-                    "step_count": 0,
+                    "intent_detected": intent_analysis,
+                    "auto_executed": False,
                     "steps": [],
                     "images": [],
                     "sources": [],
                     "has_sources": False,
                     "confidence": 0.45,
                     "search_depth": request.search_depth,
-                    "results_found": 0,
-                    "results_used": 0,
                     "timestamp": datetime.now().isoformat(),
                     "summary": summary or "No summary available."
                 }
 
-            # final fallback if LLM also fails
             return {
                 "query": query,
                 "answer": "I don't have any relevant information in my knowledge base to answer your question. Please try rephrasing your query or add more context.",
+                "intent_detected": intent_analysis,
                 "steps": [],
                 "images": [],
                 "sources": [],
@@ -195,7 +661,7 @@ async def widget_query(request: WidgetQueryRequest):
                 "timestamp": datetime.now().isoformat()
             }
 
-        # Advanced filtering & reranking
+        # Filter and process results
         if request.enable_advanced_search:
             avg_score = sum(r.get("relevance_score", 0) for r in search_results) / max(1, len(search_results))
             min_threshold = max(0.3, avg_score * 0.6)
@@ -203,9 +669,8 @@ async def widget_query(request: WidgetQueryRequest):
             if len(filtered_results) < max(3, int(len(search_results) * 0.2)):
                 filtered_results = search_results[:max(5, request.max_results // 2)]
         else:
-            filtered_results = search_results[: request.max_results]
+            filtered_results = search_results[:request.max_results]
 
-        # Build base context to send to LLM
         base_context = []
         for result in filtered_results:
             content = result.get("content", "") if isinstance(result, dict) else ""
@@ -221,9 +686,14 @@ async def widget_query(request: WidgetQueryRequest):
         if not base_context:
             base_context = [r.get("content", "")[:1000] for r in filtered_results[:3]]
 
-        # Ask ai_service for an enhanced response
+        # Generate enhanced response
         try:
-            enhanced_result = await call_maybe_async(ai_service.generate_enhanced_response, query, base_context, None)
+            enhanced_result = await call_maybe_async(
+                ai_service.generate_enhanced_response,
+                query,
+                base_context,
+                None
+            )
             answer = (enhanced_result or {}).get("text", "") if isinstance(enhanced_result, dict) else (enhanced_result or "")
             expanded_context = (enhanced_result or {}).get("expanded_context", "") if isinstance(enhanced_result, dict) else ""
             confidence = (enhanced_result or {}).get("quality_score", 0.0) if isinstance(enhanced_result, dict) else 0.0
@@ -237,10 +707,14 @@ async def widget_query(request: WidgetQueryRequest):
             expanded_context = "\n\n".join(base_context[:2]) if base_context else ""
             confidence = 0.6
 
-        # Generate stepwise response (may be sync or async)
+        # Generate steps
         working_context = [expanded_context] if expanded_context else base_context[:3]
         try:
-            steps_data = await call_maybe_async(ai_service.generate_stepwise_response, query, working_context)
+            steps_data = await call_maybe_async(
+                ai_service.generate_stepwise_response,
+                query,
+                working_context
+            )
         except Exception as e:
             logger.warning(f"Stepwise generation failed: {e}")
             steps_data = []
@@ -252,7 +726,7 @@ async def widget_query(request: WidgetQueryRequest):
             else:
                 steps_data = [{"text": "Unable to generate structured response.", "type": "info"}]
 
-        # Select images from metadata in filtered_results
+        # Extract and assign images
         candidate_images = []
         query_concepts = set(_extract_key_concepts(query.lower()))
         answer_concepts = set(_extract_key_concepts(answer.lower())) if answer else set()
@@ -268,19 +742,17 @@ async def widget_query(request: WidgetQueryRequest):
             for img in images:
                 if not isinstance(img, dict) or not img.get("url"):
                     continue
-                # noise filtering
+
                 u = img.get("url", "").lower()
                 if any(noise in u for noise in ["logo", "icon", "favicon", "sprite", "banner"]):
                     continue
 
                 img_text = (img.get("text", "") or "").lower()
-                img_alt = (img.get("alt", "") or "").lower()
-                img_type = (img.get("type", "") or "").lower()
-
                 img_concepts = set(_extract_key_concepts(img_text))
                 concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
                 text_similarity = _enhanced_similarity(query, img_text)
 
+                img_type = (img.get("type", "") or "").lower()
                 type_bonus = 0.2 if img_type in ["diagram", "chart", "screenshot", "illustration"] else 0.0
 
                 image_score = (
@@ -291,20 +763,17 @@ async def widget_query(request: WidgetQueryRequest):
                 )
 
                 if image_score > 0.15:
-                    candidate_images.append(
-                        {
-                            "url": img.get("url"),
-                            "alt": img.get("alt", ""),
-                            "type": img.get("type", ""),
-                            "caption": img.get("caption", ""),
-                            "source_url": page_url,
-                            "source_title": page_title,
-                            "relevance_score": round(image_score, 3),
-                            "text": img_text[:500],
-                        }
-                    )
+                    candidate_images.append({
+                        "url": img.get("url"),
+                        "alt": img.get("alt", ""),
+                        "type": img.get("type", ""),
+                        "caption": img.get("caption", ""),
+                        "source_url": page_url,
+                        "source_title": page_title,
+                        "relevance_score": round(image_score, 3),
+                        "text": img_text[:500],
+                    })
 
-        # Deduplicate and keep top
         seen_urls = set()
         unique_images = []
         for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
@@ -314,98 +783,7 @@ async def widget_query(request: WidgetQueryRequest):
                 unique_images.append(img)
         selected_images = unique_images[:12]
 
-        # Debug log for filtered results & initial selected images
-        logger.debug("Filtered_results count: %d, top relevance scores: %s",
-                     len(filtered_results),
-                     [round(r.get("relevance_score", 0), 3) for r in filtered_results[:5]])
-        logger.debug("Selected images (initial): %d", len(selected_images))
-
-        # If no images selected via scoring, do a relaxed fallback: pick first non-noise images from metadata
-        if not selected_images:
-            logger.debug("No images passed scoring threshold - attempting relaxed metadata fallback.")
-            relaxed = []
-            for result in filtered_results:
-                meta = result.get("metadata", {}) or {}
-                page_url = meta.get("url", "")
-                page_title = meta.get("title", "")
-                images = meta.get("images", []) if isinstance(meta.get("images", []), list) else []
-                for img in images:
-                    if not isinstance(img, dict) or not img.get("url"):
-                        continue
-                    u = img.get("url", "").lower()
-                    if any(noise in u for noise in ["logo", "icon", "favicon", "sprite", "banner"]):
-                        continue
-                    url = img.get("url")
-                    if url in seen_urls:
-                        continue
-                    relaxed.append(
-                        {
-                            "url": url,
-                            "alt": img.get("alt", ""),
-                            "type": img.get("type", ""),
-                            "caption": img.get("caption", ""),
-                            "source_url": page_url,
-                            "source_title": page_title,
-                            "relevance_score": round(result.get("relevance_score", 0.0), 3),
-                            "text": (img.get("text", "") or "")[:500],
-                        }
-                    )
-                    seen_urls.add(url)
-                    if len(relaxed) >= 12:
-                        break
-                if relaxed:
-                    break
-            if relaxed:
-                logger.info(f"Relaxed image fallback added {len(relaxed)} images.")
-            selected_images = relaxed[:12]
-
-        # If step-level images were returned by the step generator, prefer/merge URL images into selected_images.
-        # Note: image_prompt (text descriptions) are handled later and are not inserted into selected_images.
-        step_level_images_added = 0
-        for step in steps_data:
-            if isinstance(step, dict):
-                # Prefer explicit dict in step["image"] first
-                possible_img = step.get("image") or step.get("image_url") or step.get("image_data")
-                # If the LLM returned a dict with 'url', insert it to front of selected_images
-                if isinstance(possible_img, dict) and possible_img.get("url"):
-                    url = possible_img.get("url")
-                    if url not in seen_urls:
-                        img_obj = {
-                            "url": url,
-                            "alt": possible_img.get("alt", "") or step.get("alt", ""),
-                            "type": possible_img.get("type", "") or "",
-                            "caption": possible_img.get("caption", "") or step.get("caption", ""),
-                            "source_url": possible_img.get("source_url", "") or "",
-                            "source_title": possible_img.get("source_title", "") or "",
-                            "relevance_score": round(possible_img.get("relevance_score", 0.0), 3),
-                            "text": (possible_img.get("text", "") or "")[:500],
-                        }
-                        selected_images.insert(0, img_obj)
-                        seen_urls.add(url)
-                        step_level_images_added += 1
-                # If LLM returned a bare URL string via step['image'] or step['image_url'], add it
-                elif isinstance(step.get("image"), str) and step.get("image").startswith("http"):
-                    url = step.get("image")
-                    if url not in seen_urls:
-                        img_obj = {
-                            "url": url,
-                            "alt": step.get("alt", ""),
-                            "type": "",
-                            "caption": step.get("caption", ""),
-                            "source_url": "",
-                            "source_title": "",
-                            "relevance_score": 0.0,
-                            "text": "",
-                        }
-                        selected_images.insert(0, img_obj)
-                        seen_urls.add(url)
-                        step_level_images_added += 1
-
-        if step_level_images_added:
-            selected_images = selected_images[:12]
-            logger.debug(f"Added {step_level_images_added} step-level URL images to selected_images.")
-
-        # Build sources list
+        # Build sources
         sources = []
         if request.include_sources:
             for result in filtered_results:
@@ -414,35 +792,37 @@ async def widget_query(request: WidgetQueryRequest):
                 content_preview = (
                     content_preview_raw[:300] + "..." if len(content_preview_raw) > 300 else content_preview_raw
                 )
-                sources.append(
-                    {
-                        "url": meta.get("url", ""),
-                        "title": meta.get("title", "Untitled"),
-                        "relevance_score": round(result.get("relevance_score", 0), 3),
-                        "content_preview": content_preview,
-                        "domain": meta.get("domain", ""),
-                        "last_updated": meta.get("timestamp", ""),
-                    }
-                )
+                sources.append({
+                    "url": meta.get("url", ""),
+                    "title": meta.get("title", "Untitled"),
+                    "relevance_score": round(result.get("relevance_score", 0), 3),
+                    "content_preview": content_preview,
+                    "domain": meta.get("domain", ""),
+                    "last_updated": meta.get("timestamp", ""),
+                })
 
-        # Summary
+        # Generate summary
         summary_input = answer if answer else expanded_context
         if summary_input:
             try:
-                summary = await call_maybe_async(ai_service.generate_summary, summary_input, max_sentences=4, max_chars=600)
+                summary = await call_maybe_async(
+                    ai_service.generate_summary,
+                    summary_input,
+                    max_sentences=4,
+                    max_chars=600
+                )
             except Exception:
                 summary = summary_input[:600] + "..." if len(summary_input) > 600 else summary_input
         else:
             summary = "No summary available."
 
-        # Combine steps with images (respect step-level image urls and image_prompts)
+        # Combine steps with images
         steps_with_images = []
         for i, step in enumerate(steps_data):
             step_obj = {"index": i + 1, "text": step.get("text", ""), "type": step.get("type", "action")}
             assigned_img = None
 
             if isinstance(step, dict):
-                # 1) If step contains an explicit image dict with URL, use it
                 si = step.get("image") if isinstance(step.get("image"), (dict, str)) else None
                 if isinstance(si, dict) and si.get("url"):
                     assigned_img = {
@@ -452,10 +832,13 @@ async def widget_query(request: WidgetQueryRequest):
                         "relevance_score": si.get("relevance_score", None),
                     }
                 elif isinstance(si, str) and si.startswith("http"):
-                    assigned_img = {"url": si, "alt": step.get("alt", "") or "", "caption": step.get("caption", "") or "", "relevance_score": None}
+                    assigned_img = {
+                        "url": si,
+                        "alt": step.get("alt", "") or "",
+                        "caption": step.get("caption", "") or "",
+                        "relevance_score": None
+                    }
 
-                # 2) If step provides an image_prompt (string), attach it (prefer over fallback images)
-                # Accept both step["image_prompt"] and step["image"] containing "image_prompt"
                 if not assigned_img:
                     image_prompt = None
                     if isinstance(step.get("image_prompt"), str) and step.get("image_prompt").strip():
@@ -463,17 +846,13 @@ async def widget_query(request: WidgetQueryRequest):
                     elif isinstance(step.get("image"), dict) and isinstance(step["image"].get("image_prompt"), str):
                         image_prompt = step["image"].get("image_prompt").strip()
                     elif isinstance(step.get("image"), str) and not step.get("image").startswith("http") and len(step.get("image").strip()) > 0:
-                        # some LLMs may return a plain prompt string in step["image"]
                         image_prompt = step.get("image").strip()
 
                     if image_prompt:
-                        # store the prompt so downstream clients can generate/display the image
                         assigned_img = {"image_prompt": image_prompt}
 
-            # 3) Fallback: use selected_images by position if no step-level image/prompt present
             if not assigned_img and selected_images and i < len(selected_images):
                 step_img = selected_images[i]
-                # ensure we have a URL
                 if step_img.get("url"):
                     assigned_img = {
                         "url": step_img.get("url"),
@@ -482,7 +861,6 @@ async def widget_query(request: WidgetQueryRequest):
                         "relevance_score": step_img.get("relevance_score"),
                     }
 
-            # Attach assigned image object (could be a URL dict or image_prompt dict)
             if assigned_img:
                 step_obj["image"] = assigned_img
 
@@ -497,12 +875,28 @@ async def widget_query(request: WidgetQueryRequest):
             ),
         )
 
-        # Debug summary of final images & steps
-        logger.debug("Final selected_images: %d, steps_with_images: %d", len(selected_images), len(steps_with_images))
+        # Store interaction if enabled
+        if request.store_interaction:
+            interaction_doc = {
+                "content": json.dumps({
+                    "query": query,
+                    "answer": answer,
+                    "confidence": final_confidence,
+                    "sources_count": len(sources)
+                }),
+                "url": f"interaction://{datetime.now().timestamp()}",
+                "title": f"Query: {query[:50]}",
+                "format": "application/json",
+                "timestamp": datetime.now().isoformat(),
+                "source": "widget_query",
+            }
+            background_tasks.add_task(store_document_task, [interaction_doc])
 
         return {
             "query": query,
             "answer": answer or "I was unable to generate a comprehensive answer based on the available information.",
+            "intent_detected": intent_analysis,
+            "auto_executed": False,
             "expanded_context": expanded_context if request.enable_advanced_search else None,
             "step_count": len(steps_with_images),
             "steps": steps_with_images,
@@ -524,6 +918,137 @@ async def widget_query(request: WidgetQueryRequest):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@router.post("/widget/execute-task")
+async def widget_execute_task(request: TaskExecutionRequest, background_tasks: BackgroundTasks):
+    """
+    Execute arbitrary task with automatic service orchestration.
+    Analyzes task requirements and connects appropriate services.
+    """
+    try:
+        logger.info(f"Executing task: {request.task_description[:100]}")
+        
+        # Detect task intent
+        intent_analysis = await orchestration_service.detect_task_intent(request.task_description)
+        
+        if not intent_analysis.get("primary_task"):
+            # Store unclear requirement in knowledge base
+            if request.store_result:
+                unclear_doc = {
+                    "content": json.dumps({
+                        "task": request.task_description,
+                        "status": "unclear",
+                        "analysis": intent_analysis,
+                        "context": request.context
+                    }),
+                    "url": f"task://{datetime.now().timestamp()}",
+                    "title": f"Unclear Task: {request.task_description[:50]}",
+                    "format": "application/json",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "unclear_task",
+                }
+                background_tasks.add_task(store_document_task, [unclear_doc])
+            
+            return {
+                "status": "needs_clarification",
+                "task": request.task_description,
+                "message": "I need more information to complete this task. Could you please provide more details?",
+                "suggestions": [
+                    "What specific action would you like me to perform?",
+                    "Are you looking to search, scrape, analyze, or something else?",
+                    "Please provide any relevant URLs, files, or context."
+                ],
+                "intent_analysis": intent_analysis,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Check services if auto-connect enabled
+        if request.auto_connect_services:
+            services = await orchestration_service.check_service_availability()
+            
+            # Verify required services are available
+            primary_task = intent_analysis["primary_task"]
+            task_type = primary_task["type"]
+            
+            required_services = {
+                "scrape": ["scraper"],
+                "search": ["milvus", "ai_service"],
+                "analyze": ["ai_service"],
+                "bulk_operation": ["scraper", "milvus"]
+            }
+            
+            missing_services = []
+            for service_name in required_services.get(task_type, []):
+                if not services.get(service_name, {}).get("available"):
+                    missing_services.append(service_name)
+            
+            if missing_services:
+                error_msg = f"Required services unavailable: {', '.join(missing_services)}"
+                logger.warning(error_msg)
+                
+                # Store failed attempt
+                if request.store_result:
+                    failed_doc = {
+                        "content": json.dumps({
+                            "task": request.task_description,
+                            "status": "failed",
+                            "error": error_msg,
+                            "missing_services": missing_services,
+                            "services_status": services
+                        }),
+                        "url": f"task://{datetime.now().timestamp()}",
+                        "title": f"Failed Task: {request.task_description[:50]}",
+                        "format": "application/json",
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "failed_task",
+                    }
+                    background_tasks.add_task(store_document_task, [failed_doc])
+                
+                return {
+                    "status": "failed",
+                    "task": request.task_description,
+                    "error": error_msg,
+                    "missing_services": missing_services,
+                    "services_status": services,
+                    "timestamp": datetime.now().isoformat()
+                }
+        
+        # Execute task
+        execution_result = await orchestration_service.execute_orchestrated_task(
+            intent_analysis["primary_task"],
+            background_tasks
+        )
+        
+        # Store result if enabled
+        if request.store_result and execution_result.get("status") == "success":
+            result_doc = {
+                "content": json.dumps({
+                    "task": request.task_description,
+                    "execution": execution_result,
+                    "context": request.context
+                }),
+                "url": f"task://{datetime.now().timestamp()}",
+                "title": f"Completed Task: {request.task_description[:50]}",
+                "format": "application/json",
+                "timestamp": datetime.now().isoformat(),
+                "source": "completed_task",
+            }
+            background_tasks.add_task(store_document_task, [result_doc])
+        
+        return {
+            "status": execution_result.get("status", "unknown"),
+            "task": request.task_description,
+            "intent_analysis": intent_analysis,
+            "execution_result": execution_result,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Task execution error: {e}")
+        raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")
+
+
 @router.post("/widget/scrape")
 async def widget_scrape(request: WidgetScrapeRequest, background_tasks: BackgroundTasks):
     """Enhanced scraping with better error handling and options"""
@@ -541,7 +1066,10 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
 
         result = await call_maybe_async(scraper_service.scrape_url, str(request.url), scrape_params)
         if not result or result.get("status") != "success":
-            raise HTTPException(status_code=400, detail=f"Scraping failed: {result.get('error', 'Unknown error') if result else 'No result'}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Scraping failed: {result.get('error', 'Unknown error') if result else 'No result'}"
+            )
 
         content = result.get("content", {}) or {}
         page_text = content.get("text", "") or ""
@@ -553,34 +1081,35 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
                 documents_to_store = []
                 for i, chunk in enumerate(chunks):
-                    documents_to_store.append(
-                        {
-                            "content": chunk,
-                            "url": f"{str(request.url)}#chunk-{i}",
-                            "title": content.get("title", "") or f"Content from {request.url}",
-                            "format": "text/html",
-                            "timestamp": datetime.now().isoformat(),
-                            "source": "widget_scrape",
-                            "images": content.get("images", []) if i == 0 else [],
-                        }
-                    )
-            else:
-                documents_to_store = [
-                    {
-                        "content": page_text,
-                        "url": str(request.url),
+                    documents_to_store.append({
+                        "content": chunk,
+                        "url": f"{str(request.url)}#chunk-{i}",
                         "title": content.get("title", "") or f"Content from {request.url}",
                         "format": "text/html",
                         "timestamp": datetime.now().isoformat(),
                         "source": "widget_scrape",
-                        "images": content.get("images", []) or [],
-                    }
-                ]
+                        "images": content.get("images", []) if i == 0 else [],
+                    })
+            else:
+                documents_to_store = [{
+                    "content": page_text,
+                    "url": str(request.url),
+                    "title": content.get("title", "") or f"Content from {request.url}",
+                    "format": "text/html",
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "widget_scrape",
+                    "images": content.get("images", []) or [],
+                }]
 
             background_tasks.add_task(store_document_task, documents_to_store)
 
         try:
-            summary = await call_maybe_async(ai_service.generate_summary, page_text, max_sentences=4, max_chars=800)
+            summary = await call_maybe_async(
+                ai_service.generate_summary,
+                page_text,
+                max_sentences=4,
+                max_chars=800
+            )
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
 
@@ -611,17 +1140,33 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
     """Enhanced bulk scraping with better control and filtering"""
     try:
         logger.info(f"Starting bulk scrape from: {request.base_url}")
-        discovered_urls = await call_maybe_async(scraper_service.discover_urls, str(request.base_url), request.max_depth, request.max_urls)
+        discovered_urls = await call_maybe_async(
+            scraper_service.discover_urls,
+            str(request.base_url),
+            request.max_depth,
+            request.max_urls
+        )
+        
         if not discovered_urls:
-            return {"status": "no_urls_found", "message": "No URLs discovered from the base URL", "base_url": str(request.base_url)}
+            return {
+                "status": "no_urls_found",
+                "message": "No URLs discovered from the base URL",
+                "base_url": str(request.base_url)
+            }
 
         if request.domain_filter:
             filtered_urls = [
-                url for url in discovered_urls if request.domain_filter.lower() in urllib.parse.urlparse(url).netloc.lower()
+                url for url in discovered_urls
+                if request.domain_filter.lower() in urllib.parse.urlparse(url).netloc.lower()
             ]
             discovered_urls = filtered_urls
 
-        background_tasks.add_task(enhanced_bulk_scrape_task, discovered_urls, request.auto_store, request.max_depth)
+        background_tasks.add_task(
+            enhanced_bulk_scrape_task,
+            discovered_urls,
+            request.auto_store,
+            request.max_depth
+        )
 
         return {
             "status": "started",
@@ -639,11 +1184,16 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
 
 
 @router.post("/widget/upload-file")
-async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: bool = True, chunk_large_files: bool = True):
-    """Enhanced file upload with robust processing, metadata extraction, and Milvus storage"""
+async def widget_upload_file(
+    file: UploadFile = File(...),
+    store_in_knowledge: bool = True,
+    chunk_large_files: bool = True
+):
+    """Enhanced file upload with robust processing and storage"""
     try:
         if not file.filename:
             raise HTTPException(status_code=400, detail="Filename is required")
+        
         filename = os.path.basename(file.filename)
         guessed = mimetypes.guess_type(filename)
         content_type = file.content_type or (guessed[0] if guessed else None)
@@ -651,6 +1201,7 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
 
         logger.info(f"Processing uploaded file: {filename} ({content_type})")
         content = await file.read()
+        
         if not content:
             raise HTTPException(status_code=400, detail="File is empty")
 
@@ -658,7 +1209,7 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
         format_type: Optional[str] = None
         metadata: Dict[str, Any] = {}
 
-        # Detect type and extract text
+        # Process file based on type
         try:
             if content_type.startswith("text") or filename.lower().endswith((".txt", ".md")):
                 text = content.decode("utf-8", errors="replace")
@@ -692,7 +1243,11 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
                 if rows:
                     headers = rows[0]
                     data_rows = rows[1:] if len(rows) > 1 else []
-                    text_parts = [f"CSV Headers: {', '.join(headers)}", f"Total Rows: {len(data_rows)}", "Sample Data:"]
+                    text_parts = [
+                        f"CSV Headers: {', '.join(headers)}",
+                        f"Total Rows: {len(data_rows)}",
+                        "Sample Data:"
+                    ]
                     for i, row in enumerate(data_rows[:10]):
                         text_parts.append(f"Row {i+1}: {', '.join(str(cell) for cell in row)}")
                     text = "\n".join(text_parts)
@@ -740,7 +1295,10 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
                     text = content.decode("utf-8", errors="replace")
                     format_type = "unknown"
                 except Exception:
-                    raise HTTPException(status_code=415, detail=f"Unsupported file type: {content_type}")
+                    raise HTTPException(
+                        status_code=415,
+                        detail=f"Unsupported file type: {content_type}"
+                    )
 
         except HTTPException:
             raise
@@ -751,13 +1309,18 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
         if not text or len(text.strip()) < 10:
             raise HTTPException(status_code=400, detail="File content is too short or unreadable")
 
-        # normalize whitespace
+        # Normalize whitespace
         text = re.sub(r"\r\n?", "\n", text)
         text = re.sub(r"\n\s*\n", "\n\n", text)
         text = re.sub(r"[ \t]+", " ", text)
 
         try:
-            doc_summary = await call_maybe_async(ai_service.generate_summary, text, max_sentences=4, max_chars=800)
+            doc_summary = await call_maybe_async(
+                ai_service.generate_summary,
+                text,
+                max_sentences=4,
+                max_chars=800
+            )
         except Exception as e:
             logger.debug(f"Summary generation failed: {e}")
             doc_summary = (text[:800] + "...") if len(text) > 800 else text
@@ -776,7 +1339,6 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
         }
 
         async def _store_documents_safe(docs: List[Dict[str, Any]]):
-            """Safe storage helper for Milvus service"""
             candidates = ["add_documents", "store_documents", "add_docs", "store", "add"]
             func = None
             for name in candidates:
@@ -784,7 +1346,7 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
                     func = getattr(milvus_service, name)
                     break
             if not func:
-                raise RuntimeError("milvus_service has no storage method (expected add_documents/store_documents)")
+                raise RuntimeError("milvus_service has no storage method")
 
             res = func(docs)
             if inspect.isawaitable(res):
@@ -797,32 +1359,28 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
                     chunks = chunk_text(text, chunk_size=1500, overlap=200)
                     documents_to_store = []
                     for i, chunk in enumerate(chunks):
-                        documents_to_store.append(
-                            {
-                                "content": chunk,
-                                "url": f"file://{filename}#chunk-{i}",
-                                "title": f"{filename} (Part {i+1})",
-                                "format": format_type,
-                                "timestamp": datetime.now().isoformat(),
-                                "source": "widget_upload",
-                                "images": [],
-                                "metadata": metadata,
-                            }
-                        )
-                    response["chunks_created"] = len(chunks)
-                else:
-                    documents_to_store = [
-                        {
-                            "content": text,
-                            "url": f"file://{filename}",
-                            "title": filename,
+                        documents_to_store.append({
+                            "content": chunk,
+                            "url": f"file://{filename}#chunk-{i}",
+                            "title": f"{filename} (Part {i+1})",
                             "format": format_type,
                             "timestamp": datetime.now().isoformat(),
                             "source": "widget_upload",
                             "images": [],
                             "metadata": metadata,
-                        }
-                    ]
+                        })
+                    response["chunks_created"] = len(chunks)
+                else:
+                    documents_to_store = [{
+                        "content": text,
+                        "url": f"file://{filename}",
+                        "title": filename,
+                        "format": format_type,
+                        "timestamp": datetime.now().isoformat(),
+                        "source": "widget_upload",
+                        "images": [],
+                        "metadata": metadata,
+                    }]
                     response["chunks_created"] = 1
 
                 stored_ids = await _store_documents_safe(documents_to_store)
@@ -859,10 +1417,11 @@ async def widget_upload_file(file: UploadFile = File(...), store_in_knowledge: b
 
 @router.get("/widget/knowledge-stats")
 async def widget_knowledge_stats():
-    """Enhanced knowledge base statistics for Milvus"""
+    """Enhanced knowledge base statistics"""
     try:
-        stats = await call_maybe_async(getattr(milvus_service, "get_collection_stats", milvus_service))
-        health = await call_maybe_async(getattr(ai_service, "get_service_health", ai_service))
+        stats = await call_maybe_async(milvus_service.get_collection_stats)
+        health = await ai_service.get_service_health()
+        services = await orchestration_service.check_service_availability()
 
         return {
             "document_count": stats.get("document_count", 0) if isinstance(stats, dict) else 0,
@@ -875,6 +1434,8 @@ async def widget_knowledge_stats():
             "embedding_dimension": stats.get("embedding_dimension", 0) if isinstance(stats, dict) else 0,
             "ai_services": health.get("service", {}) if isinstance(health, dict) else {},
             "overall_health": health.get("overall_status", "unknown") if isinstance(health, dict) else "unknown",
+            "services_availability": services,
+            "task_history_count": len(orchestration_service.task_history),
             "last_updated": datetime.now().isoformat(),
         }
     except Exception as e:
@@ -884,14 +1445,13 @@ async def widget_knowledge_stats():
 
 @router.delete("/widget/clear-knowledge")
 async def widget_clear_knowledge():
-    """Clear Milvus knowledge base with confirmation"""
+    """Clear knowledge base with confirmation"""
     try:
-        # Using call_maybe_async to support sync/async methods
-        await call_maybe_async(getattr(milvus_service, "delete_collection", milvus_service))
-        await call_maybe_async(getattr(milvus_service, "initialize", milvus_service))
+        await call_maybe_async(milvus_service.delete_collection)
+        await call_maybe_async(milvus_service.initialize)
         return {
             "status": "success",
-            "message": "Milvus knowledge base cleared and reinitialized successfully",
+            "message": "Knowledge base cleared and reinitialized successfully",
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -899,9 +1459,10 @@ async def widget_clear_knowledge():
         raise HTTPException(status_code=500, detail=f"Clear error: {str(e)}")
 
 
-# Background tasks
+# ===================== Background Tasks =====================
+
 async def store_document_task(docs: List[Dict[str, Any]]):
-    """Background storage task for Milvus service"""
+    """Background storage task"""
     try:
         func = getattr(milvus_service, "store_documents", None) or getattr(milvus_service, "add_documents", None)
         if not func:
@@ -909,13 +1470,13 @@ async def store_document_task(docs: List[Dict[str, Any]]):
         res = func(docs)
         if inspect.isawaitable(res):
             await res
-        logger.info(f"✅ Stored {len(docs)} docs in Milvus knowledge base")
+        logger.info(f"✅ Stored {len(docs)} docs in knowledge base")
     except Exception as e:
-        logger.error(f"❌ Failed storing docs in Milvus: {e}")
+        logger.error(f"❌ Failed storing docs: {e}")
 
 
 async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth: int):
-    """Enhanced bulk scraping with Milvus storage"""
+    """Enhanced bulk scraping with storage"""
     scraped_count = 0
     stored_count = 0
     error_count = 0
@@ -959,29 +1520,25 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
                         if len(page_text) > 2500:
                             chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
                             for j, chunk in enumerate(chunks):
-                                documents_to_store.append(
-                                    {
-                                        "content": chunk,
-                                        "url": f"{url}#chunk-{j}",
-                                        "title": content.get("title", "") or f"Content from {url}",
-                                        "format": "text/html",
-                                        "timestamp": datetime.now().isoformat(),
-                                        "source": "widget_bulk_scrape",
-                                        "images": content.get("images", []) if j == 0 else [],
-                                    }
-                                )
-                        else:
-                            documents_to_store.append(
-                                {
-                                    "content": page_text,
-                                    "url": url,
+                                documents_to_store.append({
+                                    "content": chunk,
+                                    "url": f"{url}#chunk-{j}",
                                     "title": content.get("title", "") or f"Content from {url}",
                                     "format": "text/html",
                                     "timestamp": datetime.now().isoformat(),
                                     "source": "widget_bulk_scrape",
-                                    "images": content.get("images", []) or [],
-                                }
-                            )
+                                    "images": content.get("images", []) if j == 0 else [],
+                                })
+                        else:
+                            documents_to_store.append({
+                                "content": page_text,
+                                "url": url,
+                                "title": content.get("title", "") or f"Content from {url}",
+                                "format": "text/html",
+                                "timestamp": datetime.now().isoformat(),
+                                "source": "widget_bulk_scrape",
+                                "images": content.get("images", []) or [],
+                            })
                 else:
                     logger.warning(f"⚠️ Skipping {url}: content too short ({len(page_text)} chars)")
             else:
@@ -990,19 +1547,18 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
 
         if documents_to_store:
             try:
-                # Store in Milvus
                 store_fn = getattr(milvus_service, "add_documents", None) or getattr(milvus_service, "store_documents", None)
                 if not store_fn:
-                    raise RuntimeError("No storage function found on milvus_service for bulk store")
+                    raise RuntimeError("No storage function found on milvus_service")
                 res = store_fn(documents_to_store)
                 if inspect.isawaitable(res):
                     stored_ids = await res
                 else:
                     stored_ids = res
                 stored_count += len(stored_ids) if stored_ids else 0
-                logger.info(f"✅ Batch {i//batch_size + 1}: Stored {len(stored_ids) if stored_ids else 0} documents in Milvus")
+                logger.info(f"✅ Batch {i//batch_size + 1}: Stored {len(stored_ids) if stored_ids else 0} documents")
             except Exception as e:
-                logger.exception(f"❌ Error storing batch documents in Milvus: {e}")
+                logger.exception(f"❌ Error storing batch documents: {e}")
 
         batch_duration = (datetime.now() - batch_start_time).total_seconds()
         logger.info(f"⏱️ Batch {i//batch_size + 1}/{(len(urls)-1)//batch_size + 1} completed in {batch_duration:.1f}s")
@@ -1015,5 +1571,5 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
     success_rate = (scraped_count / len(urls)) * 100 if urls else 0
     logger.info(
         f"✅ Bulk scrape completed: {scraped_count}/{len(urls)} scraped ({success_rate:.1f}% success), "
-        f"{stored_count} documents stored in Milvus, {error_count} errors"
+        f"{stored_count} documents stored, {error_count} errors"
     )

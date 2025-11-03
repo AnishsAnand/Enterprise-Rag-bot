@@ -19,10 +19,18 @@ load_dotenv()
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "45"))
 MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "3"))
 RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
-EMBEDDING_SIZE_FALLBACK = int(os.getenv("EMBEDDING_SIZE_FALLBACK", "1536"))
-HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "avsolatorio/GIST-Embedding-v0")
-CHAT_MODEL = os.getenv("CHAT_MODEL", "meta/Llama-4-Scout-17B-16E-Instruct")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B").strip()
+HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "openai/gpt-oss-20b-embedding")
+
+REQUIRED_EMBEDDING_DIM = 4096
+EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
+PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+FALLBACK_CHAT_MODELS = [
+    "openai/gpt-oss-20b",
+    "meta/llama-3.1-70b-instruct",
+    "meta/Llama-3.1-8B-Instruct"
+]
+
 GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
 
 logging.basicConfig(
@@ -31,6 +39,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.ERROR)
+
+_env_embedding_dim = os.getenv("EMBEDDING_DIMENSION")
+if _env_embedding_dim and int(_env_embedding_dim) != REQUIRED_EMBEDDING_DIM:
+    logger.critical(
+        f"❌ CRITICAL: EMBEDDING_DIMENSION mismatch! "
+        f"Code requires {REQUIRED_EMBEDDING_DIM} but .env has {_env_embedding_dim}. "
+        f"This WILL cause vector database errors!"
+    )
+    raise RuntimeError(
+        f"Embedding dimension mismatch: code={REQUIRED_EMBEDDING_DIM}, env={_env_embedding_dim}"
+    )
+
+logger.info(f"✅ Embedding dimension validated: {REQUIRED_EMBEDDING_DIM}")
 
 
 class AIServiceError(Exception):
@@ -53,6 +74,11 @@ async def _async_exp_backoff_sleep(attempt: int):
 
 
 class AIService:
+    """
+    Enhanced AI Service with automatic service connection,
+    intelligent task routing, and adaptive response generation.
+    """
+    
     def __init__(self):
         self.grok_client: Optional[Any] = None
         self.http_client: Optional[httpx.AsyncClient] = None
@@ -60,6 +86,22 @@ class AIService:
         self.last_error: Optional[str] = None
         self._embedding_cache: Dict[str, List[float]] = {}
         self._max_cache_size = 1000
+        self.current_chat_model: str = PRIMARY_CHAT_MODEL
+        
+        # Service connection registry
+        self.connected_services: Dict[str, bool] = {
+            "embedding": False,
+            "chat": False,
+            "http_fallback": False
+        }
+        
+        # User requirements storage
+        self.user_requirements_buffer: List[Dict[str, Any]] = []
+        self.max_requirements_buffer = 100
+        
+        # Task execution history
+        self.task_history: List[Dict[str, Any]] = []
+        
         self.setup_clients()
 
         # Enhanced response templates with quality markers
@@ -97,7 +139,23 @@ class AIService:
             "troubleshooting": "problem-solution visual with before/after comparison and clear indicators",
         }
 
-    # ------------------ Setup & Health ------------------
+    def _validate_embedding_dimension(self, embeddings: List[List[float]], expected_dim: int = REQUIRED_EMBEDDING_DIM) -> None:
+        """Validate embedding dimensions"""
+        if not embeddings:
+            return
+        actual_dim = len(embeddings[0]) if embeddings and isinstance(embeddings[0], (list, tuple)) else 0
+        if actual_dim != expected_dim:
+            error_msg = (
+                f"CRITICAL EMBEDDING DIMENSION MISMATCH! "
+                f"Expected: {expected_dim}, Got: {actual_dim}. "
+                f"Model: {EMBEDDING_MODEL}. "
+                f"This indicates the embedding model is returning incorrect dimensions. "
+                f"Database operations WILL FAIL. Check model configuration."
+            )
+            logger.critical(f"❌ {error_msg}")
+            raise AIServiceError(error_msg)
+    
+        logger.debug(f"✅ Embedding dimension validated: {actual_dim} (expected: {expected_dim})")
 
     def setup_clients(self) -> None:
         """Initialize HTTP client and OpenAI-compatible Grok SDK client"""
@@ -110,10 +168,12 @@ class AIService:
                 trust_env=True,
                 follow_redirects=True
             )
-            logger.info("✅ HTTP client initialized with enhanced settings")
+            self.connected_services["http_fallback"] = True
+            logger.info("✅ HTTP client initialized")
         except Exception as e:
             logger.error(f"❌ HTTP client setup failed: {e}")
             self.http_client = None
+            self.connected_services["http_fallback"] = False
 
         grok_key = os.getenv("GROK_API_KEY")
         if not grok_key:
@@ -128,18 +188,22 @@ class AIService:
                 base_url=GROK_BASE_URL, 
                 api_key=grok_key, 
                 timeout=HTTP_TIMEOUT_SECONDS,
-                max_retries=0  # We handle retries manually
+                max_retries=0
             )
             logger.info("✅ Grok client initialized")
 
             ok = self._test_grok_connection()
             if ok:
-                logger.info("✅ Grok service is healthy and ready")
+                logger.info(f"✅ Grok service is healthy and ready (using model: {self.current_chat_model})")
                 self.is_healthy = True
+                self.connected_services["chat"] = True
+                self.connected_services["embedding"] = True
                 self.last_error = None
             else:
                 logger.warning("⚠️ Grok service connection test failed")
                 self.is_healthy = False
+                self.connected_services["chat"] = False
+                self.connected_services["embedding"] = False
                 if not self.last_error:
                     self.last_error = "Grok connection test failed"
         except Exception as e:
@@ -147,38 +211,48 @@ class AIService:
             self.last_error = str(e)
             self.grok_client = None
             self.is_healthy = False
+            self.connected_services["chat"] = False
+            self.connected_services["embedding"] = False
 
     def _test_grok_connection(self) -> bool:
-        """Test Grok connection with minimal request"""
+        """Test Grok connection with model fallback"""
         if not self.grok_client:
             self.last_error = "Grok client not initialized"
             return False
 
-        try:
-            resp = self.grok_client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=[{"role": "user", "content": "test"}],
-                max_tokens=5,
-                timeout=10
-            )
-            
-            if resp and (getattr(resp, "choices", None) or (isinstance(resp, dict) and resp.get("choices"))):
-                return True
-            
-            self.last_error = "Unexpected response structure from Grok"
-            return False
-            
-        except Exception as e:
-            err_str = str(e)
-            if "403" in err_str or "permission" in err_str.lower():
-                self.last_error = "No credits/permission for Grok API (403)"
-                logger.error("❌ Grok API permission denied")
-            elif "401" in err_str or "unauthorized" in err_str.lower():
-                self.last_error = "Invalid Grok API key (401)"
-                logger.error("❌ Grok API authentication failed")
-            else:
-                self.last_error = f"Connection test failure: {err_str[:200]}"
-            return False
+        models_to_try = [PRIMARY_CHAT_MODEL] + FALLBACK_CHAT_MODELS
+        
+        for model in models_to_try:
+            try:
+                logger.info(f"Testing connection with model: {model}")
+                resp = self.grok_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=5,
+                    timeout=10
+                )
+                
+                if resp and (getattr(resp, "choices", None) or (isinstance(resp, dict) and resp.get("choices"))):
+                    self.current_chat_model = model
+                    logger.info(f"✅ Successfully connected using model: {model}")
+                    return True
+                
+            except Exception as e:
+                err_str = str(e)
+                logger.warning(f"⚠️ Model {model} failed: {err_str[:200]}")
+                
+                if "500" in err_str or "Connection error" in err_str or "InternalServerError" in err_str:
+                    continue
+                elif "403" in err_str or "permission" in err_str.lower():
+                    self.last_error = "No credits/permission for Grok API (403)"
+                    return False
+                elif "401" in err_str or "unauthorized" in err_str.lower():
+                    self.last_error = "Invalid Grok API key (401)"
+                    return False
+        
+        self.last_error = f"All models failed. Tried: {', '.join(models_to_try)}"
+        logger.error(f"❌ {self.last_error}")
+        return False
 
     def _ensure_service_available(self) -> None:
         """Raise if Grok SDK client isn't available"""
@@ -187,7 +261,194 @@ class AIService:
             logger.error(error_msg)
             raise AIServiceError(error_msg)
 
-    # ------------------ Utilities ------------------
+    async def auto_connect_services(self) -> Dict[str, bool]:
+        """
+        Automatically attempt to connect/reconnect to all services.
+        Returns dictionary of service connection statuses.
+        """
+        logger.info("🔄 Auto-connecting services...")
+        
+        # Try to reconnect HTTP client if disconnected
+        if not self.connected_services["http_fallback"]:
+            try:
+                if not self.http_client or self.http_client.is_closed:
+                    limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+                    timeout = httpx.Timeout(HTTP_TIMEOUT_SECONDS, connect=15.0, read=HTTP_TIMEOUT_SECONDS)
+                    self.http_client = httpx.AsyncClient(
+                        timeout=timeout,
+                        limits=limits,
+                        trust_env=True,
+                        follow_redirects=True
+                    )
+                self.connected_services["http_fallback"] = True
+                logger.info("✅ HTTP client reconnected")
+            except Exception as e:
+                logger.warning(f"⚠️ HTTP client reconnection failed: {e}")
+                self.connected_services["http_fallback"] = False
+        
+        # Try to reconnect Grok client if disconnected
+        if not self.connected_services["chat"] or not self.connected_services["embedding"]:
+            try:
+                grok_key = os.getenv("GROK_API_KEY")
+                if grok_key:
+                    if not self.grok_client:
+                        self.grok_client = openai.OpenAI(
+                            base_url=GROK_BASE_URL,
+                            api_key=grok_key,
+                            timeout=HTTP_TIMEOUT_SECONDS,
+                            max_retries=0
+                        )
+                    
+                    ok = self._test_grok_connection()
+                    if ok:
+                        self.connected_services["chat"] = True
+                        self.connected_services["embedding"] = True
+                        self.is_healthy = True
+                        logger.info("✅ Grok services reconnected")
+                    else:
+                        logger.warning("⚠️ Grok reconnection test failed")
+            except Exception as e:
+                logger.warning(f"⚠️ Grok client reconnection failed: {e}")
+                self.connected_services["chat"] = False
+                self.connected_services["embedding"] = False
+        
+        connection_summary = {
+            "timestamp": datetime.now().isoformat(),
+            "services": self.connected_services.copy(),
+            "overall_healthy": self.is_healthy,
+            "current_model": self.current_chat_model if self.connected_services["chat"] else None
+        }
+        
+        logger.info(f"🔗 Service connection status: {self.connected_services}")
+        return connection_summary
+
+    async def detect_task_intent(self, query: str) -> Dict[str, Any]:
+        """
+        Use AI to detect task intent from natural language queries.
+        Returns structured intent information for orchestration.
+        """
+        if not self.connected_services["chat"]:
+            await self.auto_connect_services()
+        
+        if not self.connected_services["chat"]:
+            # Fallback to pattern matching
+            return {
+                "type": "unknown",
+                "confidence": 0.0,
+                "original_query": query,
+                "error": "AI service unavailable for intent detection"
+            }
+        
+        prompt = (
+            f"Analyze the following user query and determine the primary task intent.\n\n"
+            f"User Query: {query}\n\n"
+            "Classify the intent into one of these categories:\n"
+            "- scrape: User wants to extract data from a website/URL\n"
+            "- search: User wants to find information from knowledge base\n"
+            "- analyze: User wants analysis, explanation, or summary\n"
+            "- upload: User wants to process/upload a file or document\n"
+            "- bulk_operation: User wants to scrape multiple pages/URLs\n"
+            "- unknown: Intent is unclear\n\n"
+            "Respond ONLY with valid JSON in this format:\n"
+            '{\n'
+            '  "type": "category_name",\n'
+            '  "confidence": 0.0-1.0,\n'
+            '  "extracted_params": ["param1", "param2"],\n'
+            '  "reasoning": "brief explanation"\n'
+            '}'
+        )
+        
+        try:
+            response = await self._call_chat_with_retries(
+                prompt,
+                max_tokens=200,
+                temperature=0.1,
+                timeout=15
+            )
+            
+            # Try to extract JSON
+            intent_data = self._extract_json_safe(response)
+            if intent_data:
+                intent_data["original_query"] = query
+                return intent_data
+            
+        except Exception as e:
+            logger.warning(f"AI intent detection failed: {e}")
+        
+        return {
+            "type": "unknown",
+            "confidence": 0.0,
+            "original_query": query,
+            "error": "Intent detection failed"
+        }
+
+    async def store_user_requirement(self, requirement: Dict[str, Any]):
+        """
+        Store user requirement when task cannot be completed.
+        This helps track what users need but services can't provide.
+        """
+        requirement_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "requirement": requirement,
+            "services_status": self.connected_services.copy()
+        }
+        
+        self.user_requirements_buffer.append(requirement_entry)
+        
+        # Keep buffer size manageable
+        if len(self.user_requirements_buffer) > self.max_requirements_buffer:
+            self.user_requirements_buffer = self.user_requirements_buffer[-self.max_requirements_buffer:]
+        
+        logger.info(f"📝 Stored user requirement: {requirement.get('type', 'unknown')} "
+                   f"(buffer size: {len(self.user_requirements_buffer)})")
+
+    async def get_stored_requirements(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get stored user requirements for analysis."""
+        return self.user_requirements_buffer[-limit:]
+
+    async def analyze_requirements_pattern(self) -> Dict[str, Any]:
+        """
+        Analyze patterns in stored requirements to identify common needs.
+        """
+        if not self.user_requirements_buffer:
+            return {
+                "total_requirements": 0,
+                "patterns": [],
+                "message": "No requirements stored yet"
+            }
+        
+        # Count requirement types
+        type_counts = {}
+        missing_services = {}
+        
+        for entry in self.user_requirements_buffer:
+            req = entry.get("requirement", {})
+            req_type = req.get("type", "unknown")
+            type_counts[req_type] = type_counts.get(req_type, 0) + 1
+            
+            # Track which services were missing
+            services = entry.get("services_status", {})
+            for service, available in services.items():
+                if not available:
+                    missing_services[service] = missing_services.get(service, 0) + 1
+        
+        patterns = [
+            {
+                "type": req_type,
+                "count": count,
+                "percentage": round((count / len(self.user_requirements_buffer)) * 100, 1)
+            }
+            for req_type, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
+        ]
+        
+        return {
+            "total_requirements": len(self.user_requirements_buffer),
+            "patterns": patterns,
+            "missing_services": missing_services,
+            "analysis_timestamp": datetime.now().isoformat()
+        }
+
+    # ==================== Utilities ====================
 
     def _get_text_hash(self, text: str) -> str:
         """Generate hash for caching"""
@@ -198,31 +459,18 @@ class AIService:
         if not text:
             return ""
         
-        # Remove code blocks
         text = re.sub(r"```[\s\S]*?```", "", text)
         text = re.sub(r"`([^`]*)`", r"\1", text)
-        
-        # Remove formatting
-        text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)  # bold+italic
-        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # bold
-        text = re.sub(r"\*(.+?)\*", r"\1", text)  # italic
-        text = re.sub(r"__(.+?)__", r"\1", text)  # bold alt
-        text = re.sub(r"_(.+?)_", r"\1", text)  # italic alt
-        
-        # Remove links but keep text
+        text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        text = re.sub(r"\*(.+?)\*", r"\1", text)
+        text = re.sub(r"__(.+?)__", r"\1", text)
+        text = re.sub(r"_(.+?)_", r"\1", text)
         text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-        
-        # Remove HTML tags
         text = re.sub(r"<[^>]+>", "", text)
-        
-        # Remove headers
         text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
-        
-        # Normalize lists
         text = re.sub(r"^[\-\*\+]\s*", "• ", text, flags=re.MULTILINE)
         text = re.sub(r"^\d+\.\s*", "", text, flags=re.MULTILINE)
-        
-        # Normalize whitespace
         text = re.sub(r"\r\n?", "\n", text)
         text = re.sub(r"\n\s*\n", "\n\n", text)
         text = re.sub(r"[ \t]+", " ", text)
@@ -233,34 +481,29 @@ class AIService:
         """Enhanced query classification"""
         query_lower = (query or "").lower()
         
-        # Instructional patterns
         if any(word in query_lower for word in [
             "how to", "steps", "guide", "tutorial", "instructions", 
             "procedure", "process", "way to", "method"
         ]):
             return "instructional"
         
-        # Troubleshooting patterns
         if any(word in query_lower for word in [
             "error", "problem", "issue", "fix", "troubleshoot", "debug", 
             "not working", "broken", "failed", "crash", "bug"
         ]):
             return "troubleshooting"
         
-        # Explanatory patterns
         if any(word in query_lower for word in [
             "what is", "explain", "define", "meaning", "concept", 
             "theory", "why", "understand", "difference between"
         ]):
             return "explanatory"
         
-        # Default to informational
         return "informational"
 
     def _extract_message_content(self, choice_entry: Any) -> Optional[str]:
         """Safely extract content from various response shapes"""
         try:
-            # Try object attributes first
             message_obj = getattr(choice_entry, "message", None)
             if message_obj is not None:
                 content = getattr(message_obj, "content", None)
@@ -271,12 +514,10 @@ class AIService:
                     if content:
                         return content
             
-            # Try text attribute
             text_attr = getattr(choice_entry, "text", None)
             if text_attr:
                 return text_attr
             
-            # Try dict-like access
             if isinstance(choice_entry, dict):
                 if "message" in choice_entry and isinstance(choice_entry["message"], dict):
                     return choice_entry["message"].get("content")
@@ -288,7 +529,28 @@ class AIService:
         
         return None
 
-    # ------------------ Embeddings with Caching ------------------
+    def _extract_json_safe(self, raw: str) -> Optional[Dict[str, Any]]:
+        """Safely extract JSON from text"""
+        if not raw:
+            return None
+        
+        # Try direct parse
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+        
+        # Try to find JSON object
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', raw)
+            if json_match:
+                return json.loads(json_match.group(0))
+        except Exception:
+            pass
+        
+        return None
+
+    # ==================== Embeddings ====================
 
     async def _generate_embeddings_http(self, texts: List[str], model: str) -> List[List[float]]:
         """HTTP fallback for embeddings with retry logic"""
@@ -306,7 +568,6 @@ class AIService:
         embeddings: List[List[float]] = []
 
         for i, text in enumerate(texts):
-            # Check cache first
             text_hash = self._get_text_hash(text)
             if text_hash in self._embedding_cache:
                 embeddings.append(self._embedding_cache[text_hash])
@@ -330,7 +591,6 @@ class AIService:
                         if isinstance(data, dict) and data.get("data"):
                             emb = data["data"][0].get("embedding")
                             if emb and isinstance(emb, list) and len(emb) > 0:
-                                # Cache the embedding
                                 if len(self._embedding_cache) < self._max_cache_size:
                                     self._embedding_cache[text_hash] = emb
                                 embeddings.append(emb)
@@ -355,12 +615,15 @@ class AIService:
         return embeddings
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings with caching and fallback strategies"""
+        """Generate embeddings with automatic service connection"""
         if not texts:
             logger.warning("Empty texts provided for embedding generation")
             return []
 
-        # Clean and validate texts
+        # Auto-connect if not connected
+        if not self.connected_services["embedding"]:
+            await self.auto_connect_services()
+
         cleaned_texts: List[str] = []
         for text in texts:
             if text is None:
@@ -374,10 +637,9 @@ class AIService:
                 cleaned_texts.append(s[:8000])
 
         # Try SDK path first
-        if self.grok_client:
+        if self.grok_client and self.connected_services["embedding"]:
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
-                    # Try batch embedding first
                     try:
                         result = await asyncio.wait_for(
                             asyncio.to_thread(
@@ -416,7 +678,6 @@ class AIService:
                     except Exception as batch_error:
                         logger.debug(f"Batch embedding failed: {batch_error}, trying per-item")
                         
-                        # Fallback to per-item embedding
                         embeddings = []
                         for t in cleaned_texts:
                             try:
@@ -456,15 +717,15 @@ class AIService:
                         continue
                     else:
                         logger.warning("⚠️ All SDK attempts failed, falling back to HTTP")
+                        self.connected_services["embedding"] = False
                         break
 
         # HTTP fallback
-        if self.http_client:
+        if self.http_client and self.connected_services["http_fallback"]:
             try:
                 logger.info(f"Attempting HTTP embedding with model: {EMBEDDING_MODEL}")
                 embeddings = await self._generate_embeddings_http(cleaned_texts, EMBEDDING_MODEL)
                 
-                # Check if all embeddings are zero (model failure)
                 all_zero = all(
                     len(e) == EMBEDDING_SIZE_FALLBACK and all(v == 0.0 for v in e)
                     for e in embeddings
@@ -487,13 +748,20 @@ class AIService:
                     except Exception as e2:
                         logger.error(f"Hosted embedding fallback also failed: {e2}")
 
+        # Store requirement if all failed
+        await self.store_user_requirement({
+            "type": "embedding_generation_failed",
+            "texts_count": len(texts),
+            "error": "All embedding generation methods failed"
+        })
+        
         raise AIServiceError("All embedding generation methods failed")
 
-    # ------------------ Chat with Enhanced Error Handling ------------------
+    # ==================== Chat Generation ====================
 
     def _llm_chat(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, 
-                  system_message: str = None) -> str:
-        """Synchronous LLM chat call"""
+                  system_message: str = None, model: str = None) -> str:
+        """Synchronous LLM chat call with model fallback"""
         if not prompt:
             logger.warning("Empty prompt provided to _llm_chat")
             return ""
@@ -512,42 +780,79 @@ class AIService:
             {"role": "user", "content": prompt}
         ]
 
-        try:
-            resp = self.grok_client.chat.completions.create(
-                model=CHAT_MODEL,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.9,
-                presence_penalty=0.1,  # Encourage diverse responses
-                frequency_penalty=0.1   # Reduce repetition
-            )
-            
-            # Extract content
-            if hasattr(resp, "choices") and resp.choices:
-                content = self._extract_message_content(resp.choices[0])
-                return content or ""
-            
-            if isinstance(resp, dict) and resp.get("choices"):
-                first = resp["choices"][0]
-                if isinstance(first, dict):
-                    if "message" in first and isinstance(first["message"], dict):
-                        return first["message"].get("content") or ""
-                    if "text" in first:
-                        return first.get("text") or ""
-            
-            return ""
-            
-        except Exception as e:
-            logger.error(f"LLM chat error: {e}")
-            raise
+        model_to_use = model or self.current_chat_model
+        models_to_try = [model_to_use] + [m for m in FALLBACK_CHAT_MODELS if m != model_to_use]
+
+        last_error = None
+        for attempt_model in models_to_try:
+            try:
+                logger.debug(f"Attempting chat with model: {attempt_model}")
+                resp = self.grok_client.chat.completions.create(
+                    model=attempt_model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=0.9,
+                    presence_penalty=0.1,
+                    frequency_penalty=0.1
+                )
+                
+                if hasattr(resp, "choices") and resp.choices:
+                    content = self._extract_message_content(resp.choices[0])
+                    if content:
+                        if attempt_model != self.current_chat_model:
+                            logger.info(f"✅ Switched to working model: {attempt_model}")
+                            self.current_chat_model = attempt_model
+                        return content
+                
+                if isinstance(resp, dict) and resp.get("choices"):
+                    first = resp["choices"][0]
+                    if isinstance(first, dict):
+                        if "message" in first and isinstance(first["message"], dict):
+                            content = first["message"].get("content") or ""
+                            if content and attempt_model != self.current_chat_model:
+                                self.current_chat_model = attempt_model
+                            return content
+                        if "text" in first:
+                            content = first.get("text") or ""
+                            if content and attempt_model != self.current_chat_model:
+                                self.current_chat_model = attempt_model
+                            return content
+                
+            except Exception as e:
+                last_error = e
+                err_str = str(e)
+                logger.warning(f"⚠️ Model {attempt_model} failed: {err_str[:200]}")
+                
+                if "500" in err_str or "Connection error" in err_str or "InternalServerError" in err_str:
+                    continue
+                else:
+                    raise
+        
+        if last_error:
+            logger.error(f"❌ All models failed. Last error: {last_error}")
+            raise last_error
+        
+        return ""
 
     async def _call_chat_with_retries(self, prompt: str, max_tokens: int = 1500, 
                                      temperature: float = 0.2, system_message: str = None,
                                      timeout: float = None) -> str:
-        """Async wrapper with timeout and retries"""
+        """Async wrapper with timeout and retries with auto-reconnection"""
         if timeout is None:
             timeout = HTTP_TIMEOUT_SECONDS
+
+        # Auto-connect if needed
+        if not self.connected_services["chat"]:
+            await self.auto_connect_services()
+
+        if not self.connected_services["chat"]:
+            await self.store_user_requirement({
+                "type": "chat_unavailable",
+                "prompt_length": len(prompt),
+                "error": "Chat service unavailable"
+            })
+            raise AIServiceError("Chat service unavailable after auto-connection attempt")
 
         last_exc = None
         for attempt in range(1, MAX_RETRIES + 1):
@@ -560,7 +865,6 @@ class AIService:
                 if result is None:
                     result = ""
                 
-                # Validate response quality
                 if len(result.strip()) < 20:
                     logger.warning(f"Response too short ({len(result)} chars) on attempt {attempt}")
                     if attempt < MAX_RETRIES:
@@ -574,18 +878,29 @@ class AIService:
                 logger.warning(f"⚠️ Chat attempt {attempt} timed out after {timeout}s")
             except Exception as e:
                 last_exc = e
-                logger.warning(f"⚠️ Chat attempt {attempt} failed: {e}")
+                err_str = str(e)
+                logger.warning(f"⚠️ Chat attempt {attempt} failed: {err_str[:300]}")
+                
+                if "401" in err_str or "403" in err_str:
+                    self.connected_services["chat"] = False
+                    raise AIServiceError(f"Authentication/Permission error: {err_str}")
 
             if attempt < MAX_RETRIES:
                 await _async_exp_backoff_sleep(attempt)
             else:
+                self.connected_services["chat"] = False
+                await self.store_user_requirement({
+                    "type": "chat_generation_failed",
+                    "prompt_length": len(prompt),
+                    "error": str(last_exc)
+                })
                 logger.error(f"❌ All chat attempts failed: {last_exc}")
                 raise AIServiceError(f"Failed to generate response after {MAX_RETRIES} attempts: {last_exc}")
 
-    # ------------------ High-level Response Generation ------------------
+    # ==================== High-level Response Generation ====================
 
     async def generate_response(self, query: str, context: List[str]) -> str:
-        """Compatibility method for legacy code"""
+        """Generate response with automatic fallback"""
         try:
             enhanced = await self.generate_enhanced_response(query, context, query_type=None)
             if isinstance(enhanced, dict):
@@ -596,7 +911,6 @@ class AIService:
         except Exception as e:
             logger.error(f"generate_response failed: {e}")
             try:
-                # Best-effort fallback
                 fallback_prompt = f"Question: {query}\n\nProvide a helpful answer based on general knowledge."
                 raw = await self._call_chat_with_retries(
                     fallback_prompt,
@@ -607,6 +921,11 @@ class AIService:
                 return raw or "I'm unable to generate a response at this time."
             except Exception as inner:
                 logger.error(f"Fallback also failed: {inner}")
+                await self.store_user_requirement({
+                    "type": "response_generation_failed",
+                    "query": query,
+                    "error": str(inner)
+                })
                 return "I apologize, but I'm unable to generate a response at this time due to a service error."
 
     async def generate_expanded_context(self, query: str, context: List[str]) -> str:
@@ -615,11 +934,9 @@ class AIService:
             logger.debug("No context provided for expansion")
             return ""
 
-        # Limit context to manageable size
-        limited_context = context[:8]  # Increased from 5
+        limited_context = context[:8]
         context_text = "\n\n---\n\n".join(limited_context)
         
-        # Smart truncation
         if len(context_text) > 8000:
             sentences = context_text.split(". ")
             truncated = ""
@@ -653,13 +970,12 @@ class AIService:
         try:
             expanded = await self._call_chat_with_retries(
                 prompt,
-                max_tokens=1200,  # Increased for more comprehensive summaries
+                max_tokens=1200,
                 temperature=0.1,
                 system_message=system_msg,
                 timeout=HTTP_TIMEOUT_SECONDS
             )
             
-            # Validate expanded context
             if expanded and len(expanded.strip()) > 50:
                 return expanded
             else:
@@ -675,7 +991,7 @@ class AIService:
 
     async def generate_enhanced_response(self, query: str, context: List[str], 
                                         query_type: str = None) -> Dict[str, Any]:
-        """Generate enhanced response with quality scoring"""
+        """Generate enhanced response with automatic service management"""
         if not query_type:
             query_type = self._classify_query_type(query)
 
@@ -686,7 +1002,6 @@ class AIService:
             logger.error(f"Context expansion failed: {e}")
             expanded_context = "\n\n".join(context[:5]) if context else ""
 
-        # Get template for query type
         template = self.response_templates.get(query_type, self.response_templates["informational"])
 
         prompt = (
@@ -714,7 +1029,7 @@ class AIService:
         try:
             raw_response = await self._call_chat_with_retries(
                 prompt,
-                max_tokens=2000,  # Increased for more comprehensive responses
+                max_tokens=2000,
                 temperature=0.1,
                 system_message=system_msg,
                 timeout=HTTP_TIMEOUT_SECONDS
@@ -761,209 +1076,11 @@ class AIService:
             "expanded_context": expanded_context,
         }
 
-    # ------------------ Stepwise & Summaries ------------------
-
-    def _extract_candidate_images_from_context(self, context_text: str) -> List[Dict[str, Any]]:
-        """Extract candidate images with enhanced pattern matching"""
-        candidates: List[Dict[str, Any]] = []
-
-        try:
-            # Markdown images: ![alt](url)
-            for m in re.finditer(
-                r'!\[([^\]]*)\]\((https?://[^\)]+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?[^\)]*)?)\)',
-                context_text,
-                flags=re.IGNORECASE
-            ):
-                alt = m.group(1).strip()
-                url = m.group(2).strip()
-                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
-                excerpt = context_text[start:end].strip().replace("\n", " ")
-                candidates.append({
-                    "url": url,
-                    "alt": alt,
-                    "caption": "",
-                    "text": excerpt
-                })
-
-            # HTML img tags
-            for m in re.finditer(
-                r'<img[^>]+src=["\'](https?://[^"\']+)["\'][^>]*>',
-                context_text,
-                flags=re.IGNORECASE
-            ):
-                url = m.group(1).strip()
-                tag = m.group(0)
-                alt_match = re.search(r'alt=["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
-                alt = alt_match.group(1).strip() if alt_match else ""
-                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
-                excerpt = context_text[start:end].strip().replace("\n", " ")
-                candidates.append({
-                    "url": url,
-                    "alt": alt,
-                    "caption": "",
-                    "text": excerpt
-                })
-
-            # Plain image URLs
-            for m in re.finditer(
-                r'(https?://\S+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?\S*)?)',
-                context_text,
-                flags=re.IGNORECASE
-            ):
-                url = m.group(1).strip().rstrip('),.;')
-                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
-                excerpt = context_text[start:end].strip().replace("\n", " ")
-                if not any(c["url"] == url for c in candidates):
-                    candidates.append({
-                        "url": url,
-                        "alt": "",
-                        "caption": "",
-                        "text": excerpt
-                    })
-
-        except Exception as e:
-            logger.debug(f"Error extracting candidate images: {e}")
-
-        # Deduplicate by URL
-        unique = []
-        seen = set()
-        for c in candidates:
-            if c["url"] not in seen:
-                seen.add(c["url"])
-                unique.append(c)
-        
-        return unique
-
-    def _score_text_similarity(self, a: str, b: str) -> float:
-        """Enhanced text similarity scoring"""
-        if not a or not b:
-            return 0.0
-        
-        a_norm = " ".join(a.lower().split())
-        b_norm = " ".join(b.lower().split())
-        
-        # Sequence matching
-        seq = difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
-        
-        # Token overlap
-        a_words = set(a_norm.split())
-        b_words = set(b_norm.split())
-        overlap = len(a_words & b_words) / (len(a_words | b_words) or 1)
-        
-        # Substring bonus
-        substring_bonus = 0.0
-        if len(a_norm) > 10 and len(b_norm) > 10:
-            if a_norm in b_norm or b_norm in a_norm:
-                substring_bonus = 0.2
-        
-        return min(1.0, 0.5 * seq + 0.4 * overlap + 0.1 * substring_bonus)
-
-    def _assign_images_to_steps(self, steps: List[Dict[str, Any]], 
-                                candidate_images: List[Dict[str, Any]],
-                                query_type: str) -> List[Dict[str, Any]]:
-        """Intelligently assign images to steps with fallback to prompts"""
-        enhanced = []
-        used_image_indices = set()
-        
-        for i, step in enumerate(steps):
-            s_text = step.get("text", "") or ""
-            s_type = step.get("type", "action")
-            step_img = step.get("image") or step.get("image_url") or step.get("image_prompt")
-
-            assigned = None
-
-            # Priority 1: Use explicit image from step
-            if isinstance(step_img, dict) and step_img.get("url"):
-                assigned = {
-                    "url": step_img.get("url"),
-                    "alt": step_img.get("alt", "") or "",
-                    "caption": step_img.get("caption", "") or "",
-                }
-            elif isinstance(step_img, str) and step_img.startswith("http"):
-                assigned = {"url": step_img, "alt": "", "caption": ""}
-
-            # Priority 2: Find best matching candidate image
-            if not assigned and candidate_images:
-                best_score = 0.0
-                best_img = None
-                best_idx = None
-                
-                for idx, img in enumerate(candidate_images):
-                    if idx in used_image_indices:
-                        continue
-                    
-                    # Combine all image text for matching
-                    text_blob = " ".join([
-                        img.get("alt", ""),
-                        img.get("caption", ""),
-                        img.get("text", "")
-                    ])
-                    
-                    score = self._score_text_similarity(s_text, text_blob)
-                    
-                    # Boost score for technical images
-                    url_lower = (img.get("url") or "").lower()
-                    if any(k in url_lower for k in [
-                        "diagram", "chart", "screenshot", "flow", "graph",
-                        "architecture", "schematic", "blueprint"
-                    ]):
-                        score += 0.08
-                    
-                    # Boost for numbered/step images
-                    if f"step{i+1}" in url_lower or f"step-{i+1}" in url_lower:
-                        score += 0.15
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_img = img
-                        best_idx = idx
-                
-                # Use best match if score is reasonable
-                if best_img and best_score >= 0.15:
-                    assigned = {
-                        "url": best_img.get("url"),
-                        "alt": best_img.get("alt", ""),
-                        "caption": best_img.get("caption", "")
-                    }
-                    if best_idx is not None:
-                        used_image_indices.add(best_idx)
-
-            # Priority 3: Generate image prompt if no URL available
-            if not assigned:
-                # Check for explicit image_prompt
-                lp = step.get("image_prompt") or step.get("image_desc") or step.get("image_description")
-                if lp and isinstance(lp, str) and lp.strip():
-                    assigned = {"image_prompt": lp.strip()}
-                else:
-                    # Auto-generate descriptive prompt
-                    style = self.image_styles.get(query_type, self.image_styles["instructional"])
-                    prompt = (
-                        f"Create a clear, professional illustration for: {s_text.strip()}. "
-                        f"Style: {style}. Focus on clarity, proper labeling, and visual hierarchy. "
-                        f"The image should be self-explanatory and directly support the step description."
-                    )
-                    assigned = {"image_prompt": prompt}
-
-            # Build step output
-            step_out = {
-                "text": s_text,
-                "type": s_type,
-                "step_number": step.get("step_number", i + 1)
-            }
-            
-            if assigned:
-                step_out["image"] = assigned
-
-            enhanced.append(step_out)
-        
-        return enhanced
-
     async def generate_stepwise_response(self, query: str, context: List[str]) -> List[Dict[str, Any]]:
         """Generate comprehensive stepwise instructions with image assignment"""
         organized_context = self._organize_context(context, query)
         candidate_images = self._extract_candidate_images_from_context(organized_context)
 
-        # Prepare available images for LLM reference
         available_images_json = json.dumps(candidate_images[:30], ensure_ascii=False, indent=2)
         
         query_type = self._classify_query_type(query)
@@ -1008,6 +1125,11 @@ class AIService:
             steps = self._extract_json_array_safe(raw)
         except AIServiceError as e:
             logger.error(f"Failed to generate stepwise response: {e}")
+            await self.store_user_requirement({
+                "type": "stepwise_generation_failed",
+                "query": query,
+                "error": str(e)
+            })
             return [{
                 "text": f"AI service unavailable: {self.last_error}",
                 "type": "error",
@@ -1021,7 +1143,6 @@ class AIService:
                 "step_number": 1
             }]
 
-        # Normalize steps
         enhanced_steps = []
         for i, step in enumerate(steps[:12]):
             if isinstance(step, dict) and "text" in step:
@@ -1031,7 +1152,6 @@ class AIService:
                     "step_number": i + 1
                 }
                 
-                # Propagate image information
                 if "image" in step and isinstance(step["image"], dict):
                     normalized["image"] = step["image"]
                 elif "image_url" in step and isinstance(step["image_url"], str):
@@ -1041,7 +1161,6 @@ class AIService:
                 
                 enhanced_steps.append(normalized)
 
-        # Fallback parsing if JSON extraction failed
         if not enhanced_steps:
             try:
                 fallback_steps = []
@@ -1051,31 +1170,19 @@ class AIService:
                     if not line:
                         continue
                     
-                    # Try various step patterns
-                    # Try various step patterns
                     m = re.match(
-                    r'^(?:\d+[\.\)]\s*)?(?:Step\s*\d+:)?\s*(.+)',
-                    line,
-                    re.IGNORECASE
+                        r'^(?:\d+[\.\)]\s*)?(?:Step\s*\d+:)?\s*(.+)',
+                        line,
+                        re.IGNORECASE
                     )
-                    if m:
-                        text = m.group(1).strip()
-                        if len(text) > 5:
-                            fallback_steps.append({
-                            "text": text,
-                            "type": "action",
-                            "step_number": len(fallback_steps) + 1
-                            })
-                            if len(fallback_steps) >= 12:
-                                break
-
                     if m:
                         text = m.group(1).strip()
                         if len(text) > 5:
                             fallback_steps.append({
                                 "text": text,
                                 "type": "action",
-                                "step_number": len(fallback_steps) + 1})
+                                "step_number": len(fallback_steps) + 1
+                            })
                             if len(fallback_steps) >= 12:
                                 break
                 
@@ -1091,7 +1198,6 @@ class AIService:
                     "step_number": 1
                 }]
 
-        # Assign images to steps
         final_steps = self._assign_images_to_steps(
             enhanced_steps,
             candidate_images,
@@ -1105,7 +1211,6 @@ class AIService:
         if not text or len(text.strip()) < 50:
             return text[:max_chars] if text else ""
 
-        # Smart truncation for long texts
         if len(text) > 10000:
             sentences = text.split(". ")
             truncated = ""
@@ -1145,11 +1250,9 @@ class AIService:
             if raw:
                 summary = self.strip_markdown(raw).strip()
                 
-                # Validate summary quality
                 if len(summary) > len(text):
                     summary = text[:max_chars]
                 elif len(summary) < 20:
-                    # Summary too short, use beginning of text
                     summary = text[:max_chars]
                 
                 return summary
@@ -1157,7 +1260,6 @@ class AIService:
         except (AIServiceError, Exception) as e:
             logger.error(f"Summary generation failed: {e}")
 
-        # Fallback: extract first few sentences
         sentences = text.split(". ")
         summary_parts = []
         current_length = 0
@@ -1170,14 +1272,13 @@ class AIService:
         
         return ". ".join(summary_parts) + "." if summary_parts else text[:max_chars]
 
-    # ------------------ Helpers ------------------
+    # ==================== Helper Methods ====================
 
     def _extract_json_array_safe(self, raw: str) -> List[Dict[str, Any]]:
-        """Robust JSON array extraction with multiple strategies"""
+        """Robust JSON array extraction"""
         if not raw:
             return []
 
-        # Strategy 1: Direct JSON parse
         try:
             data = json.loads(raw)
             if isinstance(data, list):
@@ -1189,7 +1290,6 @@ class AIService:
         except Exception:
             pass
 
-        # Strategy 2: Find JSON array in text
         try:
             json_match = re.search(r'\[[\s\S]*\]', raw)
             if json_match:
@@ -1199,7 +1299,6 @@ class AIService:
         except Exception:
             pass
 
-        # Strategy 3: Find JSON objects
         try:
             objects = re.findall(r'\{[\s\S]*?\}', raw)
             steps = []
@@ -1215,15 +1314,14 @@ class AIService:
         except Exception:
             pass
 
-        # Strategy 4: Parse as plain text steps
         steps: List[Dict[str, Any]] = []
         lines = raw.split("\n")
         
         patterns = [
-            r'^\s*(?:\d+[\.\)]\s*)(.+)',  # Numbered: 1. or 1)
-            r'^\s*[-*•]\s*(.+)',  # Bullet points
-            r'^\s*Step\s*\d+\s*:\s*(.+)',  # Step N:
-            r'^\s*\[?\d+\]?\s*(.+)',  # [1] or just text
+            r'^\s*(?:\d+[\.\)]\s*)(.+)',
+            r'^\s*[-*•]\s*(.+)',
+            r'^\s*Step\s*\d+\s*:\s*(.+)',
+            r'^\s*\[?\d+\]?\s*(.+)',
         ]
         
         for line in lines:
@@ -1244,7 +1342,6 @@ class AIService:
                         matched = True
                         break
             
-            # If no pattern matched but line looks like a step, include it
             if not matched and len(line) > 15:
                 steps.append({
                     "text": line,
@@ -1257,13 +1354,12 @@ class AIService:
         return steps[:12]
 
     def _organize_context(self, context: List[str], query: str) -> str:
-        """Organize context by relevance with enhanced scoring"""
+        """Organize context by relevance"""
         if not context:
             return "No specific context provided."
 
         query_terms = set(re.findall(r'\b\w+\b', (query or "").lower()))
         
-        # Remove common stopwords from query terms
         stopwords = {
             'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
             'had', 'her', 'was', 'one', 'our', 'out', 'get', 'has', 'how'
@@ -1277,21 +1373,14 @@ class AIService:
             text_lower = text.lower()
             text_terms = set(re.findall(r'\b\w+\b', text_lower))
             
-            # Term overlap score
             term_overlap = len(query_terms.intersection(text_terms))
-            
-            # Length score (prefer substantial content)
             length_score = min(len(text) / 2000.0, 1.0)
-            
-            # Phrase matching
             phrase_matches = sum(1 for term in query_terms if term in text_lower)
             
-            # Position bonus (first occurrence of query terms)
             position_score = 0.0
             for term in query_terms:
                 pos = text_lower.find(term)
                 if pos != -1:
-                    # Earlier is better
                     position_score += max(0, 1.0 - (pos / len(text_lower)))
             
             return (
@@ -1301,14 +1390,11 @@ class AIService:
                 position_score * 0.5
             )
 
-        # Sort by relevance
         sorted_context = sorted(context[:12], key=relevance_score, reverse=True)
         
-        # Format organized context
         organized = []
         for i, ctx in enumerate(sorted_context, 1):
             if ctx and len(ctx.strip()) > 30:
-                # Truncate very long individual contexts
                 if len(ctx) > 3000:
                     ctx = ctx[:3000] + "... [truncated]"
                 organized.append(f"Source {i}:\n{ctx.strip()}")
@@ -1320,9 +1406,8 @@ class AIService:
         if not response or len(response.strip()) < 10:
             return 0.0
         
-        score = 0.2  # Base score
+        score = 0.2
         
-        # Length score (optimal range)
         length = len(response)
         if 300 <= length <= 2500:
             score += 0.25
@@ -1333,13 +1418,11 @@ class AIService:
         elif length > 4000:
             score += 0.10
 
-        # Query term coverage
         query_terms = set(re.findall(r'\b\w+\b', (query or "").lower()))
         response_terms = set(re.findall(r'\b\w+\b', response.lower()))
         coverage = len(query_terms.intersection(response_terms)) / max(len(query_terms), 1)
         score += coverage * 0.25
 
-        # Structure score (paragraphs, sentences)
         if "\n\n" in response or ". " in response:
             paragraph_count = response.count("\n\n") + 1
             if 2 <= paragraph_count <= 6:
@@ -1347,7 +1430,6 @@ class AIService:
             elif paragraph_count > 1:
                 score += 0.10
 
-        # Context utilization
         if context:
             context_text = " ".join(context).lower()
             context_terms = set(re.findall(r'\b\w+\b', context_text))
@@ -1356,10 +1438,188 @@ class AIService:
 
         return min(score, 1.0)
 
-    # ------------------ Health ------------------
+    def _extract_candidate_images_from_context(self, context_text: str) -> List[Dict[str, Any]]:
+        """Extract candidate images from context"""
+        candidates: List[Dict[str, Any]] = []
+
+        try:
+            for m in re.finditer(
+                r'!\[([^\]]*)\]\((https?://[^\)]+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?[^\)]*)?)\)',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                alt = m.group(1).strip()
+                url = m.group(2).strip()
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                candidates.append({
+                    "url": url,
+                    "alt": alt,
+                    "caption": "",
+                    "text": excerpt
+                })
+
+            for m in re.finditer(
+                r'<img[^>]+src=["\'](https?://[^"\']+)["\'][^>]*>',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                url = m.group(1).strip()
+                tag = m.group(0)
+                alt_match = re.search(r'alt=["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
+                alt = alt_match.group(1).strip() if alt_match else ""
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                candidates.append({
+                    "url": url,
+                    "alt": alt,
+                    "caption": "",
+                    "text": excerpt
+                })
+
+            for m in re.finditer(
+                r'(https?://\S+\.(?:png|jpe?g|gif|svg|webp|bmp)(?:\?\S*)?)',
+                context_text,
+                flags=re.IGNORECASE
+            ):
+                url = m.group(1).strip().rstrip('),.;')
+                start, end = max(0, m.start() - 150), min(len(context_text), m.end() + 150)
+                excerpt = context_text[start:end].strip().replace("\n", " ")
+                if not any(c["url"] == url for c in candidates):
+                    candidates.append({
+                        "url": url,
+                        "alt": "",
+                        "caption": "",
+                        "text": excerpt
+                    })
+
+        except Exception as e:
+            logger.debug(f"Error extracting candidate images: {e}")
+
+        unique = []
+        seen = set()
+        for c in candidates:
+            if c["url"] not in seen:
+                seen.add(c["url"])
+                unique.append(c)
+        
+        return unique
+
+    def _score_text_similarity(self, a: str, b: str) -> float:
+        """Enhanced text similarity scoring"""
+        if not a or not b:
+            return 0.0
+        
+        a_norm = " ".join(a.lower().split())
+        b_norm = " ".join(b.lower().split())
+        
+        seq = difflib.SequenceMatcher(None, a_norm, b_norm).ratio()
+        
+        a_words = set(a_norm.split())
+        b_words = set(b_norm.split())
+        overlap = len(a_words & b_words) / (len(a_words | b_words) or 1)
+        
+        substring_bonus = 0.0
+        if len(a_norm) > 10 and len(b_norm) > 10:
+            if a_norm in b_norm or b_norm in a_norm:
+                substring_bonus = 0.2
+        
+        return min(1.0, 0.5 * seq + 0.4 * overlap + 0.1 * substring_bonus)
+
+    def _assign_images_to_steps(self, steps: List[Dict[str, Any]], 
+                                candidate_images: List[Dict[str, Any]],
+                                query_type: str) -> List[Dict[str, Any]]:
+        """Intelligently assign images to steps"""
+        enhanced = []
+        used_image_indices = set()
+        
+        for i, step in enumerate(steps):
+            s_text = step.get("text", "") or ""
+            s_type = step.get("type", "action")
+            step_img = step.get("image") or step.get("image_url") or step.get("image_prompt")
+
+            assigned = None
+
+            if isinstance(step_img, dict) and step_img.get("url"):
+                assigned = {
+                    "url": step_img.get("url"),
+                    "alt": step_img.get("alt", "") or "",
+                    "caption": step_img.get("caption", "") or "",
+                }
+            elif isinstance(step_img, str) and step_img.startswith("http"):
+                assigned = {"url": step_img, "alt": "", "caption": ""}
+
+            if not assigned and candidate_images:
+                best_score = 0.0
+                best_img = None
+                best_idx = None
+                
+                for idx, img in enumerate(candidate_images):
+                    if idx in used_image_indices:
+                        continue
+                    
+                    text_blob = " ".join([
+                        img.get("alt", ""),
+                        img.get("caption", ""),
+                        img.get("text", "")
+                    ])
+                    
+                    score = self._score_text_similarity(s_text, text_blob)
+                    
+                    url_lower = (img.get("url") or "").lower()
+                    if any(k in url_lower for k in [
+                        "diagram", "chart", "screenshot", "flow", "graph",
+                        "architecture", "schematic", "blueprint"
+                    ]):
+                        score += 0.08
+                    
+                    if f"step{i+1}" in url_lower or f"step-{i+1}" in url_lower:
+                        score += 0.15
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_img = img
+                        best_idx = idx
+                
+                if best_img and best_score >= 0.15:
+                    assigned = {
+                        "url": best_img.get("url"),
+                        "alt": best_img.get("alt", ""),
+                        "caption": best_img.get("caption", "")
+                    }
+                    if best_idx is not None:
+                        used_image_indices.add(best_idx)
+
+            if not assigned:
+                lp = step.get("image_prompt") or step.get("image_desc") or step.get("image_description")
+                if lp and isinstance(lp, str) and lp.strip():
+                    assigned = {"image_prompt": lp.strip()}
+                else:
+                    style = self.image_styles.get(query_type, self.image_styles["instructional"])
+                    prompt = (
+                        f"Create a clear, professional illustration for: {s_text.strip()}. "
+                        f"Style: {style}. Focus on clarity, proper labeling, and visual hierarchy. "
+                        f"The image should be self-explanatory and directly support the step description."
+                    )
+                    assigned = {"image_prompt": prompt}
+
+            step_out = {
+                "text": s_text,
+                "type": s_type,
+                "step_number": step.get("step_number", i + 1)
+            }
+            
+            if assigned:
+                step_out["image"] = assigned
+
+            enhanced.append(step_out)
+        
+        return enhanced
+
+    # ==================== Health Check ====================
 
     async def get_service_health(self) -> Dict[str, Any]:
-        """Comprehensive service health check"""
+        """Comprehensive service health check with auto-reconnection"""
         health_status: Dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
             "service": {
@@ -1369,13 +1629,20 @@ class AIService:
                 "status": "unknown",
                 "last_error": self.last_error,
                 "models": {
-                    "chat": CHAT_MODEL,
+                    "chat": self.current_chat_model,
+                    "chat_fallbacks": FALLBACK_CHAT_MODELS,
                     "embeddings": EMBEDDING_MODEL
                 },
                 "cache_size": len(self._embedding_cache),
+                "connected_services": self.connected_services.copy(),
             },
             "overall_status": "unknown",
         }
+
+        # Attempt auto-reconnection if unhealthy
+        if not self.is_healthy:
+            logger.info("🔄 Attempting auto-reconnection during health check...")
+            await self.auto_connect_services()
 
         if self.grok_client:
             try:
@@ -1384,31 +1651,38 @@ class AIService:
                     health_status["service"]["status"] = "healthy"
                     health_status["service"]["healthy"] = True
                     health_status["overall_status"] = "healthy"
+                    health_status["service"]["current_model"] = self.current_chat_model
                     self.is_healthy = True
                     self.last_error = None
-                    logger.info("✅ Grok service health check: HEALTHY")
+                    logger.info(f"✅ Service health check: HEALTHY (model: {self.current_chat_model})")
                 else:
                     health_status["service"]["status"] = "unhealthy"
                     health_status["service"]["healthy"] = False
                     health_status["overall_status"] = "unhealthy"
                     health_status["service"]["last_error"] = self.last_error
-                    logger.warning(f"⚠️ Grok service health check: UNHEALTHY - {self.last_error}")
+                    logger.warning(f"⚠️ Service health check: UNHEALTHY - {self.last_error}")
             except Exception as e:
                 health_status["service"]["status"] = "error"
                 health_status["service"]["healthy"] = False
                 health_status["overall_status"] = "error"
                 health_status["error"] = str(e)
                 self.last_error = str(e)
-                logger.error(f"❌ Grok service health check error: {e}")
+                logger.error(f"❌ Service health check error: {e}")
         else:
             health_status["overall_status"] = "unavailable"
             health_status["service"]["last_error"] = self.last_error or "Service not initialized"
             logger.error("❌ Grok client not initialized")
 
+        # Add requirements analysis
+        health_status["user_requirements"] = {
+            "stored_count": len(self.user_requirements_buffer),
+            "analysis": await self.analyze_requirements_pattern() if self.user_requirements_buffer else None
+        }
+
         logger.info(f"Service health check completed - Status: {health_status['overall_status']}")
         return health_status
 
-    # ------------------ Cleanup ------------------
+    # ==================== Cleanup ====================
 
     async def __aenter__(self):
         return self
@@ -1432,11 +1706,11 @@ class AIService:
                 logger.debug(f"Grok client close attempt raised: {e}")
 
 
-# ------------------ Production singleton ------------------
+# ==================== Production Singleton ====================
 
 try:
     ai_service = AIService()
-    logger.info("✅ AI Service instance created (best-effort initialization)")
+    logger.info(f"✅ AI Service instance created with model: {ai_service.current_chat_model}")
 except Exception as e:
     logger.critical(f"❌ CRITICAL: Unexpected exception creating AI service instance: {e}")
     try:

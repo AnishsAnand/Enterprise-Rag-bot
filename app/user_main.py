@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-
+from fastapi import BackgroundTasks
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -197,7 +197,7 @@ class UserQueryRequest(BaseModel):
 
 # ------------------------ Chat API (end-user) ------------------------
 @app.post("/api/chat/query")
-async def user_chat_query(request: UserQueryRequest):
+async def user_chat_query(request: UserQueryRequest, background_tasks: BackgroundTasks):
     """
     End-user query endpoint using rag_widget.widget_query handler.
     Enhanced fallback will perform broader Milvus search + generate stepwise response
@@ -212,8 +212,11 @@ async def user_chat_query(request: UserQueryRequest):
 
         # build a widget request (balanced by default) and call widget_query
         WidgetReqModel = getattr(rag_widget, "WidgetQueryRequest")
-        # Keep widget max within WidgetQueryRequest bounds and avoid accidentally forcing huge workloads.
-        widget_max = min(max(int(request.max_results or 1), 5), 100)
+        if WidgetReqModel is None:
+            logger.error("rag_widget.WidgetQueryRequest model missing")
+            raise HTTPException(status_code=500, detail="Widget model not available")
+        
+        widget_max = min(max(int(request.max_results or 1), 1), 100)
         logger.debug("Building widget request with max_results=%d", widget_max)
 
         widget_req = WidgetReqModel(
@@ -225,12 +228,23 @@ async def user_chat_query(request: UserQueryRequest):
         )
 
 
-        widget_resp = None
+        widget_resp = None 
         try:
-            widget_resp = await getattr(rag_widget, "widget_query")(widget_req)
+            widget_query_fn = getattr(rag_widget, "widget_query", None)
+            if widget_query_fn is None:
+                raise RuntimeError("rag_widget.widget_query not available")
+
+            # use a timeout to protect caller (adjust as needed)
+            import asyncio
+            try:
+                widget_resp = await asyncio.wait_for(widget_query_fn(widget_req, background_tasks), timeout=20)
+            except asyncio.TimeoutError:
+                logger.warning("rag_widget.widget_query timed out")
+                widget_resp = None
         except Exception as e:
             logger.exception("Error calling rag_widget.widget_query: %s", e)
             widget_resp = None
+        
 
         # Basic validation
         def _is_weak_widget_response(resp: Optional[dict]) -> bool:
