@@ -1,37 +1,52 @@
-# Stage 1: Build Angular frontends
-FROM node:18 AS admin-frontend-build
-WORKDIR /admin-frontend
-COPY angular-frontend/ ./
-RUN npm install && npm run build --prod
 
-FROM node:18 AS user-frontend-build
-WORKDIR /user-frontend
-COPY user-frontend/ ./
-RUN npm install && npm run build --prod
+FROM python:3.11-slim AS base
 
-# Stage 2: Python backend
-FROM python:3.11-slim AS backend
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+ENV PATH="/root/.local/bin:$PATH"
 
-# Install Python dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget git nginx supervisor build-essential netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend app
+
 COPY app ./app
+COPY docker /docker
 
-# Install nginx
-RUN apt-get update && apt-get install -y nginx && rm -rf /var/lib/apt/lists/*
+FROM node:20 AS admin-frontend-build
+WORKDIR /angular-frontend
+COPY angular-frontend/package*.json ./
+RUN npm install --force
+COPY angular-frontend/ .
+RUN npm run build --prod
 
-# Copy built frontends
-COPY --from=admin-frontend-build /admin-frontend/dist/enterprise-rag-frontend /var/www/admin
-COPY --from=user-frontend-build /user-frontend/dist/user-rag-frontend /var/www/user
+FROM node:20 AS user-frontend-build
+WORKDIR /user-frontend
+COPY user-frontend/package*.json ./
+RUN npm install --force
+COPY user-frontend/ .
+RUN npm run build --prod
 
-# Nginx config
-COPY default.conf /etc/nginx/conf.d/default.conf
+FROM base AS final
 
-# Expose backend and frontend ports
-EXPOSE 8000 80
+COPY --from=admin-frontend-build /angular-frontend/dist/enterprise-rag-frontend /var/www/admin
+COPY --from=user-frontend-build /user-frontend/dist/user-frontend /var/www/user
 
-# Start both backend and nginx
-CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 & nginx -g "daemon off;"
+COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/admin_default.conf /etc/nginx/conf.d/admin_default.conf
+COPY docker/user_default.conf /etc/nginx/conf.d/user_default.conf
+
+RUN mkdir -p /var/log /var/run/supervisor /app/logs /app/uploads /app/outputs /app/backups \
+    && chmod -R 755 /var/log /var/run/supervisor /app/logs /app/uploads /app/outputs /app/backups
+
+
+RUN chown -R root:root /var/www /app
+
+RUN which supervisord && which nginx && which uvicorn
+
+EXPOSE 4200 4201 8000 8001
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
