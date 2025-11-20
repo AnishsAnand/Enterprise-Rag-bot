@@ -57,8 +57,6 @@ class TaskExecutionRequest(BaseModel):
     store_result: bool = Field(default=True)
 
 
-# ===================== Orchestration Service =====================
-
 class OrchestrationService:
     """
     Advanced orchestration service for automatic task detection,
@@ -1570,6 +1568,6 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
 
     success_rate = (scraped_count / len(urls)) * 100 if urls else 0
     logger.info(
-        f"✅ Bulk scrape completed: {scraped_count}/{len(urls)} scraped ({success_rate:.1f}% success), "
+        f" Bulk scrape completed: {scraped_count}/{len(urls)} scraped ({success_rate:.1f}% success), "
         f"{stored_count} documents stored, {error_count} errors"
     )

@@ -88,23 +88,22 @@ class AIService:
         self._max_cache_size = 1000
         self.current_chat_model: str = PRIMARY_CHAT_MODEL
         
-        # Service connection registry
         self.connected_services: Dict[str, bool] = {
             "embedding": False,
             "chat": False,
             "http_fallback": False
         }
         
-        # User requirements storage
+        
         self.user_requirements_buffer: List[Dict[str, Any]] = []
         self.max_requirements_buffer = 100
         
-        # Task execution history
+        
         self.task_history: List[Dict[str, Any]] = []
         
         self.setup_clients()
 
-        # Enhanced response templates with quality markers
+        
         self.response_templates = {
             "informational": (
                 "Provide a comprehensive and accurate answer based on the context below. "
@@ -1272,7 +1271,7 @@ class AIService:
         
         return ". ".join(summary_parts) + "." if summary_parts else text[:max_chars]
 
-    # ==================== Helper Methods ====================
+    
 
     def _extract_json_array_safe(self, raw: str) -> List[Dict[str, Any]]:
         """Robust JSON array extraction"""
@@ -1616,7 +1615,7 @@ class AIService:
         
         return enhanced
 
-    # ==================== Health Check ====================
+
 
     async def get_service_health(self) -> Dict[str, Any]:
         """Comprehensive service health check with auto-reconnection"""
@@ -1639,7 +1638,7 @@ class AIService:
             "overall_status": "unknown",
         }
 
-        # Attempt auto-reconnection if unhealthy
+
         if not self.is_healthy:
             logger.info("🔄 Attempting auto-reconnection during health check...")
             await self.auto_connect_services()
@@ -1673,7 +1672,7 @@ class AIService:
             health_status["service"]["last_error"] = self.last_error or "Service not initialized"
             logger.error("❌ Grok client not initialized")
 
-        # Add requirements analysis
+        
         health_status["user_requirements"] = {
             "stored_count": len(self.user_requirements_buffer),
             "analysis": await self.analyze_requirements_pattern() if self.user_requirements_buffer else None
@@ -1682,7 +1681,7 @@ class AIService:
         logger.info(f"Service health check completed - Status: {health_status['overall_status']}")
         return health_status
 
-    # ==================== Cleanup ====================
+   
 
     async def __aenter__(self):
         return self
@@ -1705,8 +1704,55 @@ class AIService:
             except Exception as e:
                 logger.debug(f"Grok client close attempt raised: {e}")
 
+    async def analyze_intent(self, query: str) -> dict:
+        """
+        Convert a natural language command into an executable intent.
+        """
+        query_lower = query.lower()
 
-# ==================== Production Singleton ====================
+        # Simple heuristic routing
+        if any(k in query_lower for k in ["user", "log", "profile"]):
+            target = "user"
+        elif any(k in query_lower for k in ["admin", "approve", "create", "task"]):
+            target = "admin"
+        else:
+            target = "rag"
+
+        # Try to detect method (GET/POST)
+        method = "POST" if "create" in query_lower or "add" in query_lower else "GET"
+
+        # Extract numbers or counts
+        limit = re.findall(r"\d+", query_lower)
+        limit_value = int(limit[0]) if limit else 5
+
+        logger.info(f"Intent routing → target={target}, method={method}")
+
+        return {
+            "type": "action" if target in ["user", "admin"] else "knowledge",
+            "payload": {
+                "target": f"http://localhost:{'8001' if target == 'user' else '8002'}",
+                "method": method,
+                "path": "/api/logs" if "log" in query_lower else "/api/data",
+                "params": {"limit": limit_value},
+            },
+        }
+
+    async def extract_action_payload(self, query: str) -> Dict[str, Any]:
+        # Use your LLM or regex to extract method, target, and payload details
+        return {
+            "method": "POST",
+            "path": "/api/v1/task",
+            "json": {"description": query}
+        }
+
+    async def check_missing_parameters(self, json_payload: dict) -> list:
+        missing = [k for k, v in json_payload.items() if v in (None, "")]
+        return missing
+
+    async def formulate_clarification(self, missing_fields: list) -> str:
+        fields = ", ".join(missing_fields)
+        return f"I need a bit more info: please provide values for {fields}."
+
 
 try:
     ai_service = AIService()
