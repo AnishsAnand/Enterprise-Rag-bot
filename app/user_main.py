@@ -260,7 +260,9 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
                 return True
             if len(answer) < 80:
                 return True
-            if request.include_images and (not images):
+            # Skip image requirement for high-confidence responses (API data like cluster listings)
+            # Images are only needed for RAG documentation responses
+            if request.include_images and (not images) and confidence < 0.95:
                 return True
             return False
 

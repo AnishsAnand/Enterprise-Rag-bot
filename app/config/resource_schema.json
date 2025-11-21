@@ -1,0 +1,139 @@
+{
+    "resources": {
+      "engagement": {
+        "operations": ["get"],
+        "api_endpoints": {
+          "get": {
+            "method": "GET", 
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/engagements",
+            "description": "Fetch engagement details for authenticated user. Response contains engagementId which is used in subsequent API calls."
+          }
+        },
+        "parameters": {
+          "get": {
+            "required": [],
+            "optional": []
+          }
+        },
+        "response_mapping": {
+          "engagement_id": "data[0].id",
+          "engagement_name": "data[0].engagementName",
+          "customer_name": "data[0].customerName"
+        },
+        "permissions": {
+          "get": ["admin", "developer", "viewer"]
+        }
+      },
+      "endpoint": {
+        "operations": ["list"],
+        "api_endpoints": {
+          "list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/configservice/getEndpointsByEngagement/{engagement_id}",
+            "description": "Fetch available endpoints (data centers) for a given engagement. User can select which endpoints to query for resources."
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["engagement_id"],
+            "optional": []
+          }
+        },
+        "response_mapping": {
+          "endpoints": "data",
+          "endpoint_ids": "data[*].endpointId",
+          "endpoint_names": "data[*].endpointDisplayName"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        }
+      },
+      "k8s_cluster": {
+        "operations": ["create", "update", "delete", "list"],
+        "api_endpoints": {
+          "create": {
+            "method": "POST", 
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/iks",
+            "description": "Create a new Kubernetes cluster"
+          },
+          "update": {
+            "method": "PATCH", 
+            "url": "/api/v1/clusters/{cluster_id}",
+            "description": "Update existing cluster configuration"
+          },
+          "delete": {
+            "method": "DELETE", 
+            "url": "/api/v1/clusters/{cluster_id}",
+            "description": "Delete a Kubernetes cluster"
+          },
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/clusterlist",
+            "description": "List all clusters for given endpoints. Requires engagement_id in URL and endpoints array in payload."
+          }
+        },
+        "parameters": {
+          "create": {
+            "required": ["Engagement","Cluster Name","Data  Center","Kubernetes version","Cluster Type","Control Plane Type","Business Unit","Environments","Zone","Operating System","Master Flavor","Worker Node Pool Name","Node type","Flavour","Fixed Replica Count","Persistent Volume Name"],
+            "optional": ["version", "network_config", "tags"],
+            "validation": {
+              "name": {"type": "string", "pattern": "^[a-z0-9-]+$", "min_length": 3, "max_length": 63},
+              "node_count": {"type": "integer", "min": 1, "max": 100},
+              "region": {"type": "enum", "values": ["us-east-1", "us-west-2", "eu-west-1"]}
+            }
+          },
+          "list": {
+            "required": ["engagement_id", "endpoints"],
+            "optional": [],
+            "validation": {
+              "engagement_id": {"type": "integer"},
+              "endpoints": {"type": "array", "items": "integer", "description": "Array of endpoint IDs to query"}
+            }
+          }
+        },
+        "permissions": {
+          "create": ["admin", "developer"],
+          "delete": ["admin"],
+          "update": ["admin", "developer"],
+          "list": ["admin", "developer", "viewer"],
+          "read": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_clusters": {
+            "description": "Multi-step workflow to list Kubernetes clusters",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["engagement_id"],
+                "user_selection": true,
+                "selection_prompt": "Which endpoints (data centers) would you like to query? You can select specific ones or choose 'all'."
+              },
+              {
+                "step": 3,
+                "action": "list_clusters",
+                "resource": "k8s_cluster",
+                "operation": "list",
+                "depends_on": ["engagement_id", "selected_endpoints"]
+              }
+            ]
+          }
+        }
+      },
+      "firewall": {
+        "operations": ["create", "read", "update", "delete", "list"],
+        "api_endpoints": {  },
+        "parameters": {  }
+      }
+    }
+  }

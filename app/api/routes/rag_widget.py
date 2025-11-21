@@ -21,6 +21,7 @@ import json
 from app.services.scraper_service import scraper_service
 from app.services.milvus_service import milvus_service  
 from app.services.ai_service import ai_service
+from app.agents import get_agent_manager  # Add agent manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -548,6 +549,7 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
     """
     Enhanced query processing with automatic orchestration.
     Detects user intent and automatically executes appropriate tasks.
+    NOW ROUTES TO AGENT MANAGER FOR RESOURCE OPERATIONS!
     """
     try:
         query = request.query.strip()
@@ -556,7 +558,165 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
 
         logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute})")
 
-        # Detect task intent
+        # ==================== NEW: Route to Agent Manager for Resource Operations ====================
+        query_lower = query.lower()
+        
+        # Check if this is a resource/cluster operation
+        action_keywords = ["create", "deploy", "provision", "delete", "remove", "update", "modify", "list", "show", "get", "view", "display"]
+        resource_keywords = ["cluster", "k8s", "kubernetes", "firewall", "rule", "load balancer", "database", "storage", "volume", "endpoint"]
+        
+        has_action = any(keyword in query_lower for keyword in action_keywords)
+        has_resource = any(keyword in query_lower for keyword in resource_keywords)
+        
+        if has_action and has_resource:
+            logger.info(f"🎯 Routing to Agent Manager (detected resource operation)")
+            
+            # Route to agent manager instead of RAG
+            agent_manager = get_agent_manager(
+                vector_service=milvus_service,
+                ai_service=ai_service
+            )
+            
+            # Generate session ID from query hash to maintain conversation
+            import hashlib
+            session_id = hashlib.md5(query.encode()).hexdigest()[:16]
+            
+            agent_result = await agent_manager.process_request(
+                user_input=query,
+                session_id=session_id,
+                user_id="widget_user",
+                user_roles=["viewer", "user"]
+            )
+            
+            # ===== QUICK FIX: Auto-execute cluster listing =====
+            # Check if intent was detected for cluster listing
+            response_text = agent_result.get("response", "")
+            
+            # Try to parse intent from response
+            try:
+                if "k8s_cluster" in response_text and "list" in response_text:
+                    logger.info("🎯 Auto-executing cluster list operation")
+                    
+                    # Import the API executor service
+                    from app.services.api_executor_service import api_executor_service
+                    
+                    # ===== NEW: Detect endpoint from query =====
+                    # Map location names to endpoint names
+                    location_mapping = {
+                        "delhi": "Delhi",
+                        "bengaluru": "Bengaluru",
+                        "bangalore": "Bengaluru",
+                        "mumbai": "Mumbai-BKC",
+                        "bkc": "Mumbai-BKC",
+                        "chennai": "Chennai-AMB",
+                        "amb": "Chennai-AMB",
+                        "cressex": "Cressex",
+                        "uk": "Cressex"
+                    }
+                    
+                    # Check if user specified a location
+                    query_lower = query.lower()
+                    requested_endpoints = None
+                    requested_location = None
+                    
+                    for location_key, endpoint_name in location_mapping.items():
+                        if location_key in query_lower:
+                            requested_location = endpoint_name
+                            logger.info(f"📍 User requested specific location: {requested_location}")
+                            break
+                    
+                    # If specific location requested, fetch all endpoints first to get the ID
+                    if requested_location:
+                        endpoints_list = await api_executor_service.get_endpoints()
+                        if endpoints_list:
+                            for ep in endpoints_list:
+                                if ep.get("endpointDisplayName") == requested_location:
+                                    requested_endpoints = [ep["endpointId"]]
+                                    logger.info(f"✅ Mapped {requested_location} to endpoint ID: {requested_endpoints[0]}")
+                                    break
+                    # ===== END NEW =====
+                    
+                    # Execute cluster listing (with specific endpoints if requested)
+                    cluster_result = await api_executor_service.list_clusters(endpoint_ids=requested_endpoints)
+                    
+                    if cluster_result.get("success"):
+                        data = cluster_result.get("data", {})
+                        if isinstance(data, dict) and "data" in data:
+                            clusters = data["data"]
+                            
+                            # Group by endpoint for better formatting
+                            by_endpoint = {}
+                            for cluster in clusters:
+                                endpoint = cluster.get("displayNameEndpoint", "Unknown")
+                                if endpoint not in by_endpoint:
+                                    by_endpoint[endpoint] = []
+                                by_endpoint[endpoint].append(cluster)
+                            
+                            # Create formatted answer - show ALL clusters (no truncation)
+                            if requested_location:
+                                answer = f"✅ Found **{len(clusters)} Kubernetes clusters** in **{requested_location}**:\n\n"
+                            else:
+                                answer = f"✅ Found **{len(clusters)} Kubernetes clusters** across **{len(by_endpoint)} data centers**:\n\n"
+                            
+                            for endpoint, endpoint_clusters in sorted(by_endpoint.items()):
+                                answer += f"📍 **{endpoint}** ({len(endpoint_clusters)} clusters)\n"
+                                # Show ALL clusters (removed truncation)
+                                for cluster in endpoint_clusters:
+                                    status_emoji = "✅" if cluster.get("status") == "Healthy" else "⚠️"
+                                    answer += f"  {status_emoji} {cluster.get('clusterName', 'N/A')} - "
+                                    answer += f"{cluster.get('nodescount', 0)} nodes, "
+                                    answer += f"K8s {cluster.get('kubernetesVersion', 'N/A')}\n"
+                                answer += "\n"
+                            
+                            return {
+                                "query": query,
+                                "answer": answer,
+                                "sources": [],
+                                "intent_detected": True,
+                                "routed_to": "agent_manager",
+                                "auto_executed": True,
+                                "execution_result": {
+                                    "total_clusters": len(clusters),
+                                    "endpoints": len(by_endpoint),
+                                    "clusters_by_endpoint": {ep: len(cls) for ep, cls in by_endpoint.items()},
+                                    "clusters": clusters  # Return all clusters
+                                },
+                                "metadata": agent_result.get("metadata"),
+                                "timestamp": datetime.now().isoformat(),
+                                # Fields required by user_main.py weak response detector
+                                "results_found": len(clusters),
+                                "results_used": len(clusters),
+                                "confidence": 0.99,  # High confidence for API data
+                                "has_sources": True,
+                                # NO images for cluster data (images only for RAG docs)
+                                "images": [],
+                                "steps": []  # No step-by-step for listing
+                            }
+                        else:
+                            logger.warning(f"Unexpected cluster data format: {data}")
+                    else:
+                        logger.error(f"Cluster listing failed: {cluster_result.get('error')}")
+            except Exception as e:
+                logger.error(f"Error in auto-execution: {str(e)}")
+                # Fall through to default response
+            # ===== END QUICK FIX =====
+            
+            # Default response if auto-execution didn't happen
+            return {
+                "query": query,
+                "answer": agent_result.get("response", ""),
+                "sources": [],  # Agent responses don't have sources
+                "intent_detected": True,
+                "routed_to": "agent_manager",
+                "auto_executed": False,
+                "execution_result": agent_result.get("execution_result"),
+                "metadata": agent_result.get("metadata"),
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # ==================== END NEW CODE ====================
+
+        # Detect task intent (for non-resource operations)
         intent_analysis = await orchestration_service.detect_task_intent(query)
         
         # Auto-execute if enabled and intent is clear

@@ -232,15 +232,17 @@ class MilvusService:
                     existing_indexes = getattr(self.collection, "indexes", []) or []
                     if not existing_indexes:
                         idx_conf = self.default_index_params.get(self.index_type, self.default_index_params["HNSW"])
-                        # for IVF we want to include metric_type
+                        # Always include metric_type for vector indexes
                         if self.index_type == "IVF_FLAT":
                             index_params = {
-                                "index_type": idx_conf.get("index_type", "IVF_FLAT"),
                                 "metric_type": idx_conf.get("metric_type", "L2"),
+                                "index_type": idx_conf.get("index_type", "IVF_FLAT"),
                                 "params": idx_conf.get("params", {"nlist": 2048})
                             }
                         else:
+                            # HNSW also requires metric_type
                             index_params = {
+                                "metric_type": idx_conf.get("metric_type", "L2"),
                                 "index_type": idx_conf.get("index_type", "HNSW"),
                                 "params": idx_conf.get("params", {"M": 16, "efConstruction": 200})
                             }
@@ -324,6 +326,7 @@ class MilvusService:
         # Create index according to selection (HNSW default for production low-latency)
         try:
             idx_conf = self.default_index_params.get(self.index_type, self.default_index_params["HNSW"])
+            # Always include metric_type for all vector indexes
             if self.index_type == "IVF_FLAT":
                 index_params = {
                     "metric_type": idx_conf.get("metric_type", "L2"),
@@ -331,14 +334,16 @@ class MilvusService:
                     "params": idx_conf.get("params", {"nlist": 2048})
                 }
             else:
+                # HNSW also requires metric_type
                 index_params = {
+                    "metric_type": idx_conf.get("metric_type", "L2"),
                     "index_type": idx_conf.get("index_type", "HNSW"),
                     "params": idx_conf.get("params", {"M": 16, "efConstruction": 200})
                 }
             self.collection.create_index(field_name="embedding", index_params=index_params)
             logger.info(f"✅ Created index: {index_params}")
         except Exception as e:
-            logger.warning(f"⚠️ Index creation failed: {e}")
+            logger.warning(f"⚠️ Index creation warning: {e}")
 
     # ---------- Enhanced Query Processing ----------
     def _preprocess_query(self, query: str) -> Tuple[str, List[str]]:

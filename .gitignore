@@ -3,3 +3,25 @@ dist/
 node_modules/
 __pycache__/
 *.pyc
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Data directories
+milvus_data/
+minio_data/
+etcd_data/
+
+# Package lock files (optional, but often ignored)
+package-lock.json
