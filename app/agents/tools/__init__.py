@@ -1,6 +1,7 @@
 """
-Tools for agents (future expansion).
+Reusable tools for agent operations.
 """
 
-__all__ = []
+from app.agents.tools.parameter_extraction import ParameterExtractor
 
+__all__ = ["ParameterExtractor"]

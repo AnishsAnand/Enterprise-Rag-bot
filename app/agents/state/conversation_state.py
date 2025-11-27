@@ -43,6 +43,9 @@ class ConversationState:
         self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
         
+        # Original query tracking
+        self.user_query: Optional[str] = None  # Store original query for context
+        
         # Intent and operation tracking
         self.intent: Optional[str] = None  # e.g., "create_k8s_cluster"
         self.resource_type: Optional[str] = None  # e.g., "k8s_cluster"

@@ -41,10 +41,10 @@ class IntentAgent(BaseAgent):
         """Return system prompt for intent agent."""
         resources_info = self._get_resources_info()
         
-        return f"""You are the Intent Agent, specialized in detecting user intent for cloud resource operations.
+        prompt = """You are the Intent Agent, specialized in detecting user intent for cloud resource operations.
 
 **Available Resources:**
-{resources_info}
+""" + resources_info + """
 
 **Your tasks:**
 1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, etc.)
@@ -70,19 +70,32 @@ User: "Create a new Kubernetes cluster named prod-cluster"
 User: "Delete the firewall rule"  
 → intent_detected: true, resource_type: firewall, operation: delete, ambiguities: Which firewall rule?
 
-User: "Show me all clusters" or "List clusters" or "What k8s clusters are available?"
+User: "Show me all clusters" or "List clusters"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
-User: "List clusters in Mumbai and Delhi"
-→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params with endpoints: ["Mumbai", "Delhi"]
+User: "What are the clusters in Mumbai?" or "What clusters are available in Delhi?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "How many clusters in Chennai?" or "Count clusters in Bengaluru"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "Tell me about clusters in Mumbai and Chennai"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "What are the available clusters?" or "What k8s clusters do we have?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
 **Important Notes:**
-- For "list" operation on k8s_cluster, no parameters are strictly required
-- The system will automatically fetch all available clusters across all endpoints
-- If user specifies locations (Mumbai, Delhi, Chennai, etc.), extract them as "endpoints" parameter
-- Common synonyms: "show clusters", "list k8s", "what clusters", "cluster list"
+- For "list" operation on k8s_cluster, "endpoints" parameter is required (data center selection)
+- Do NOT extract location names (like "Mumbai", "Delhi") - the ValidationAgent will handle matching locations to endpoint IDs
+- Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
+- ANY query asking about viewing/counting/listing actual resources (not concepts) should be detected as a list operation
+- "What are the clusters?" = list operation (showing actual clusters)
+- "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)
 
-Be precise and extract as many parameters as possible from the user's input."""
+Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
+        
+        return prompt
     
     def _get_resources_info(self) -> str:
         """Get formatted information about available resources."""

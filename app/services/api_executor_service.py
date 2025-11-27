@@ -8,6 +8,7 @@ import httpx
 import logging
 import json
 import os
+import re
 from datetime import datetime, timedelta
 import asyncio
 
@@ -690,6 +691,443 @@ class APIExecutorService:
                 "success": False,
                 "error": f"Request failed: {str(e)}"
             }
+    
+    async def check_cluster_name_available(self, cluster_name: str) -> Dict[str, Any]:
+        """
+        Check if cluster name is available.
+        
+        Args:
+            cluster_name: Name to check
+            
+        Returns:
+            Dict with availability status
+        """
+        logger.info(f"🔍 Checking cluster name availability: {cluster_name}")
+        
+        # TODO: Replace with real API call
+        # result = await self.execute_operation(...)
+        
+        # Sample response: Empty {} means available, data present means taken
+        # For now, simulate all names are available
+        return {
+            "success": True,
+            "available": True,
+            "message": f"Cluster name '{cluster_name}' is available"
+        }
+    
+    async def get_iks_images_and_datacenters(self, engagement_id: int) -> Dict[str, Any]:
+        """
+        Get IKS images with datacenter information.
+        
+        Returns dict with:
+        - datacenters: List of unique data centers
+        - images: All images grouped by datacenter
+        """
+        logger.info(f"🖼️ Fetching IKS images for engagement {engagement_id}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/iks/images/version"
+        
+        # Sample response structure
+        sample_data = {
+            "status": "success",
+            "data": {
+                "vks-enabledImages": [
+                    {
+                        "ImageName": "ubuntu-2204--IKS-AUG25--v1.27.16",
+                        "endpoint": "EP_V2_DEL",
+                        "endpointId": 11,
+                        "endpointName": "Delhi",
+                        "id": 43280
+                    },
+                    {
+                        "ImageName": "ubuntu-2204--IKS-AUG25--v1.30.14",
+                        "endpoint": "EP_V2_BLR",
+                        "endpointId": 12,
+                        "endpointName": "Bengaluru",
+                        "id": 46792
+                    }
+                ],
+                "all-images": [
+                    {
+                        "ImageName": "UBUNTU24.04_STD_IKS_01AUG2025-v1.31.13",
+                        "endpoint": "EP_V2_MUMBKC",
+                        "endpointId": 162,
+                        "endpointName": "Mumbai-BKC",
+                        "id": 47582
+                    }
+                ]
+            }
+        }
+        
+        # Extract unique datacenters
+        all_images = []
+        for category, images in sample_data["data"].items():
+            all_images.extend(images)
+        
+        # Get unique datacenters
+        datacenters = {}
+        for img in all_images:
+            dc_id = img["endpointId"]
+            if dc_id not in datacenters:
+                datacenters[dc_id] = {
+                    "id": dc_id,
+                    "name": img["endpointName"],
+                    "endpoint": img["endpoint"]
+                }
+        
+        return {
+            "success": True,
+            "datacenters": list(datacenters.values()),
+            "images": all_images
+        }
+    
+    async def get_k8s_versions_for_datacenter(self, datacenter_id: int, all_images: List[Dict]) -> List[str]:
+        """
+        Extract unique k8s versions for a specific datacenter.
+        
+        Args:
+            datacenter_id: Datacenter endpoint ID
+            all_images: List of all images
+            
+        Returns:
+            List of k8s versions (sorted, latest first)
+        """
+        # Filter images by datacenter
+        dc_images = [img for img in all_images if img["endpointId"] == datacenter_id]
+        
+        # Extract versions
+        versions = set()
+        for img in dc_images:
+            match = re.search(r'v\d+\.\d+\.\d+', img["ImageName"])
+            if match:
+                versions.add(match.group(0))
+        
+        # Sort semantically (latest first)
+        sorted_versions = sorted(list(versions), key=lambda v: [int(x) for x in v[1:].split('.')], reverse=True)
+        
+        logger.info(f"📦 Found {len(sorted_versions)} k8s versions for datacenter {datacenter_id}")
+        return sorted_versions
+    
+    async def get_network_drivers(self, endpoint_id: int, k8s_version: str) -> Dict[str, Any]:
+        """
+        Get CNI drivers for datacenter + k8s version.
+        
+        Args:
+            endpoint_id: Datacenter ID
+            k8s_version: Kubernetes version
+            
+        Returns:
+            Dict with CNI drivers list
+        """
+        logger.info(f"🌐 Fetching CNI drivers for endpoint {endpoint_id}, k8s {k8s_version}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/paasservice/paas/getNetworkList/{endpoint_id}/{k8s_version}/APP"
+        
+        # Sample response
+        sample_drivers = {
+            "status": "success",
+            "data": {
+                "data": [
+                    "calico-v3.25.1",
+                    "cilium-ebpf-v1.16.4",
+                    "cilium-iptables-v1.16.4"
+                ]
+            }
+        }
+        
+        return {
+            "success": True,
+            "drivers": sample_drivers["data"]["data"]
+        }
+    
+    async def get_environments_and_business_units(self, engagement_id: int) -> Dict[str, Any]:
+        """
+        Get environments and business units for engagement.
+        
+        Args:
+            engagement_id: Engagement ID
+            
+        Returns:
+            Dict with business units and environments
+        """
+        logger.info(f"🏢 Fetching environments for engagement {engagement_id}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/portalservice/environment/getEnvironmentListPerEngagement/{engagement_id}"
+        
+        # Sample response
+        sample_data = {
+            "status": "success",
+            "data": {
+                "environments": [
+                    {
+                        "id": 1,
+                        "name": "Production",
+                        "department": "Engineering",
+                        "departmentId": 101,
+                        "endpointName": "EP_V2_DEL"
+                    },
+                    {
+                        "id": 2,
+                        "name": "Development",
+                        "department": "Engineering",
+                        "departmentId": 101,
+                        "endpointName": "EP_V2_DEL"
+                    },
+                    {
+                        "id": 3,
+                        "name": "Staging",
+                        "department": "QA",
+                        "departmentId": 102,
+                        "endpointName": "EP_V2_BLR"
+                    }
+                ]
+            }
+        }
+        
+        environments = sample_data["data"]["environments"]
+        
+        # Extract unique business units
+        business_units = {}
+        for env in environments:
+            bu_id = env["departmentId"]
+            if bu_id not in business_units:
+                business_units[bu_id] = {
+                    "id": bu_id,
+                    "name": env["department"]
+                }
+        
+        return {
+            "success": True,
+            "business_units": list(business_units.values()),
+            "environments": environments
+        }
+    
+    async def get_zones_list(self, engagement_id: int) -> Dict[str, Any]:
+        """
+        Get zones for engagement.
+        
+        Args:
+            engagement_id: Engagement ID
+            
+        Returns:
+            Dict with zones list
+        """
+        logger.info(f"🗺️ Fetching zones for engagement {engagement_id}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/portalservice/zone/getZoneList/{engagement_id}"
+        
+        # Sample response
+        sample_data = {
+            "status": "success",
+            "data": [
+                {
+                    "zoneId": 16710,
+                    "zoneName": "zone-prod-01",
+                    "departmentName": "Engineering",
+                    "environmentName": "Production"
+                },
+                {
+                    "zoneId": 16711,
+                    "zoneName": "zone-dev-01",
+                    "departmentName": "Engineering",
+                    "environmentName": "Development"
+                },
+                {
+                    "zoneId": 16712,
+                    "zoneName": "zone-qa-01",
+                    "departmentName": "QA",
+                    "environmentName": "Staging"
+                }
+            ]
+        }
+        
+        return {
+            "success": True,
+            "zones": sample_data["data"]
+        }
+    
+    async def get_os_images(self, zone_id: int, circuit_id: str, k8s_version: str) -> Dict[str, Any]:
+        """
+        Get OS images for zone, filtered by k8s version.
+        
+        Args:
+            zone_id: Zone ID
+            circuit_id: Circuit ID
+            k8s_version: Kubernetes version to filter by
+            
+        Returns:
+            Dict with OS options
+        """
+        logger.info(f"💿 Fetching OS images for zone {zone_id}, k8s {k8s_version}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledImages/{zone_id}?circuitId={circuit_id}&isDeployment=false"
+        
+        # Sample response
+        sample_data = {
+            "status": "success",
+            "data": {
+                "image": {
+                    "options": [
+                        {
+                            "id": 43280,
+                            "label": "UBUNTU22.04_STD_IKS_01AUG2025-v1.27.16",
+                            "osMake": "Ubuntu",
+                            "osModel": "ubuntu",
+                            "osVersion": "22.04 LTS",
+                            "hypervisor": "VCD_ESXI"
+                        },
+                        {
+                            "id": 47582,
+                            "label": "UBUNTU24.04_STD_IKS_01AUG2025-v1.27.16",
+                            "osMake": "Ubuntu",
+                            "osModel": "ubuntu",
+                            "osVersion": "24.04 LTS",
+                            "hypervisor": "VCD_ESXI"
+                        }
+                    ]
+                }
+            }
+        }
+        
+        # Filter by k8s version
+        images = sample_data["data"]["image"]["options"]
+        filtered = [img for img in images if k8s_version in img["label"]]
+        
+        # Group by osMake + osVersion
+        grouped = {}
+        for img in filtered:
+            key = f"{img['osMake']} {img['osVersion']}"
+            if key not in grouped:
+                grouped[key] = {
+                    "display_name": key,
+                    "os_id": img["id"],
+                    "os_make": img["osMake"],
+                    "os_model": img["osModel"],
+                    "os_version": img["osVersion"],
+                    "hypervisor": img["hypervisor"],
+                    "images": []
+                }
+            grouped[key]["images"].append(img)
+        
+        return {
+            "success": True,
+            "os_options": list(grouped.values())
+        }
+    
+    async def get_flavors(self, zone_id: int, circuit_id: str, os_model: str, node_type: str = None) -> Dict[str, Any]:
+        """
+        Get compute flavors for zone, filtered by OS and optionally node type.
+        
+        Args:
+            zone_id: Zone ID
+            circuit_id: Circuit ID
+            os_model: OS model (e.g., "ubuntu")
+            node_type: Node type to filter (generalPurpose, computeOptimized, memoryOptimized)
+            
+        Returns:
+            Dict with flavor options
+        """
+        logger.info(f"💻 Fetching flavors for zone {zone_id}, OS {os_model}, node type {node_type}")
+        
+        # TODO: Replace with real API call
+        # url = f"https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledFlavors/{zone_id}?isDeployment=false&circuitId={circuit_id}"
+        
+        # Sample response
+        sample_data = {
+            "status": "success",
+            "data": {
+                "flavor": [
+                    {
+                        "artifactId": 3234,
+                        "FlavorName": "B4",
+                        "skuCode": "B4.UBN",
+                        "vCpu": 2,
+                        "vRam": 4096,
+                        "vDisk": 50,
+                        "osModel": "ubuntu",
+                        "applicationType": "Container",
+                        "flavorCategory": "generalPurpose",
+                        "label": "B4_ubuntu_container"
+                    },
+                    {
+                        "artifactId": 3235,
+                        "FlavorName": "C8",
+                        "skuCode": "C8.UBN",
+                        "vCpu": 4,
+                        "vRam": 8192,
+                        "vDisk": 100,
+                        "osModel": "ubuntu",
+                        "applicationType": "Container",
+                        "flavorCategory": "computeOptimized",
+                        "label": "C8_ubuntu_container"
+                    },
+                    {
+                        "artifactId": 3236,
+                        "FlavorName": "M16",
+                        "skuCode": "M16.UBN",
+                        "vCpu": 4,
+                        "vRam": 16384,
+                        "vDisk": 100,
+                        "osModel": "ubuntu",
+                        "applicationType": "Container",
+                        "flavorCategory": "memoryOptimized",
+                        "label": "M16_ubuntu_container"
+                    }
+                ]
+            }
+        }
+        
+        # Filter by OS model and application type
+        flavors = sample_data["data"]["flavor"]
+        filtered = [f for f in flavors if f["osModel"] == os_model and f["applicationType"] == "Container"]
+        
+        # Further filter by node type if provided
+        if node_type:
+            filtered = [f for f in filtered if f["flavorCategory"] == node_type]
+        
+        # Extract unique node types for the first query
+        node_types = list(set([f["flavorCategory"] for f in filtered]))
+        
+        # Format flavors
+        formatted_flavors = []
+        for flavor in filtered:
+            formatted_flavors.append({
+                "id": flavor["artifactId"],
+                "name": f"{flavor['vCpu']} vCPU / {flavor['vRam'] // 1024} GB RAM / {flavor['vDisk']} GB Storage",
+                "flavor_name": flavor["FlavorName"],
+                "sku_code": flavor["skuCode"],
+                "vcpu": flavor["vCpu"],
+                "vram_gb": flavor["vRam"] // 1024,
+                "disk_gb": flavor["vDisk"],
+                "node_type": flavor["flavorCategory"]
+            })
+        
+        return {
+            "success": True,
+            "node_types": node_types,
+            "flavors": formatted_flavors
+        }
+    
+    async def get_circuit_id(self, engagement_id: int) -> Optional[str]:
+        """
+        Get circuit ID (copfId) for engagement.
+        
+        Args:
+            engagement_id: Engagement ID
+            
+        Returns:
+            Circuit ID string or default
+        """
+        logger.info(f"🔌 Fetching circuit ID for engagement {engagement_id}")
+        
+        # TODO: Implement if there's a specific API endpoint
+        # For now, return default from createcluster.ts line 110
+        return "E-IPCTEAM-1602"
     
     def __repr__(self) -> str:
         resource_count = len(self.resource_schema.get("resources", {}))

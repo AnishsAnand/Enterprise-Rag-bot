@@ -13,10 +13,6 @@ from app.agents.base_agent import BaseAgent
 from app.agents.state.conversation_state import conversation_state_manager
 from app.services.api_executor_service import api_executor_service
 from app.services.ai_service import ai_service
-
-# Import new modular handlers (optional - for future refactoring)
-# from app.agents.handlers.cluster_creation_handler import ClusterCreationHandler
-# from app.agents.tools.parameter_extraction import ParameterExtractor
 from app.agents.handlers.cluster_creation_handler import ClusterCreationHandler
 from app.agents.tools.parameter_extraction import ParameterExtractor
 
@@ -323,8 +319,8 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             logger.error(f"Error fetching options: {e}")
             return json.dumps({"error": str(e)})
 
-    async def _extract_location_from_query_json(self, input_json: str) -> str:
-        """Use LLM to intelligently extract location/endpoint from user query (JSON input version)."""
+    async def _extract_location_from_query(self, input_json: str) -> str:
+        """Use LLM to intelligently extract location/endpoint from user query."""
         try:
             data = json.loads(input_json)
             user_query = data.get("user_query", "")
@@ -387,8 +383,8 @@ Respond with ONLY ONE of these formats:
             logger.error(f"Error in LLM extraction: {e}")
             return json.dumps({"extracted": False, "error": str(e)})
 
-    async def _match_user_selection_json(self, input_json: str) -> str:
-        """Use LLM to intelligently match user's response to API results (JSON input version)."""
+    async def _match_user_selection(self, input_json: str) -> str:
+        """Use LLM to intelligently match user's response to API results (NO primitive matching!)"""
         try:
             data = json.loads(input_json)
             user_text = data.get("user_text", "").strip()
@@ -515,6 +511,566 @@ If no match:
         Delegate to ParameterExtractor tool.
         """
         return await self.param_extractor.match_user_selection(input_text, available_options)
+
+    async def execute(
+        self,
+        input_text: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute validation and parameter collection with INTELLIGENT tools.
+
+        Args:
+            input_text: User's response
+            context: Context including session_id and conversation_state 
+            "k8sVersion",
+            "cniDriver",
+            "businessUnit",
+            "environment",
+            "zone",
+            "operatingSystem",
+            "workerPoolName",
+            "nodeType",
+            "flavor",
+            "replicaCount",
+            "enableAutoscaling",  # optional
+            "maxReplicas",  # conditional
+            "tags"  # optional
+        ]
+        
+        # Find the next parameter to collect
+        next_param = None
+        for param in workflow:
+            if param not in state.collected_params:
+                # Skip optional params based on user choice
+                if param == "maxReplicas" and not state.collected_params.get("enableAutoscaling"):
+                    continue
+                if param in ["enableAutoscaling", "tags"] and input_text and "no" in input_text.lower():
+                    # User declined optional param
+                    continue
+                    
+                next_param = param
+                break
+        
+        # If all parameters collected, mark as ready
+        if next_param is None:
+            logger.info(f"✅ All cluster creation parameters collected!")
+            state.status = "READY_TO_EXECUTE"
+            state.missing_params = []
+            
+            # Build summary
+            summary = f"""
+**Cluster Creation Summary:**
+- **Name**: {state.collected_params['clusterName']}
+- **Datacenter**: {state.collected_params['datacenter']['name']}
+- **Kubernetes**: {state.collected_params['k8sVersion']}
+- **CNI Driver**: {state.collected_params['cniDriver']}
+- **Business Unit**: {state.collected_params['businessUnit']['name']}
+- **Environment**: {state.collected_params['environment']['name']}
+- **Zone**: {state.collected_params['zone']['name']}
+- **OS**: {state.collected_params['operatingSystem']['display_name']}
+- **Worker Pool**: {state.collected_params['workerPoolName']} ({state.collected_params['replicaCount']} nodes)
+- **Flavor**: {state.collected_params['flavor']['name']}
+"""
+            
+            return {
+                "agent_name": self.agent_name,
+                "success": True,
+                "ready_to_execute": True,
+                "output": summary + "\n\nReady to create cluster! This will take 15-30 minutes. Shall I proceed?"
+            }
+        
+        # If user provided input, try to process it for the last asked parameter
+        if input_text and hasattr(state, 'last_asked_param') and state.last_asked_param:
+            last_param = state.last_asked_param
+            logger.info(f"📝 Processing user input for: {last_param}")
+            
+            # Handle each parameter type
+            if last_param == "clusterName":
+                # Validate cluster name format
+                cluster_name = input_text.strip()
+                if not re.match(r'^[a-zA-Z][a-zA-Z0-9-]{2,17}$', cluster_name):
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Cluster name must start with a letter and be 3-18 characters (letters, numbers, hyphens). Please try again:"
+                    }
+                
+                # Check availability (using sample API for now)
+                check_result = await api_executor_service.check_cluster_name_available(cluster_name)
+                if not check_result.get("available"):
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": f"Cluster name '{cluster_name}' is already taken. Please choose another name:"
+                    }
+                
+                state.collected_params["clusterName"] = cluster_name
+                next_param = "datacenter"
+            
+            elif last_param == "datacenter":
+                # Fetch datacenters first if not cached
+                if not hasattr(state, '_datacenter_options'):
+                    engagement_id = await api_executor_service.get_engagement_id()
+                    dc_result = await api_executor_service.get_iks_images_and_datacenters(engagement_id)
+                    state._datacenter_options = dc_result.get("datacenters", [])
+                    state._all_images = dc_result.get("images", [])
+                
+                # Match user selection
+                matched = await self._match_user_selection(input_text, state._datacenter_options)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    dc_info = matched_data.get("matched_item")
+                    state.collected_params["datacenter"] = dc_info
+                    state.collected_params["_datacenter_id"] = dc_info["id"]
+                    next_param = "k8sVersion"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that datacenter. Please choose from the list above:"
+                    }
+            
+            elif last_param == "k8sVersion":
+                # Get k8s versions for selected datacenter
+                if not hasattr(state, '_k8s_versions'):
+                    dc_id = state.collected_params["_datacenter_id"]
+                    versions = await api_executor_service.get_k8s_versions_for_datacenter(
+                        dc_id, 
+                        state._all_images
+                    )
+                    state._k8s_versions = versions
+                
+                # Match user selection
+                if input_text.strip() in state._k8s_versions:
+                    state.collected_params["k8sVersion"] = input_text.strip()
+                    next_param = "cniDriver"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Please select one of the versions listed above:"
+                    }
+            
+            elif last_param == "cniDriver":
+                # Get CNI drivers
+                if not hasattr(state, '_cni_drivers'):
+                    dc_id = state.collected_params["_datacenter_id"]
+                    k8s_version = state.collected_params["k8sVersion"]
+                    driver_result = await api_executor_service.get_network_drivers(dc_id, k8s_version)
+                    state._cni_drivers = driver_result.get("drivers", [])
+                
+                # Match user selection
+                if input_text.strip() in state._cni_drivers:
+                    state.collected_params["cniDriver"] = input_text.strip()
+                    next_param = "businessUnit"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Please select one of the CNI drivers listed above:"
+                    }
+            
+            elif last_param == "businessUnit":
+                # Get business units
+                if not hasattr(state, '_business_units'):
+                    engagement_id = await api_executor_service.get_engagement_id()
+                    env_result = await api_executor_service.get_environments_and_business_units(engagement_id)
+                    state._business_units = env_result.get("business_units", [])
+                    state._all_environments = env_result.get("environments", [])
+                
+                # Match user selection
+                matched = await self._match_user_selection(input_text, state._business_units)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    bu_info = matched_data.get("matched_item")
+                    state.collected_params["businessUnit"] = bu_info
+                    next_param = "environment"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that business unit. Please choose from the list above:"
+                    }
+            
+            elif last_param == "environment":
+                # Filter environments by selected BU
+                bu_id = state.collected_params["businessUnit"]["id"]
+                filtered_envs = [env for env in state._all_environments if env["departmentId"] == bu_id]
+                
+                # Match user selection
+                env_options = [{"id": env["id"], "name": env["name"]} for env in filtered_envs]
+                matched = await self._match_user_selection(input_text, env_options)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    env_info = matched_data.get("matched_item")
+                    # Store full environment data
+                    full_env = next(e for e in filtered_envs if e["id"] == env_info["id"])
+                    state.collected_params["environment"] = {"id": full_env["id"], "name": full_env["name"]}
+                    state.collected_params["_environment_name"] = full_env["name"]
+                    next_param = "zone"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that environment. Please choose from the list above:"
+                    }
+            
+            elif last_param == "zone":
+                # Get zones
+                if not hasattr(state, '_zones'):
+                    engagement_id = await api_executor_service.get_engagement_id()
+                    zone_result = await api_executor_service.get_zones_list(engagement_id)
+                    state._zones = zone_result.get("zones", [])
+                
+                # Filter zones by BU and environment
+                bu_name = state.collected_params["businessUnit"]["name"]
+                env_name = state.collected_params["_environment_name"]
+                filtered_zones = [z for z in state._zones 
+                                 if z["departmentName"] == bu_name and z["environmentName"] == env_name]
+                
+                # Match user selection
+                zone_options = [{"id": z["zoneId"], "name": z["zoneName"]} for z in filtered_zones]
+                matched = await self._match_user_selection(input_text, zone_options)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    zone_info = matched_data.get("matched_item")
+                    state.collected_params["zone"] = zone_info
+                    state.collected_params["_zone_id"] = zone_info["id"]
+                    next_param = "operatingSystem"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that zone. Please choose from the list above:"
+                    }
+            
+            elif last_param == "operatingSystem":
+                # Get OS images
+                if not hasattr(state, '_os_options'):
+                    zone_id = state.collected_params["_zone_id"]
+                    circuit_id = await api_executor_service.get_circuit_id(None)
+                    k8s_version = state.collected_params["k8sVersion"]
+                    os_result = await api_executor_service.get_os_images(zone_id, circuit_id, k8s_version)
+                    state._os_options = os_result.get("os_options", [])
+                    state._circuit_id = circuit_id
+                
+                # Match user selection
+                os_options = [{"id": i, "name": opt["display_name"]} for i, opt in enumerate(state._os_options)]
+                matched = await self._match_user_selection(input_text, os_options)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    os_idx = matched_data.get("matched_item")["id"]
+                    state.collected_params["operatingSystem"] = state._os_options[os_idx]
+                    next_param = "workerPoolName"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that OS. Please choose from the list above:"
+                    }
+            
+            elif last_param == "workerPoolName":
+                # Validate worker pool name (5 lowercase alphanumeric chars)
+                pool_name = input_text.strip().lower()
+                if not re.match(r'^[a-z0-9]{1,5}$', pool_name):
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Worker pool name must be 1-5 lowercase alphanumeric characters. Please try again:"
+                    }
+                
+                state.collected_params["workerPoolName"] = pool_name
+                next_param = "nodeType"
+            
+            elif last_param == "nodeType":
+                # Get flavors first to determine node types
+                if not hasattr(state, '_node_types'):
+                    zone_id = state.collected_params["_zone_id"]
+                    circuit_id = state._circuit_id
+                    os_model = state.collected_params["operatingSystem"]["os_model"]
+                    flavor_result = await api_executor_service.get_flavors(zone_id, circuit_id, os_model)
+                    state._node_types = flavor_result.get("node_types", [])
+                    state._all_flavors = flavor_result.get("flavors", [])
+                
+                # Map display names
+                node_type_map = {
+                    "general": "generalPurpose",
+                    "compute": "computeOptimized",
+                    "memory": "memoryOptimized"
+                }
+                
+                # Try to match user input
+                user_input_lower = input_text.lower()
+                matched_type = None
+                for key, value in node_type_map.items():
+                    if key in user_input_lower and value in state._node_types:
+                        matched_type = value
+                        break
+                
+                if matched_type:
+                    state.collected_params["nodeType"] = matched_type
+                    next_param = "flavor"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Please choose General Purpose, Compute Optimized, or Memory Optimized:"
+                    }
+            
+            elif last_param == "flavor":
+                # Filter flavors by node type
+                node_type = state.collected_params["nodeType"]
+                filtered_flavors = [f for f in state._all_flavors if f["node_type"] == node_type]
+                
+                # Try to match user selection (by index or description)
+                flavor_options = [{"id": f["id"], "name": f["name"]} for f in filtered_flavors]
+                matched = await self._match_user_selection(input_text, flavor_options)
+                matched_data = json.loads(matched)
+                
+                if matched_data.get("matched"):
+                    flavor_id = matched_data.get("matched_item")["id"]
+                    flavor_info = next(f for f in filtered_flavors if f["id"] == flavor_id)
+                    state.collected_params["flavor"] = flavor_info
+                    next_param = "replicaCount"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "I couldn't match that flavor. Please choose from the list above:"
+                    }
+            
+            elif last_param == "replicaCount":
+                # Validate replica count (1-8)
+                try:
+                    count = int(input_text.strip())
+                    if 1 <= count <= 8:
+                        state.collected_params["replicaCount"] = count
+                        next_param = "enableAutoscaling"
+                    else:
+                        return {
+                            "agent_name": self.agent_name,
+                            "success": True,
+                            "output": "Replica count must be between 1 and 8. Please try again:"
+                        }
+                except ValueError:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Please enter a number between 1 and 8:"
+                    }
+            
+            elif last_param == "enableAutoscaling":
+                # Optional yes/no
+                user_response = input_text.lower().strip()
+                if "yes" in user_response or "enable" in user_response:
+                    state.collected_params["enableAutoscaling"] = True
+                    next_param = "maxReplicas"
+                elif "no" in user_response or "skip" in user_response:
+                    state.collected_params["enableAutoscaling"] = False
+                    next_param = "tags"
+                else:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Please answer 'yes' or 'no' for autoscaling:"
+                    }
+            
+            elif last_param == "maxReplicas":
+                # Validate max replicas (1-8, must be >= replicaCount)
+                try:
+                    max_count = int(input_text.strip())
+                    min_count = state.collected_params["replicaCount"]
+                    if min_count <= max_count <= 8:
+                        state.collected_params["maxReplicas"] = max_count
+                        next_param = "tags"
+                    else:
+                        return {
+                            "agent_name": self.agent_name,
+                            "success": True,
+                            "output": f"Max replicas must be between {min_count} and 8. Please try again:"
+                        }
+                except ValueError:
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": f"Please enter a number between {state.collected_params['replicaCount']} and 8:"
+                    }
+            
+            elif last_param == "tags":
+                # Optional tags (skip for now in MVP)
+                user_response = input_text.lower().strip()
+                if "no" in user_response or "skip" in user_response:
+                    state.collected_params["tags"] = []
+                    next_param = None  # Done!
+                else:
+                    # TODO: Implement tag collection in future
+                    state.collected_params["tags"] = []
+                    next_param = None
+        
+        # Now ask for the next parameter
+        if next_param:
+            state.last_asked_param = next_param
+            return await self._ask_for_parameter(next_param, state)
+        
+        # Should not reach here
+        return {
+            "agent_name": self.agent_name,
+            "success": False,
+            "output": "Something went wrong with the cluster creation flow. Please start over."
+        }
+    
+    async def _ask_for_parameter(self, param_name: str, state: Any) -> Dict[str, Any]:
+        """
+        Ask user for a specific parameter with context.
+        
+        Args:
+            param_name: Name of parameter to ask for
+            state: Conversation state
+            
+        Returns:
+            Dict with prompt for user
+        """
+        logger.info(f"❓ Asking for parameter: {param_name}")
+        
+        # Get conversational prompts from schema
+        schema = self.resource_schema["resources"]["k8s_cluster"]["parameters"]["create"]
+        prompts = schema.get("conversational_prompts", {})
+        
+        # Build prompt based on parameter
+        if param_name == "clusterName":
+            prompt = prompts.get("clusterName", "What would you like to name your cluster?")
+            output = prompt
+        
+        elif param_name == "datacenter":
+            # Fetch datacenters if not already fetched
+            if not hasattr(state, '_datacenter_options'):
+                engagement_id = await api_executor_service.get_engagement_id()
+                dc_result = await api_executor_service.get_iks_images_and_datacenters(engagement_id)
+                state._datacenter_options = dc_result.get("datacenters", [])
+                state._all_images = dc_result.get("images", [])
+            
+            dc_list = "\n".join([f"- {dc['name']}" for dc in state._datacenter_options])
+            output = f"{prompts.get('datacenter', 'Which data center?')}\n\nAvailable data centers:\n{dc_list}"
+        
+        elif param_name == "k8sVersion":
+            # Get k8s versions for selected datacenter
+            dc_id = state.collected_params["_datacenter_id"]
+            versions = await api_executor_service.get_k8s_versions_for_datacenter(dc_id, state._all_images)
+            state._k8s_versions = versions
+            
+            version_list = "\n".join([f"- {v}" for v in versions])
+            output = f"{prompts.get('k8sVersion', 'Which Kubernetes version?')}\n\nAvailable versions:\n{version_list}"
+        
+        elif param_name == "cniDriver":
+            # Get CNI drivers
+            dc_id = state.collected_params["_datacenter_id"]
+            k8s_version = state.collected_params["k8sVersion"]
+            driver_result = await api_executor_service.get_network_drivers(dc_id, k8s_version)
+            state._cni_drivers = driver_result.get("drivers", [])
+            
+            driver_list = "\n".join([f"- {d}" for d in state._cni_drivers])
+            output = f"{prompts.get('cniDriver', 'Which CNI driver?')}\n\nAvailable drivers:\n{driver_list}"
+        
+        elif param_name == "businessUnit":
+            # Get business units
+            engagement_id = await api_executor_service.get_engagement_id()
+            env_result = await api_executor_service.get_environments_and_business_units(engagement_id)
+            state._business_units = env_result.get("business_units", [])
+            state._all_environments = env_result.get("environments", [])
+            
+            bu_list = "\n".join([f"- {bu['name']}" for bu in state._business_units])
+            output = f"{prompts.get('businessUnit', 'Which business unit?')}\n\nAvailable business units:\n{bu_list}"
+        
+        elif param_name == "environment":
+            # Filter environments by selected BU
+            bu_id = state.collected_params["businessUnit"]["id"]
+            filtered_envs = [env for env in state._all_environments if env["departmentId"] == bu_id]
+            
+            env_list = "\n".join([f"- {env['name']}" for env in filtered_envs])
+            output = f"{prompts.get('environment', 'Which environment?')}\n\nAvailable environments:\n{env_list}"
+        
+        elif param_name == "zone":
+            # Get and filter zones
+            engagement_id = await api_executor_service.get_engagement_id()
+            zone_result = await api_executor_service.get_zones_list(engagement_id)
+            state._zones = zone_result.get("zones", [])
+            
+            bu_name = state.collected_params["businessUnit"]["name"]
+            env_name = state.collected_params["_environment_name"]
+            filtered_zones = [z for z in state._zones 
+                             if z["departmentName"] == bu_name and z["environmentName"] == env_name]
+            
+            zone_list = "\n".join([f"- {z['zoneName']}" for z in filtered_zones])
+            output = f"{prompts.get('zone', 'Which network zone?')}\n\nAvailable zones:\n{zone_list}"
+        
+        elif param_name == "operatingSystem":
+            # Get OS images
+            zone_id = state.collected_params["_zone_id"]
+            circuit_id = await api_executor_service.get_circuit_id(None)
+            k8s_version = state.collected_params["k8sVersion"]
+            os_result = await api_executor_service.get_os_images(zone_id, circuit_id, k8s_version)
+            state._os_options = os_result.get("os_options", [])
+            state._circuit_id = circuit_id
+            
+            os_list = "\n".join([f"- {opt['display_name']}" for opt in state._os_options])
+            output = f"{prompts.get('operatingSystem', 'Which operating system?')}\n\nAvailable OS options:\n{os_list}"
+        
+        elif param_name == "workerPoolName":
+            output = prompts.get("workerNodePool", {}).get("poolName", "Worker pool name? (5 lowercase alphanumeric chars)")
+        
+        elif param_name == "nodeType":
+            # Get node types from flavors
+            zone_id = state.collected_params["_zone_id"]
+            circuit_id = state._circuit_id
+            os_model = state.collected_params["operatingSystem"]["os_model"]
+            flavor_result = await api_executor_service.get_flavors(zone_id, circuit_id, os_model)
+            state._node_types = flavor_result.get("node_types", [])
+            state._all_flavors = flavor_result.get("flavors", [])
+            
+            # Display friendly names
+            type_display = {
+                "generalPurpose": "General Purpose",
+                "computeOptimized": "Compute Optimized",
+                "memoryOptimized": "Memory Optimized"
+            }
+            type_list = "\n".join([f"- {type_display.get(t, t)}" for t in state._node_types])
+            output = f"{prompts.get('workerNodePool', {}).get('nodeType', 'Which node type?')}\n\nAvailable types:\n{type_list}"
+        
+        elif param_name == "flavor":
+            # Filter flavors by node type
+            node_type = state.collected_params["nodeType"]
+            filtered_flavors = [f for f in state._all_flavors if f["node_type"] == node_type]
+            
+            flavor_list = "\n".join([f"- {f['name']}" for f in filtered_flavors])
+            output = f"{prompts.get('workerNodePool', {}).get('flavor', 'Which flavor?')}\n\nAvailable flavors:\n{flavor_list}"
+        
+        elif param_name == "replicaCount":
+            output = prompts.get("workerNodePool", {}).get("replicaCount", "How many worker nodes? (1-8)")
+        
+        elif param_name == "enableAutoscaling":
+            output = prompts.get("workerNodePool", {}).get("enableAutoscaling", "Enable autoscaling? (yes/no)")
+        
+        elif param_name == "maxReplicas":
+            min_count = state.collected_params["replicaCount"]
+            output = f"{prompts.get('workerNodePool', {}).get('maxReplicas', 'Max replicas?')} ({min_count}-8)"
+        
+        elif param_name == "tags":
+            output = prompts.get("tags", "Would you like to add any tags? (yes/no, or 'no' to skip)")
+        
+        else:
+            output = f"Please provide: {param_name}"
+        
+        return {
+            "agent_name": self.agent_name,
+            "success": True,
+            "output": output
+        }
 
     async def execute(
         self,
@@ -654,7 +1210,7 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         logger.info(f"🔍 Analyzing query: '{text_to_analyze}' for location extraction (is_follow_up: {is_follow_up})")
 
                         # USE LLM FOR INTELLIGENT EXTRACTION (not primitive pattern matching!)
-                        extraction_result_json = await self._extract_location_from_query_json(json.dumps({
+                        extraction_result_json = await self._extract_location_from_query(json.dumps({
                             "user_query": text_to_analyze,
                             "available_options": available_options
                         }))
@@ -671,7 +1227,7 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             logger.info(f"🔍 No location in query, using current input: '{text_to_match}'")
 
                         # Try to match user input to available endpoints (LLM-based!)
-                        match_result_json = await self._match_user_selection_json(json.dumps({
+                        match_result_json = await self._match_user_selection(json.dumps({
                             "user_text": text_to_match,
                             "available_options": available_options
                         }))

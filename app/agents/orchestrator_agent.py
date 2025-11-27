@@ -213,8 +213,18 @@ Always confirm destructive operations (delete, update) before executing."""
             
             # Get or create conversation state
             state = conversation_state_manager.get_session(session_id)
+            
+            # If state exists but is COMPLETED/FAILED, delete it and start fresh
+            # This prevents caching of params from previous completed operations
+            if state and state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
+                logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
+                conversation_state_manager.delete_session(session_id)
+                state = None
+            
             if not state:
                 state = conversation_state_manager.create_session(session_id, user_id)
+                # Store original query for context (e.g., extracting location from "clusters in delhi")
+                state.user_query = user_input
             
             # Add user message to history
             state.add_message("user", user_input)
@@ -248,7 +258,7 @@ Always confirm destructive operations (delete, update) before executing."""
         user_roles: List[str]
     ) -> Dict[str, Any]:
         """
-        Decide which agent should handle the request.
+        Decide which agent should handle the request using LLM-based routing.
         
         Args:
             user_input: User's message
@@ -273,51 +283,63 @@ Always confirm destructive operations (delete, update) before executing."""
                 "reason": "All parameters collected, ready to execute"
             }
         
-        # Detect intent from user input
-        user_input_lower = user_input.lower()
+        # Use LLM to intelligently route the query
+        from app.services.ai_service import ai_service
         
-        # Action keywords
-        action_keywords = [
-            "create", "deploy", "provision", "setup", "configure",
-            "delete", "remove", "destroy", "terminate",
-            "update", "modify", "change", "edit",
-            "list", "show", "get", "view", "display"
-        ]
-        
-        # Resource keywords
-        resource_keywords = [
-            "cluster", "k8s", "kubernetes",
-            "firewall", "security", "rule",
-            "load balancer", "lb",
-            "database", "db",
-            "storage", "volume"
-        ]
-        
-        # Check for action intent
-        has_action = any(keyword in user_input_lower for keyword in action_keywords)
-        has_resource = any(keyword in user_input_lower for keyword in resource_keywords)
-        
-        if has_action and has_resource:
+        routing_prompt = f"""You are a routing specialist for a cloud resource management chatbot. Determine if the user's query is about:
+
+A) **RESOURCE OPERATIONS**: Managing/viewing cloud resources (clusters, firewalls, databases, load balancers, storage, etc.)
+   - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall", "count clusters in bengaluru"
+   
+B) **DOCUMENTATION**: Questions about how to use the platform, concepts, procedures, troubleshooting, or explanations
+   - Examples: "how do I create a cluster?", "what is kubernetes?", "explain load balancing", "why did my deployment fail?", "what are the requirements?"
+
+User Query: "{user_input}"
+
+Instructions:
+1. If the query is asking to VIEW, COUNT, LIST, CREATE, UPDATE, or DELETE actual resources → return "RESOURCE_OPERATIONS"
+2. If the query is asking HOW TO do something, WHY something works, or WHAT a concept means → return "DOCUMENTATION"
+3. "What are the clusters?" = RESOURCE_OPERATIONS (listing actual clusters)
+4. "What is a cluster?" = DOCUMENTATION (explaining the concept)
+5. "How many clusters in delhi?" = RESOURCE_OPERATIONS (counting actual clusters)
+6. "How do I create a cluster?" = DOCUMENTATION (explaining the process)
+
+Respond with ONLY ONE of these:
+- ROUTE: RESOURCE_OPERATIONS
+- ROUTE: DOCUMENTATION"""
+
+        try:
+            llm_response = await ai_service._call_chat_with_retries(
+                prompt=routing_prompt,
+                max_tokens=20,
+                temperature=0.0
+            )
+            
+            logger.info(f"🤖 LLM routing decision: {llm_response}")
+            
+            if "RESOURCE_OPERATIONS" in llm_response:
+                return {
+                    "route": "intent",
+                    "reason": "LLM detected resource operation intent"
+                }
+            elif "DOCUMENTATION" in llm_response:
+                return {
+                    "route": "rag",
+                    "reason": "LLM detected documentation question"
+                }
+            else:
+                # Fallback to intent if unclear
+                logger.warning(f"⚠️ LLM routing unclear: {llm_response}, defaulting to intent")
+                return {
+                    "route": "intent",
+                    "reason": "Ambiguous routing, defaulting to intent detection"
+                }
+        except Exception as e:
+            logger.error(f"❌ LLM routing failed: {e}, defaulting to intent")
             return {
                 "route": "intent",
-                "reason": "Detected action intent with resource"
+                "reason": "LLM routing error, defaulting to intent detection"
             }
-        
-        # Question keywords
-        question_keywords = ["what", "how", "why", "when", "where", "explain", "tell me", "?"]
-        has_question = any(keyword in user_input_lower for keyword in question_keywords)
-        
-        if has_question:
-            return {
-                "route": "rag",
-                "reason": "Detected question about documentation"
-            }
-        
-        # Default to intent detection for ambiguous cases
-        return {
-            "route": "intent",
-            "reason": "Ambiguous input, routing to intent detection"
-        }
     
     async def _execute_routing(
         self,
@@ -366,6 +388,86 @@ Always confirm destructive operations (delete, update) before executing."""
                         extracted_params = intent_data.get("extracted_params", {})
                         if extracted_params:
                             state.add_parameters(extracted_params)
+                        
+                        # STEP 2: Check if we need more parameters OR if ready to execute
+                        if state.missing_params:
+                            logger.info(f"🔄 Missing params detected: {state.missing_params}, routing to ValidationAgent")
+                            state.status = ConversationStatus.COLLECTING_PARAMS
+                            state.handoff_to_agent("IntentAgent", "ValidationAgent", "Need to collect missing parameters")
+                            
+                            # Immediately route to validation agent
+                            if self.validation_agent:
+                                validation_result = await self.validation_agent.execute(user_input, {
+                                    "session_id": state.session_id,
+                                    "conversation_state": state.to_dict()
+                                })
+                                
+                                # Check if validation made us ready to execute
+                                if validation_result.get("ready_to_execute") and validation_result.get("success"):
+                                    logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
+                                    
+                                    state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
+                                    state.status = ConversationStatus.EXECUTING
+                                    
+                                    if self.execution_agent:
+                                        exec_result = await self.execution_agent.execute("", {
+                                            "session_id": state.session_id,
+                                            "conversation_state": state.to_dict(),
+                                            "user_roles": user_roles or []
+                                        })
+                                        
+                                        if exec_result.get("success"):
+                                            state.set_execution_result(exec_result.get("execution_result", {}))
+                                        
+                                        return {
+                                            "success": True,
+                                            "response": exec_result.get("output", ""),
+                                            "routing": "execution",
+                                            "execution_result": exec_result.get("execution_result"),
+                                            "metadata": {
+                                                "collected_params": state.collected_params,
+                                                "resource_type": state.resource_type,
+                                                "operation": state.operation
+                                            }
+                                        }
+                                
+                                return {
+                                    "success": True,
+                                    "response": validation_result.get("output", ""),
+                                    "routing": "validation",
+                                    "intent_data": intent_data,
+                                    "metadata": {
+                                        "collected_params": state.collected_params,
+                                        "missing_params": list(state.missing_params)
+                                    }
+                                }
+                        else:
+                            # No missing params - proceed directly to execution!
+                            logger.info(f"✅ All params collected for {state.operation} {state.resource_type}, executing immediately")
+                            state.status = ConversationStatus.EXECUTING
+                            state.handoff_to_agent("IntentAgent", "ExecutionAgent", "No parameters needed, executing immediately")
+                            
+                            if self.execution_agent:
+                                exec_result = await self.execution_agent.execute("", {
+                                    "session_id": state.session_id,
+                                    "conversation_state": state.to_dict(),
+                                    "user_roles": user_roles or []
+                                })
+                                
+                                if exec_result.get("success"):
+                                    state.set_execution_result(exec_result.get("execution_result", {}))
+                                
+                                return {
+                                    "success": True,
+                                    "response": exec_result.get("output", ""),
+                                    "routing": "execution",
+                                    "execution_result": exec_result.get("execution_result"),
+                                    "metadata": {
+                                        "collected_params": state.collected_params,
+                                        "resource_type": state.resource_type,
+                                        "operation": state.operation
+                                    }
+                                }
                     
                     return {
                         "success": True,
@@ -389,10 +491,53 @@ Always confirm destructive operations (delete, update) before executing."""
                         "conversation_state": state.to_dict()
                     })
                     
+                    # CHECK: If validation says "ready to execute", route to execution NOW!
+                    if result.get("ready_to_execute") and result.get("success"):
+                        logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
+                        
+                        # Update state to executing
+                        state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
+                        state.status = ConversationStatus.EXECUTING
+                        
+                        # Execute immediately
+                        if self.execution_agent:
+                            exec_result = await self.execution_agent.execute("", {
+                                "session_id": state.session_id,
+                                "conversation_state": state.to_dict(),
+                                "user_roles": user_roles or []
+                            })
+                            
+                            # Update state with execution result
+                            if exec_result.get("success"):
+                                state.set_execution_result(exec_result.get("execution_result", {}))
+                            
+                            return {
+                                "success": True,
+                                "response": exec_result.get("output", ""),
+                                "routing": "execution",
+                                "execution_result": exec_result.get("execution_result"),
+                                "metadata": {
+                                    "collected_params": state.collected_params,
+                                    "resource_type": state.resource_type,
+                                    "operation": state.operation
+                                }
+                            }
+                        else:
+                            return {
+                                "success": False,
+                                "response": "Execution agent not available",
+                                "routing": "execution"
+                            }
+                    
+                    # Otherwise, return validation response (asking for more info)
                     return {
                         "success": True,
                         "response": result.get("output", ""),
-                        "routing": route
+                        "routing": route,
+                        "metadata": {
+                            "missing_params": result.get("missing_params", []),
+                            "ready_to_execute": result.get("ready_to_execute", False)
+                        }
                     }
                 else:
                     return {

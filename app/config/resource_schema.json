@@ -70,24 +70,248 @@
             "method": "POST",
             "url": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/clusterlist",
             "description": "List all clusters for given endpoints. Requires engagement_id in URL and endpoints array in payload."
+          },
+          "check_cluster_name": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/api/v1/check/clusterName?clusterName={clusterName}&clusterType=iks",
+            "description": "Check if cluster name is available. Empty response = available."
+          },
+          "get_iks_images": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/iks/images/version",
+            "description": "Get IKS images with datacenter options and k8s versions"
+          },
+          "get_network_list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getNetworkList/{endpointId}/{k8sVersion}/APP",
+            "description": "Get CNI drivers for datacenter + k8s version + cluster type"
+          },
+          "get_environments": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/environment/getEnvironmentListPerEngagement/{engagement_id}",
+            "description": "Get business units and environments for engagement"
+          },
+          "get_zones": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/zone/getZoneList/{engagement_id}",
+            "description": "Get zones (VLANs) for engagement"
+          },
+          "get_os_images": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledImages/{zoneId}?circuitId={circuitId}&isDeployment=false",
+            "description": "Get OS images for zone, filtered by k8s version"
+          },
+          "get_flavors": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledFlavors/{zoneId}?isDeployment=false&circuitId={circuitId}",
+            "description": "Get compute flavors for zone"
           }
         },
         "parameters": {
-          "create": {
-            "required": ["Engagement","Cluster Name","Data  Center","Kubernetes version","Cluster Type","Control Plane Type","Business Unit","Environments","Zone","Operating System","Master Flavor","Worker Node Pool Name","Node type","Flavour","Fixed Replica Count","Persistent Volume Name"],
-            "optional": ["version", "network_config", "tags"],
-            "validation": {
-              "name": {"type": "string", "pattern": "^[a-z0-9-]+$", "min_length": 3, "max_length": 63},
-              "node_count": {"type": "integer", "min": 1, "max": 100},
-              "region": {"type": "enum", "values": ["us-east-1", "us-west-2", "eu-west-1"]}
-            }
-          },
           "list": {
-            "required": ["engagement_id", "endpoints"],
-            "optional": [],
+            "required": ["endpoints"],
+            "optional": []
+          },
+          "create": {
+            "required": [
+              "clusterName",
+              "datacenter",
+              "k8sVersion",
+              "cniDriver",
+              "businessUnit",
+              "environment",
+              "zone",
+              "operatingSystem",
+              "workerNodePool"
+            ],
+            "optional": [
+              "tags"
+            ],
             "validation": {
-              "engagement_id": {"type": "integer"},
-              "endpoints": {"type": "array", "items": "integer", "description": "Array of endpoint IDs to query"}
+              "clusterName": {
+                "type": "string",
+                "pattern": "^[a-zA-Z][a-zA-Z0-9-]{2,17}$",
+                "min_length": 3,
+                "max_length": 18,
+                "description": "Cluster name must start with letter, 3-18 chars (alphanumeric, hyphens, underscores)",
+                "api_check": "https://ipcloud.tatacommunications.com/paasservice/paas/cluster/checkClusterName/{clusterName}"
+              },
+              "datacenter": {
+                "type": "dynamic_select",
+                "fetch_from_api": true,
+                "api_endpoint": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/iks/images/version",
+                "description": "Data center where cluster will be deployed"
+              },
+              "k8sVersion": {
+                "type": "dynamic_select",
+                "depends_on": ["datacenter"],
+                "fetch_from_api": true,
+                "description": "Kubernetes version (filtered by datacenter)"
+              },
+              "cniDriver": {
+                "type": "dynamic_select",
+                "depends_on": ["datacenter", "k8sVersion"],
+                "fetch_from_api": true,
+                "api_endpoint": "https://ipcloud.tatacommunications.com/paasservice/paas/getNetworkList/{endpointId}/{k8sVersion}/APP",
+                "description": "Container Network Interface driver"
+              },
+              "businessUnit": {
+                "type": "dynamic_select",
+                "fetch_from_api": true,
+                "api_endpoint": "https://ipcloud.tatacommunications.com/portalservice/environment/getEnvironmentListPerEngagement/{engagement_id}",
+                "filter": "unique_departments",
+                "description": "Business unit for cluster deployment"
+              },
+              "environment": {
+                "type": "dynamic_select",
+                "depends_on": ["businessUnit"],
+                "description": "Deployment environment (filtered by business unit)"
+              },
+              "zone": {
+                "type": "dynamic_select",
+                "depends_on": ["businessUnit", "environment"],
+                "fetch_from_api": true,
+                "api_endpoint": "https://ipcloud.tatacommunications.com/portalservice/zone/getZoneList/{engagement_id}",
+                "filter": "by_department_and_environment",
+                "description": "Network zone (VLAN) for cluster"
+              },
+              "operatingSystem": {
+                "type": "dynamic_select",
+                "depends_on": ["zone", "k8sVersion"],
+                "fetch_from_api": true,
+                "api_endpoint": "https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledImages/{zoneId}",
+                "filter": "by_k8s_version",
+                "description": "Operating system for worker nodes"
+              },
+              "workerNodePool": {
+                "type": "object",
+                "required": ["poolName", "nodeType", "flavor", "replicaCount"],
+                "properties": {
+                  "poolName": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9]{1,5}$",
+                    "description": "5 lowercase alphanumeric characters"
+                  },
+                  "nodeType": {
+                    "type": "dynamic_select",
+                    "depends_on": ["operatingSystem"],
+                    "description": "General Purpose, Compute Optimized, or Memory Optimized"
+                  },
+                  "flavor": {
+                    "type": "dynamic_select",
+                    "depends_on": ["operatingSystem", "nodeType"],
+                    "fetch_from_api": true,
+                    "api_endpoint": "https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledFlavors/{zoneId}",
+                    "filter": "by_os_and_node_type",
+                    "description": "Compute configuration (vCPU/RAM/Storage)"
+                  },
+                  "replicaCount": {
+                    "type": "integer",
+                    "min": 1,
+                    "max": 8,
+                    "description": "Number of worker nodes (1-8)"
+                  },
+                  "enableAutoscaling": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable autoscaling for worker nodes"
+                  },
+                  "maxReplicas": {
+                    "type": "integer",
+                    "min": 1,
+                    "max": 8,
+                    "depends_on_true": ["enableAutoscaling"],
+                    "description": "Maximum replicas when autoscaling"
+                  }
+                }
+              },
+              "tags": {
+                "type": "array",
+                "optional": true,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"}
+                  }
+                }
+              }
+            },
+            "defaults": {
+              "hypervisor": "VCD_ESXI",
+              "purpose": "ipc",
+              "vmPurpose": "APP",
+              "clusterType": "APP",
+              "controlPlaneType": "virtual",
+              "clusterMode": "High availability",
+              "dedicatedDeployment": false,
+              "alertSuppression": true,
+              "iops": 1,
+              "isKdumpOrPageEnabled": "No",
+              "logEnabled": true,
+              "applicationType": "Container",
+              "application": "Containers",
+              "flavorDisk": 50,
+              "master_node": {
+                "vmHostName": "",
+                "vmFlavor": "D8",
+                "skuCode": "D8.UBN",
+                "nodeType": "Master",
+                "replicaCount": 3,
+                "maxReplicaCount": null,
+                "additionalDisk": {},
+                "labelsNTaints": "no"
+              }
+            },
+            "conversational_prompts": {
+              "clusterName": "What would you like to name your cluster? (Must start with a letter, 3-18 characters: letters, numbers, hyphens)",
+              "datacenter": "Which data center would you like to deploy the cluster in?",
+              "k8sVersion": "Which Kubernetes version would you like to use?",
+              "cniDriver": "Which CNI (Container Network Interface) driver would you like to use?",
+              "businessUnit": "Which business unit should this cluster belong to?",
+              "environment": "Which environment is this cluster for?",
+              "zone": "Which network zone (VLAN) should the cluster use?",
+              "operatingSystem": "Which operating system would you like for the worker nodes?",
+              "workerNodePool": {
+                "poolName": "What would you like to name this worker node pool? (5 lowercase alphanumeric characters)",
+                "nodeType": "What type of worker nodes? (General Purpose, Compute Optimized, or Memory Optimized)",
+                "flavor": "Which compute configuration (vCPU/RAM/Storage)?",
+                "replicaCount": "How many worker nodes? (1-8)",
+                "enableAutoscaling": "Would you like to enable autoscaling? (yes/no)",
+                "maxReplicas": "What should be the maximum number of replicas? (1-8)"
+              },
+              "tags": "Would you like to add any tags? (optional, format: key=value)"
+            },
+            "payload_structure": {
+              "description": "Complete payload structure for cluster creation",
+              "template": {
+                "name": "{{clusterName}}",
+                "clusterName": "{{clusterName}}",
+                "hypervisor": "{{hypervisor}}",
+                "purpose": "{{purpose}}",
+                "vmPurpose": "{{vmPurpose}}",
+                "imageId": "{{imageId}}",
+                "flavorId": "{{flavorId}}",
+                "zoneId": "{{zoneId}}",
+                "alertSuppression": "{{alertSuppression}}",
+                "iops": "{{iops}}",
+                "isKdumpOrPageEnabled": "{{isKdumpOrPageEnabled}}",
+                "managedServices": "{{managedServices}}",
+                "networkingDriver": "{{networkingDriver}}",
+                "pvcsEnable": "{{pvcsEnable}}",
+                "logEnabled": "{{logEnabled}}",
+                "applicationType": "{{applicationType}}",
+                "application": "{{application}}",
+                "vmSpecificInput": "{{vmSpecificInput}}",
+                "clusterMode": "{{clusterMode}}",
+                "k8sVersion": "{{k8sVersion}}",
+                "dedicatedDeployment": "{{dedicatedDeployment}}",
+                "circuitId": "{{circuitId}}",
+                "vApp": "{{vApp}}",
+                "imageDetails": "{{imageDetails}}",
+                "flavorDisk": "{{flavorDisk}}",
+                "iksBackupDetails": "{{iksBackupDetails}}"
+              }
             }
           }
         },
@@ -126,6 +350,162 @@
                 "operation": "list",
                 "depends_on": ["engagement_id", "selected_endpoints"]
               }
+            ]
+          },
+          "create_cluster_customer": {
+            "description": "Customer workflow to create a new Kubernetes cluster (simplified)",
+            "user_type": "customer",
+            "steps": [
+              {
+                "step": 1,
+                "group": "cluster_config",
+                "action": "collect_cluster_name",
+                "param": "clusterName",
+                "description": "Ask for cluster name and validate uniqueness"
+              },
+              {
+                "step": 2,
+                "group": "cluster_config",
+                "action": "select_datacenter",
+                "param": "datacenter",
+                "fetch_options": true,
+                "api_call": "get_iks_images_version",
+                "description": "Show available data centers"
+              },
+              {
+                "step": 3,
+                "group": "cluster_config",
+                "action": "select_k8s_version",
+                "param": "k8sVersion",
+                "depends_on": ["datacenter"],
+                "fetch_options": true,
+                "description": "Show k8s versions for selected datacenter"
+              },
+              {
+                "step": 4,
+                "group": "cluster_config",
+                "action": "select_cni_driver",
+                "param": "cniDriver",
+                "depends_on": ["datacenter", "k8sVersion"],
+                "fetch_options": true,
+                "api_call": "get_network_list",
+                "description": "Show available CNI drivers"
+              },
+              {
+                "step": 5,
+                "group": "network_setup",
+                "action": "select_business_unit",
+                "param": "businessUnit",
+                "fetch_options": true,
+                "api_call": "get_environments_list",
+                "description": "Show business units"
+              },
+              {
+                "step": 6,
+                "group": "network_setup",
+                "action": "select_environment",
+                "param": "environment",
+                "depends_on": ["businessUnit"],
+                "filter_by": "businessUnit",
+                "description": "Show environments for selected BU"
+              },
+              {
+                "step": 7,
+                "group": "network_setup",
+                "action": "select_zone",
+                "param": "zone",
+                "depends_on": ["businessUnit", "environment"],
+                "fetch_options": true,
+                "api_call": "get_zone_list",
+                "filter_by": ["businessUnit", "environment"],
+                "description": "Show zones for selected BU + environment"
+              },
+              {
+                "step": 8,
+                "group": "worker_config",
+                "action": "select_operating_system",
+                "param": "operatingSystem",
+                "depends_on": ["zone", "k8sVersion"],
+                "fetch_options": true,
+                "api_call": "get_os_images",
+                "description": "Show OS images filtered by zone + k8s version"
+              },
+              {
+                "step": 9,
+                "group": "worker_config",
+                "action": "collect_worker_pool_name",
+                "param": "workerNodePool.poolName",
+                "description": "Ask for worker pool name (5 chars)"
+              },
+              {
+                "step": 10,
+                "group": "worker_config",
+                "action": "select_node_type",
+                "param": "workerNodePool.nodeType",
+                "depends_on": ["operatingSystem"],
+                "fetch_options": true,
+                "description": "Show node types from flavors"
+              },
+              {
+                "step": 11,
+                "group": "worker_config",
+                "action": "select_flavor",
+                "param": "workerNodePool.flavor",
+                "depends_on": ["operatingSystem", "workerNodePool.nodeType"],
+                "fetch_options": true,
+                "api_call": "get_flavors",
+                "description": "Show flavors filtered by OS + node type"
+              },
+              {
+                "step": 12,
+                "group": "worker_config",
+                "action": "collect_replica_count",
+                "param": "workerNodePool.replicaCount",
+                "description": "Ask for number of worker nodes (1-8)"
+              },
+              {
+                "step": 13,
+                "group": "optional",
+                "action": "ask_autoscaling",
+                "param": "workerNodePool.enableAutoscaling",
+                "optional": true,
+                "description": "Ask if autoscaling should be enabled"
+              },
+              {
+                "step": 14,
+                "group": "optional",
+                "action": "collect_max_replicas",
+                "param": "workerNodePool.maxReplicas",
+                "depends_on_true": ["workerNodePool.enableAutoscaling"],
+                "description": "Ask for max replicas if autoscaling enabled"
+              },
+              {
+                "step": 15,
+                "group": "optional",
+                "action": "collect_tags",
+                "param": "tags",
+                "optional": true,
+                "description": "Ask if user wants to add tags"
+              },
+              {
+                "step": 16,
+                "action": "build_payload",
+                "description": "Construct final API payload with collected params"
+              },
+              {
+                "step": 17,
+                "action": "confirm_and_create",
+                "confirmation_required": true,
+                "confirmation_prompt": "Ready to create cluster '{{clusterName}}' with {{workerNodePool.replicaCount}} worker nodes in {{datacenter}}? This will take 15-30 minutes.",
+                "api_call": "create_cluster",
+                "description": "Show summary and create cluster"
+              }
+            ],
+            "estimated_duration": "15-30 minutes",
+            "notes": [
+              "Customer clusters are always APP type with virtual control plane",
+              "Cluster mode is automatically set to High Availability",
+              "Master nodes use default configuration (3x D8 flavor)"
             ]
           }
         }

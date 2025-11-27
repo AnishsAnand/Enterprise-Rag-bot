@@ -176,19 +176,30 @@ Be professional, helpful, and always provide actionable information."""
         Uses the multi-step workflow: engagement -> endpoints -> clusters.
         """
         try:
+            logger.info(f"🎯 ExecutionAgent._list_k8s_clusters called with input: {input_json}")
             data = json.loads(input_json) if input_json and input_json != "{}" else {}
             endpoint_ids = data.get("endpoint_ids")
             engagement_id = data.get("engagement_id")
             
+            logger.info(f"📊 Calling api_executor_service.list_clusters(endpoint_ids={endpoint_ids}, engagement_id={engagement_id})")
+            
             # Execute cluster listing workflow
             import asyncio
-            loop = asyncio.get_event_loop()
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # No event loop in current thread, create a new one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
             result = loop.run_until_complete(
                 api_executor_service.list_clusters(
                     endpoint_ids=endpoint_ids,
                     engagement_id=engagement_id
                 )
             )
+            
+            logger.info(f"📊 api_executor_service.list_clusters returned: success={result.get('success')}")
             
             # Format the response for better readability
             if result.get("success") and result.get("data"):
@@ -291,6 +302,108 @@ Be professional, helpful, and always provide actionable information."""
         except Exception as e:
             return f"An error occurred: {str(e)}"
     
+    async def _build_cluster_create_payload(self, state: Any) -> Dict[str, Any]:
+        """
+        Build the complete payload for cluster creation (customer version).
+        
+        Based on createcluster.ts lines 3994-4042.
+        
+        Args:
+            state: Conversation state with collected params
+            
+        Returns:
+            Complete payload dict for API
+        """
+        params = state.collected_params
+        logger.info(f"🔧 Building payload from collected params: {list(params.keys())}")
+        
+        # Get engagement ID and circuit ID
+        engagement_id = await api_executor_service.get_engagement_id()
+        circuit_id = params.get("_circuit_id") or await api_executor_service.get_circuit_id(engagement_id)
+        
+        # Extract OS and flavor details
+        os_info = params["operatingSystem"]
+        flavor_info = params["flavor"]
+        zone_id = params["_zone_id"]
+        
+        # Build master node config (customer default: 3x D8)
+        master_node = {
+            "vmHostName": "",
+            "vmFlavor": "D8",
+            "skuCode": "D8.UBN",
+            "nodeType": "Master",
+            "replicaCount": 3,
+            "maxReplicaCount": None,
+            "additionalDisk": {},
+            "labelsNTaints": "no"
+        }
+        
+        # Build worker node config
+        worker_node = {
+            "vmHostName": params["workerPoolName"],
+            "vmFlavor": flavor_info["flavor_name"],
+            "skuCode": flavor_info["sku_code"],
+            "nodeType": "Worker",
+            "replicaCount": params["replicaCount"],
+            "maxReplicaCount": params.get("maxReplicas"),
+            "additionalDisk": {},
+            "labelsNTaints": "no"
+        }
+        
+        # Build vmSpecificInput array (master + workers)
+        vm_specific_input = [master_node, worker_node]
+        
+        # Build imageDetails
+        image_details = {
+            "valueOSModel": os_info["os_model"],
+            "valueOSMake": os_info["os_make"],
+            "valueOSVersion": os_info["os_version"],
+            "valueOSServicePack": None
+        }
+        
+        # Build networking driver (optional)
+        networking_driver = []
+        if params.get("cniDriver"):
+            networking_driver = [{"name": params["cniDriver"]}]
+        
+        # Build tags (optional)
+        tags = params.get("tags", [])
+        
+        # Construct final payload
+        payload = {
+            "name": "",  # Empty string as per UI
+            "hypervisor": os_info.get("hypervisor", "VCD_ESXI"),
+            "purpose": "ipc",
+            "vmPurpose": "",  # Empty for customer
+            "imageId": os_info["os_id"],
+            "zoneId": zone_id,
+            "alertSuppression": True,
+            "iops": 1,
+            "isKdumpOrPageEnabled": "No",
+            "applicationType": "Container",
+            "application": "Containers",
+            "vmSpecificInput": vm_specific_input,
+            "clusterMode": "High availability",
+            "dedicatedDeployment": False,
+            "clusterName": params["clusterName"],
+            "k8sVersion": params["k8sVersion"],
+            "circuitId": circuit_id,
+            "vApp": "",
+            "imageDetails": image_details
+        }
+        
+        # Add optional fields
+        if networking_driver:
+            payload["networkingDriver"] = networking_driver
+        
+        if tags:
+            payload["tags"] = tags
+        
+        logger.info(f"✅ Built complete payload for cluster: {payload['clusterName']}")
+        logger.debug(f"📦 Full payload: {json.dumps(payload, indent=2)}")
+        
+        return payload
+    
     async def execute(
         self,
         input_text: str,
@@ -311,9 +424,11 @@ Be professional, helpful, and always provide actionable information."""
             
             # Get conversation state
             session_id = context.get("session_id") if context else None
+            logger.info(f"📌 Session ID: {session_id}")
             state = conversation_state_manager.get_session(session_id) if session_id else None
             
             if not state:
+                logger.error("❌ No conversation state found!")
                 return {
                     "agent_name": self.agent_name,
                     "success": False,
@@ -321,8 +436,11 @@ Be professional, helpful, and always provide actionable information."""
                     "output": "I couldn't find the operation to execute."
                 }
             
+            logger.info(f"📌 State: resource={state.resource_type}, operation={state.operation}, ready={state.is_ready_to_execute()}, status={state.status}")
+            
             # Check if ready to execute
             if not state.is_ready_to_execute():
+                logger.warning(f"⚠️ Not ready to execute! Missing: {state.missing_params}")
                 return {
                     "agent_name": self.agent_name,
                     "success": False,
@@ -339,13 +457,62 @@ Be professional, helpful, and always provide actionable information."""
                 f"with params: {list(state.collected_params.keys())}"
             )
             
-            execution_result = await api_executor_service.execute_operation(
-                resource_type=state.resource_type,
-                operation=state.operation,
-                params=state.collected_params,
-                user_roles=user_roles,
-                dry_run=False
-            )
+            # Special handling for cluster listing - use the full workflow method
+            if state.resource_type == "k8s_cluster" and state.operation == "list":
+                logger.info("📋 Using list_clusters workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                execution_result = await api_executor_service.list_clusters(
+                    endpoint_ids=endpoint_ids,
+                    engagement_id=None  # Will be fetched automatically
+                )
+            
+            # Special handling for cluster creation - build custom payload
+            elif state.resource_type == "k8s_cluster" and state.operation == "create":
+                logger.info("🏗️ Building cluster creation payload")
+                try:
+                    payload = await self._build_cluster_create_payload(state)
+                    logger.info(f"📦 Built payload with keys: {list(payload.keys())}")
+                    
+                    # **DRY-RUN MODE** - Show payload without hitting API
+                    # Set DRY_RUN = True to test, False to actually create
+                    DRY_RUN = True
+                    
+                    if DRY_RUN:
+                        logger.info(f"🔍 DRY RUN MODE - Showing payload without API call")
+                        execution_result = {
+                            "success": True,
+                            "dry_run": True,
+                            "data": {
+                                "message": "Cluster creation payload generated (DRY RUN - no API call made)",
+                                "payload": payload,
+                                "payload_json": json.dumps(payload, indent=2)
+                            }
+                        }
+                    else:
+                        # Execute creation via API (when ready)
+                        execution_result = await api_executor_service.execute_operation(
+                            resource_type=state.resource_type,
+                            operation=state.operation,
+                            params=payload,
+                            user_roles=user_roles,
+                            dry_run=False
+                        )
+                except Exception as e:
+                    logger.error(f"❌ Failed to build cluster payload: {e}")
+                    execution_result = {
+                        "success": False,
+                        "error": f"Failed to build cluster payload: {str(e)}"
+                    }
+            
+            else:
+                # Standard execution for other operations
+                execution_result = await api_executor_service.execute_operation(
+                    resource_type=state.resource_type,
+                    operation=state.operation,
+                    params=state.collected_params,
+                    user_roles=user_roles,
+                    dry_run=False
+                )
             
             # Update conversation state with result
             state.set_execution_result(execution_result)
@@ -389,6 +556,29 @@ Be professional, helpful, and always provide actionable information."""
         Returns:
             Formatted success message
         """
+        # Handle DRY-RUN mode for cluster creation
+        if execution_result.get("dry_run"):
+            payload_json = execution_result.get("data", {}).get("payload_json", "{}")
+            message = f"""
+🔍 **DRY RUN MODE - Cluster Creation Payload Preview**
+
+The cluster creation payload has been generated successfully!  
+**No API call was made** - this is for testing/validation only.
+
+**📦 Complete Payload:**
+```json
+{payload_json}
+```
+
+**💡 To actually create the cluster:**
+1. Set `DRY_RUN = False` in `execution_agent.py` (line ~380)
+2. Ensure all API endpoints are correctly configured
+3. Re-run the cluster creation workflow
+
+**✅ All parameters were successfully collected and validated!**
+"""
+            return message
+        
         operation_verb = {
             "create": "created",
             "update": "updated",
