@@ -247,6 +247,9 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             # Add parameters to state
             state.add_parameters(params)
 
+            # Persist state after update
+            conversation_state_manager.update_session(state)
+
             # Check if ready to execute
             ready = state.is_ready_to_execute()
 
@@ -604,6 +607,9 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                 # Add parameter to state
                                 state.add_parameter(next_param_to_collect, extracted_value, is_valid=True)
                                 
+                                # Persist state after parameter collection
+                                conversation_state_manager.update_session(state)
+                                
                                 # Continue to next missing param or endpoint collection
                                 # Don't return here, let it flow to endpoint collection or completion check
                                 
@@ -686,6 +692,9 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             # Add to state
                             state.add_parameter("endpoints", matched_ids, is_valid=True)
                             state.add_parameter("endpoint_names", matched_names, is_valid=True)
+                            
+                            # Persist state after parameter collection
+                            conversation_state_manager.update_session(state)
 
                         elif match_result.get("ambiguous"):
                             # Multiple matches - ask for clarification

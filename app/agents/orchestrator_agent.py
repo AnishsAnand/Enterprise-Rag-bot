@@ -241,6 +241,9 @@ Always confirm destructive operations (delete, update) before executing."""
                 "success": result.get("success", True)
             })
             
+            # Persist state after each interaction (for scalability across restarts/instances)
+            conversation_state_manager.update_session(state)
+            
             return result
             
         except Exception as e:

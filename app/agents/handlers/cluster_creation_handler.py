@@ -12,6 +12,7 @@ import json
 
 from app.services.api_executor_service import api_executor_service
 from app.agents.tools.parameter_extraction import ParameterExtractor
+from app.agents.state.conversation_state import conversation_state_manager
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +225,8 @@ Would you like me to proceed with creating this cluster?
         logger.info(f"✅ Name is available, storing...")
         state.collected_params["clusterName"] = cluster_name
         logger.info(f"✅✅ Stored clusterName = '{cluster_name}', collected params now: {list(state.collected_params.keys())}")
+        # Persist state after collecting parameter
+        conversation_state_manager.update_session(state)
         return None
     
     async def _handle_datacenter(self, input_text: str, state: Any) -> Optional[Dict[str, Any]]:
@@ -243,6 +246,7 @@ Would you like me to proceed with creating this cluster?
             dc_info = matched_data.get("matched_item")
             state.collected_params["datacenter"] = dc_info
             state.collected_params["_datacenter_id"] = dc_info["id"]
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -263,6 +267,7 @@ Would you like me to proceed with creating this cluster?
         
         if input_text.strip() in state._k8s_versions:
             state.collected_params["k8sVersion"] = input_text.strip()
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -281,6 +286,7 @@ Would you like me to proceed with creating this cluster?
         
         if input_text.strip() in state._cni_drivers:
             state.collected_params["cniDriver"] = input_text.strip()
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -303,6 +309,7 @@ Would you like me to proceed with creating this cluster?
         if matched_data.get("matched"):
             bu_info = matched_data.get("matched_item")
             state.collected_params["businessUnit"] = bu_info
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -325,6 +332,7 @@ Would you like me to proceed with creating this cluster?
             full_env = next(e for e in filtered_envs if e["id"] == env_info["id"])
             state.collected_params["environment"] = {"id": full_env["id"], "name": full_env["name"]}
             state.collected_params["_environment_name"] = full_env["name"]
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -353,6 +361,7 @@ Would you like me to proceed with creating this cluster?
             zone_info = matched_data.get("matched_item")
             state.collected_params["zone"] = zone_info
             state.collected_params["_zone_id"] = zone_info["id"]
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -378,6 +387,7 @@ Would you like me to proceed with creating this cluster?
         if matched_data.get("matched"):
             os_idx = matched_data.get("matched_item")["id"]
             state.collected_params["operatingSystem"] = state._os_options[os_idx]
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -397,6 +407,7 @@ Would you like me to proceed with creating this cluster?
             }
         
         state.collected_params["workerPoolName"] = pool_name
+        conversation_state_manager.update_session(state)
         return None
     
     async def _handle_node_type(self, input_text: str, state: Any) -> Optional[Dict[str, Any]]:
@@ -425,6 +436,7 @@ Would you like me to proceed with creating this cluster?
         
         if matched_type:
             state.collected_params["nodeType"] = matched_type
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -446,6 +458,7 @@ Would you like me to proceed with creating this cluster?
             flavor_id = matched_data.get("matched_item")["id"]
             flavor_info = next(f for f in filtered_flavors if f["id"] == flavor_id)
             state.collected_params["flavor"] = flavor_info
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -460,6 +473,7 @@ Would you like me to proceed with creating this cluster?
             count = int(input_text.strip())
             if 1 <= count <= 8:
                 state.collected_params["replicaCount"] = count
+                conversation_state_manager.update_session(state)
                 return None
             else:
                 return {
@@ -479,9 +493,11 @@ Would you like me to proceed with creating this cluster?
         user_response = input_text.lower().strip()
         if "yes" in user_response or "enable" in user_response:
             state.collected_params["enableAutoscaling"] = True
+            conversation_state_manager.update_session(state)
             return None
         elif "no" in user_response or "skip" in user_response:
             state.collected_params["enableAutoscaling"] = False
+            conversation_state_manager.update_session(state)
             return None
         else:
             return {
@@ -497,6 +513,7 @@ Would you like me to proceed with creating this cluster?
             min_count = state.collected_params["replicaCount"]
             if min_count <= max_count <= 8:
                 state.collected_params["maxReplicas"] = max_count
+                conversation_state_manager.update_session(state)
                 return None
             else:
                 return {
@@ -517,10 +534,12 @@ Would you like me to proceed with creating this cluster?
         user_response = input_text.lower().strip()
         if "no" in user_response or "skip" in user_response:
             state.collected_params["tags"] = []
+            conversation_state_manager.update_session(state)
             return None
         else:
             # For MVP, just skip tags
             state.collected_params["tags"] = []
+            conversation_state_manager.update_session(state)
             return None
     
     async def _ask_for_parameter(self, param_name: str, state: Any) -> Dict[str, Any]:
@@ -537,6 +556,8 @@ Would you like me to proceed with creating this cluster?
         logger.info(f"❓ Asking for parameter: {param_name}")
         
         state.last_asked_param = param_name
+        # Persist state with last_asked_param so it survives restarts
+        conversation_state_manager.update_session(state)
         
         # Build prompts with available options
         if param_name == "clusterName":

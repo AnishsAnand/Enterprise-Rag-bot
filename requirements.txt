@@ -47,3 +47,7 @@ langchain-openai==0.0.2
 langchain-community==0.0.10
 langgraph==0.0.20
 setuptools<81
+
+# Session persistence (SQL-backed memory)
+# Note: memorisdk is optional - we use a custom SQL-based session manager
+# that provides similar functionality without external dependencies

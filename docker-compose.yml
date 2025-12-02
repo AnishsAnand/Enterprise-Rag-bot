@@ -1,5 +1,26 @@
 # docker-compose.yml (fixed / production-ready)
 services:
+  # PostgreSQL Database for session persistence (Memori)
+  postgres:
+    image: postgres:16-alpine
+    container_name: ragbot-postgres
+    environment:
+      POSTGRES_USER: ragbot
+      POSTGRES_PASSWORD: ragbot_secret_2024
+      POSTGRES_DB: ragbot_sessions
+      TZ: "Asia/Kolkata"
+    ports:
+      - "5435:5432"   # Using 5435 externally (5432-5434 are already in use)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragbot -d ragbot_sessions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   rag-app:
     build:
       context: .
@@ -18,6 +39,7 @@ services:
       - ./outputs:/app/outputs
       - ./backups:/app/backups
     depends_on:
+      - postgres
       - milvus
       - etcd
       - minio
@@ -47,6 +69,8 @@ services:
       VECTOR_DB: "milvus"
       USER_APP_HOST: "0.0.0.0"
       USER_APP_PORT: "8001"
+      # PostgreSQL for session persistence (Memori)
+      DATABASE_URL: "postgresql://ragbot:ragbot_secret_2024@postgres:5432/ragbot_sessions"
       # other environment vars from your .env will also be loaded
 
   milvus:
@@ -151,6 +175,7 @@ services:
     restart: "no"
 
 volumes:
+  postgres_data:
   milvus_data:
   etcd_data:
   minio_data:

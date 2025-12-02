@@ -299,11 +299,17 @@ class ConversationState:
         Returns:
             Dictionary representation of state
         """
+        # Build metadata for additional attributes
+        metadata = {}
+        if hasattr(self, 'last_asked_param'):
+            metadata['last_asked_param'] = self.last_asked_param
+        
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "user_query": self.user_query,
             "intent": self.intent,
             "resource_type": self.resource_type,
             "operation": self.operation,
@@ -318,7 +324,8 @@ class ConversationState:
             "execution_result": self.execution_result,
             "error_message": self.error_message,
             "active_agent": self.active_agent,
-            "agent_handoffs": self.agent_handoffs
+            "agent_handoffs": self.agent_handoffs,
+            "metadata": metadata
         }
     
     @classmethod
@@ -333,12 +340,32 @@ class ConversationState:
             ConversationState instance
         """
         state = cls(data["session_id"], data["user_id"])
-        state.created_at = datetime.fromisoformat(data["created_at"])
-        state.updated_at = datetime.fromisoformat(data["updated_at"])
+        
+        # Handle datetime fields with both string and datetime types
+        created_at = data.get("created_at")
+        if isinstance(created_at, str):
+            state.created_at = datetime.fromisoformat(created_at)
+        elif created_at:
+            state.created_at = created_at
+            
+        updated_at = data.get("updated_at")
+        if isinstance(updated_at, str):
+            state.updated_at = datetime.fromisoformat(updated_at)
+        elif updated_at:
+            state.updated_at = updated_at
+        
+        state.user_query = data.get("user_query")
         state.intent = data.get("intent")
         state.resource_type = data.get("resource_type")
         state.operation = data.get("operation")
-        state.status = ConversationStatus(data["status"])
+        
+        # Handle status field
+        status = data.get("status", "initiated")
+        if isinstance(status, str):
+            state.status = ConversationStatus(status)
+        else:
+            state.status = status
+            
         state.required_params = set(data.get("required_params", []))
         state.optional_params = set(data.get("optional_params", []))
         state.collected_params = data.get("collected_params", {})
@@ -350,6 +377,12 @@ class ConversationState:
         state.error_message = data.get("error_message")
         state.active_agent = data.get("active_agent")
         state.agent_handoffs = data.get("agent_handoffs", [])
+        
+        # Restore additional attributes from metadata
+        metadata = data.get("metadata", {})
+        if metadata.get("last_asked_param"):
+            state.last_asked_param = metadata["last_asked_param"]
+        
         return state
     
     def __repr__(self) -> str:
@@ -363,13 +396,68 @@ class ConversationState:
 class ConversationStateManager:
     """
     Manages multiple conversation states across sessions.
-    Provides session storage and retrieval.
+    Uses SQL-backed persistent storage via MemoriSessionManager for scalability.
+    
+    Features:
+    - Sessions persist across server restarts
+    - Multiple instances can share session state
+    - Automatic session expiration and cleanup
+    - Full audit trail of conversations
     """
     
-    def __init__(self):
-        """Initialize the conversation state manager."""
-        self.states: Dict[str, ConversationState] = {}
-        logger.info("✅ ConversationStateManager initialized")
+    def __init__(self, use_persistence: bool = True):
+        """
+        Initialize the conversation state manager.
+        
+        Args:
+            use_persistence: If True, use SQL-backed storage. If False, use in-memory only.
+        """
+        self.use_persistence = use_persistence
+        
+        # In-memory cache for fast access during active conversations
+        self._states: Dict[str, ConversationState] = {}
+        
+        # Persistent storage backend
+        if use_persistence:
+            try:
+                from app.agents.state.memori_session_manager import memori_session_manager
+                self._persistent_store = memori_session_manager
+                logger.info("✅ ConversationStateManager initialized with SQL persistence (Memori)")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize persistent storage: {e}. Using in-memory only.")
+                self._persistent_store = None
+                self.use_persistence = False
+        else:
+            self._persistent_store = None
+            logger.info("✅ ConversationStateManager initialized (in-memory only)")
+    
+    def _save_to_persistent(self, state: ConversationState) -> None:
+        """Save state to persistent storage."""
+        if self._persistent_store:
+            try:
+                state_dict = state.to_dict()
+                self._persistent_store.save_state(state_dict)
+            except Exception as e:
+                logger.error(f"❌ Failed to persist state: {e}")
+    
+    def _load_from_persistent(self, session_id: str) -> Optional[ConversationState]:
+        """Load state from persistent storage."""
+        if not self._persistent_store:
+            return None
+        
+        try:
+            state_dict = self._persistent_store.load_state(session_id)
+            if state_dict:
+                state = ConversationState.from_dict(state_dict)
+                # Restore additional attributes that may not be in from_dict
+                if "user_query" in state_dict:
+                    state.user_query = state_dict["user_query"]
+                if "last_asked_param" in state_dict.get("metadata", {}):
+                    state.last_asked_param = state_dict["metadata"]["last_asked_param"]
+                return state
+        except Exception as e:
+            logger.error(f"❌ Failed to load persistent state: {e}")
+        return None
     
     def create_session(self, session_id: str, user_id: str) -> ConversationState:
         """
@@ -382,12 +470,26 @@ class ConversationStateManager:
         Returns:
             New ConversationState instance
         """
-        if session_id in self.states:
-            logger.warning(f"⚠️ Session {session_id} already exists, returning existing")
-            return self.states[session_id]
+        # Check in-memory cache first
+        if session_id in self._states:
+            logger.warning(f"⚠️ Session {session_id} already exists in cache, returning existing")
+            return self._states[session_id]
         
+        # Check persistent storage
+        if self.use_persistence:
+            existing = self._load_from_persistent(session_id)
+            if existing:
+                self._states[session_id] = existing
+                logger.info(f"📖 Restored session from persistent storage: {session_id}")
+                return existing
+        
+        # Create new session
         state = ConversationState(session_id, user_id)
-        self.states[session_id] = state
+        self._states[session_id] = state
+        
+        # Persist immediately
+        self._save_to_persistent(state)
+        
         logger.info(f"✅ Created new session: {session_id}")
         return state
     
@@ -401,7 +503,30 @@ class ConversationStateManager:
         Returns:
             ConversationState if exists, None otherwise
         """
-        return self.states.get(session_id)
+        # Check in-memory cache first
+        if session_id in self._states:
+            return self._states[session_id]
+        
+        # Try to load from persistent storage
+        if self.use_persistence:
+            state = self._load_from_persistent(session_id)
+            if state:
+                self._states[session_id] = state
+                logger.info(f"📖 Loaded session from persistent storage: {session_id}")
+                return state
+        
+        return None
+    
+    def update_session(self, state: ConversationState) -> None:
+        """
+        Explicitly update/persist a session state.
+        Call this after making changes to a session.
+        
+        Args:
+            state: The conversation state to persist
+        """
+        self._states[state.session_id] = state
+        self._save_to_persistent(state)
     
     def delete_session(self, session_id: str) -> bool:
         """
@@ -413,11 +538,22 @@ class ConversationStateManager:
         Returns:
             True if deleted, False if not found
         """
-        if session_id in self.states:
-            del self.states[session_id]
+        deleted = False
+        
+        # Remove from in-memory cache
+        if session_id in self._states:
+            del self._states[session_id]
+            deleted = True
+        
+        # Remove from persistent storage
+        if self._persistent_store:
+            if self._persistent_store.delete_state(session_id):
+                deleted = True
+        
+        if deleted:
             logger.info(f"🗑️ Deleted session: {session_id}")
-            return True
-        return False
+        
+        return deleted
     
     def get_active_sessions(self) -> List[ConversationState]:
         """
@@ -426,8 +562,20 @@ class ConversationStateManager:
         Returns:
             List of active ConversationState instances
         """
+        # Get from persistent storage first
+        if self._persistent_store:
+            try:
+                active_dicts = self._persistent_store.get_active_sessions()
+                for state_dict in active_dicts:
+                    session_id = state_dict["session_id"]
+                    if session_id not in self._states:
+                        self._states[session_id] = ConversationState.from_dict(state_dict)
+            except Exception as e:
+                logger.error(f"❌ Failed to get active sessions from storage: {e}")
+        
+        # Return from cache
         return [
-            state for state in self.states.values()
+            state for state in self._states.values()
             if state.status not in [ConversationStatus.COMPLETED, ConversationStatus.CANCELLED]
         ]
     
@@ -441,12 +589,19 @@ class ConversationStateManager:
         Returns:
             Number of sessions cleaned up
         """
-        from datetime import timedelta
+        count = 0
         
+        # Clean up persistent storage
+        if self._persistent_store:
+            count += self._persistent_store.cleanup_old_completed_sessions(max_age_hours)
+            count += self._persistent_store.cleanup_expired_sessions()
+        
+        # Clean up in-memory cache
+        from datetime import timedelta
         cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
         sessions_to_delete = []
         
-        for session_id, state in self.states.items():
+        for session_id, state in self._states.items():
             if (
                 state.status in [ConversationStatus.COMPLETED, ConversationStatus.CANCELLED]
                 and state.updated_at < cutoff_time
@@ -454,14 +609,55 @@ class ConversationStateManager:
                 sessions_to_delete.append(session_id)
         
         for session_id in sessions_to_delete:
-            del self.states[session_id]
+            del self._states[session_id]
         
         if sessions_to_delete:
-            logger.info(f"🧹 Cleaned up {len(sessions_to_delete)} old sessions")
+            logger.info(f"🧹 Cleaned up {len(sessions_to_delete)} old sessions from cache")
         
-        return len(sessions_to_delete)
+        return count + len(sessions_to_delete)
+    
+    def get_user_sessions(self, user_id: str, limit: int = 10) -> List[ConversationState]:
+        """
+        Get all sessions for a specific user.
+        
+        Args:
+            user_id: User identifier
+            limit: Maximum number of sessions to return
+            
+        Returns:
+            List of ConversationState instances for the user
+        """
+        if self._persistent_store:
+            try:
+                session_dicts = self._persistent_store.get_user_sessions(user_id, limit=limit)
+                return [ConversationState.from_dict(d) for d in session_dicts]
+            except Exception as e:
+                logger.error(f"❌ Failed to get user sessions: {e}")
+        
+        # Fallback to in-memory
+        return [s for s in self._states.values() if s.user_id == user_id][:limit]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        Get session manager statistics.
+        
+        Returns:
+            Dictionary with statistics
+        """
+        stats = {
+            "cache_size": len(self._states),
+            "persistence_enabled": self.use_persistence
+        }
+        
+        if self._persistent_store:
+            try:
+                stats.update(self._persistent_store.get_session_stats())
+            except Exception as e:
+                logger.error(f"❌ Failed to get persistent stats: {e}")
+        
+        return stats
 
 
-# Global instance
-conversation_state_manager = ConversationStateManager()
+# Global instance with persistence enabled
+conversation_state_manager = ConversationStateManager(use_persistence=True)
 
