@@ -26,6 +26,7 @@
       },
       "endpoint": {
         "operations": ["list"],
+        "aliases": ["datacenter", "dc", "data center", "location", "datacenters", "data centers", "locations", "endpoints", "dcs"],
         "api_endpoints": {
           "list": {
             "method": "GET",
@@ -46,6 +47,31 @@
         },
         "permissions": {
           "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_endpoints": {
+            "description": "Multi-step workflow to list available endpoints/datacenters",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "list_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["engagement_id"],
+                "display_result": true,
+                "display_format": "table",
+                "display_columns": ["endpointDisplayName", "endpointId", "region"]
+              }
+            ]
+          }
         }
       },
       "k8s_cluster": {
@@ -76,14 +102,19 @@
             "url": "https://ipcloud.tatacommunications.com/portalservice/api/v1/check/clusterName?clusterName={clusterName}&clusterType=iks",
             "description": "Check if cluster name is available. Empty response = available."
           },
+          "get_ipc_engagement": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getIpcEngFromPaasEng/{engagement_id}",
+            "description": "Convert PAAS engagement ID to IPC engagement ID. Returns ipc_engid needed for getTemplatesByEngagement."
+          },
           "get_iks_images": {
             "method": "GET",
-            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/iks/images/version",
-            "description": "Get IKS images with datacenter options and k8s versions"
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getTemplatesByEngagement/{ipc_engagement_id}",
+            "description": "Get IKS images with datacenter options and k8s versions. Requires ipc_engagement_id from get_ipc_engagement."
           },
           "get_network_list": {
             "method": "GET",
-            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getNetworkList/{endpointId}/{k8sVersion}/APP",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/cluster/getIksMsWithEndpoint/{endpointId}?version={k8sVersion}&type=network&clusterType=APP",
             "description": "Get CNI drivers for datacenter + k8s version + cluster type"
           },
           "get_environments": {
@@ -110,6 +141,38 @@
         "parameters": {
           "list": {
             "required": ["endpoints"],
+            "optional": []
+          },
+          "get_ipc_engagement": {
+            "required": ["engagement_id"],
+            "optional": []
+          },
+          "get_iks_images": {
+            "required": ["ipc_engagement_id"],
+            "optional": []
+          },
+          "check_cluster_name": {
+            "required": ["clusterName"],
+            "optional": []
+          },
+          "get_network_list": {
+            "required": ["endpointId", "k8sVersion"],
+            "optional": []
+          },
+          "get_environments": {
+            "required": ["engagement_id"],
+            "optional": []
+          },
+          "get_zones": {
+            "required": ["engagement_id"],
+            "optional": []
+          },
+          "get_os_images": {
+            "required": ["zoneId", "circuitId"],
+            "optional": []
+          },
+          "get_flavors": {
+            "required": ["zoneId", "circuitId"],
             "optional": []
           },
           "create": {

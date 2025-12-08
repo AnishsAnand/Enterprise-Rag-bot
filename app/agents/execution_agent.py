@@ -457,8 +457,13 @@ Be professional, helpful, and always provide actionable information."""
                 f"with params: {list(state.collected_params.keys())}"
             )
             
+            # Special handling for endpoint listing - use the list_endpoints workflow method
+            if state.resource_type == "endpoint" and state.operation == "list":
+                logger.info("📋 Using list_endpoints workflow method")
+                execution_result = await api_executor_service.list_endpoints()
+            
             # Special handling for cluster listing - use the full workflow method
-            if state.resource_type == "k8s_cluster" and state.operation == "list":
+            elif state.resource_type == "k8s_cluster" and state.operation == "list":
                 logger.info("📋 Using list_clusters workflow method")
                 endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
                 execution_result = await api_executor_service.list_clusters(
@@ -556,6 +561,28 @@ Be professional, helpful, and always provide actionable information."""
         Returns:
             Formatted success message
         """
+        # Handle endpoint listing
+        if state.resource_type == "endpoint" and state.operation == "list":
+            result_data = execution_result.get("data", {})
+            endpoints = result_data.get("endpoints", [])
+            total = result_data.get("total", len(endpoints))
+            
+            if endpoints:
+                message = f"📍 **Available Endpoints/Datacenters** ({total} found)\n\n"
+                message += "| # | Name | ID | Type |\n"
+                message += "|---|------|----|----- |\n"
+                
+                for i, ep in enumerate(endpoints, 1):
+                    name = ep.get("name", "Unknown")
+                    ep_id = ep.get("id", "N/A")
+                    ep_type = ep.get("type", "")
+                    message += f"| {i} | {name} | {ep_id} | {ep_type} |\n"
+                
+                message += "\n💡 You can use these endpoints when listing or creating clusters."
+                return message
+            else:
+                return "❌ No endpoints found for your engagement."
+        
         # Handle DRY-RUN mode for cluster creation
         if execution_result.get("dry_run"):
             payload_json = execution_result.get("data", {}).get("payload_json", "{}")

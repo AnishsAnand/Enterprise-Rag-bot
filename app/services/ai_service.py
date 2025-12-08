@@ -16,8 +16,8 @@ import hashlib
 
 load_dotenv()
 
-HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "45"))
-MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "3"))
+HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "25"))
+MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "2"))  # Reduced from 3 to 2 for faster failure
 RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B").strip()
 HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "openai/gpt-oss-20b-embedding")
@@ -25,11 +25,10 @@ HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "openai/gpt-oss-20b
 REQUIRED_EMBEDDING_DIM = 4096
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
 PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-FALLBACK_CHAT_MODELS = [
-    "openai/gpt-oss-20b",
-    "meta/llama-3.1-70b-instruct",
-    "meta/Llama-3.1-8B-Instruct"
-]
+# Fallback models disabled - they all return 500 errors
+# Only use PRIMARY_CHAT_MODEL (openai/gpt-oss-120b) which is fast (0.2-0.3s) and reliable
+FALLBACK_CHAT_MODELS = []
+# Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
 
 GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
 
@@ -855,6 +854,7 @@ class AIService:
             raise AIServiceError("Chat service unavailable after auto-connection attempt")
 
         last_exc = None
+        last_result = ""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 fut = asyncio.to_thread(
@@ -865,17 +865,26 @@ class AIService:
                 if result is None:
                     result = ""
                 
+                last_result = result  # Store the last result
+                
                 if len(result.strip()) < 20:
                     logger.warning(f"Response too short ({len(result)} chars) on attempt {attempt}")
                     if attempt < MAX_RETRIES:
                         await _async_exp_backoff_sleep(attempt)
                         continue
+                    else:
+                        # Final attempt also returned short response - raise error
+                        logger.error(f"❌ All attempts returned short responses (last: {len(result)} chars)")
+                        raise AIServiceError(f"LLM returned empty/short response after {MAX_RETRIES} attempts")
                 
                 return result
                 
             except asyncio.TimeoutError as te:
                 last_exc = te
                 logger.warning(f"⚠️ Chat attempt {attempt} timed out after {timeout}s")
+            except AIServiceError:
+                # Re-raise AIServiceError (don't wrap it)
+                raise
             except Exception as e:
                 last_exc = e
                 err_str = str(e)
@@ -892,10 +901,11 @@ class AIService:
                 await self.store_user_requirement({
                     "type": "chat_generation_failed",
                     "prompt_length": len(prompt),
-                    "error": str(last_exc)
+                    "error": str(last_exc) if last_exc else f"Short response: {len(last_result)} chars"
                 })
-                logger.error(f"❌ All chat attempts failed: {last_exc}")
-                raise AIServiceError(f"Failed to generate response after {MAX_RETRIES} attempts: {last_exc}")
+                error_msg = str(last_exc) if last_exc else f"Empty/short responses (last: {len(last_result)} chars)"
+                logger.error(f"❌ All chat attempts failed: {error_msg}")
+                raise AIServiceError(f"Failed to generate response after {MAX_RETRIES} attempts: {error_msg}")
 
     # ==================== High-level Response Generation ====================
 

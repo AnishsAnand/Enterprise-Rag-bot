@@ -65,6 +65,16 @@ class ClusterCreationHandler:
             logger.info(f"📥 Processing response for: {state.last_asked_param}")
             result = await self._process_user_input(input_text, state)
             if result:
+                # Check if we should continue to next parameter (success with feedback)
+                if result.get("continue_workflow"):
+                    # Get the next parameter after this success
+                    next_param = self._find_next_parameter(state)
+                    if next_param is None:
+                        return self._build_summary(state)
+                    # Combine success message with next question
+                    next_question = await self._ask_for_parameter(next_param, state)
+                    result["output"] = result["output"] + "\n\n" + next_question["output"]
+                    return result
                 # Error or validation failure - ask again
                 return result
         
@@ -227,7 +237,14 @@ Would you like me to proceed with creating this cluster?
         logger.info(f"✅✅ Stored clusterName = '{cluster_name}', collected params now: {list(state.collected_params.keys())}")
         # Persist state after collecting parameter
         conversation_state_manager.update_session(state)
-        return None
+        
+        # Return success message to user (don't return None - that skips feedback)
+        return {
+            "agent_name": "ValidationAgent",
+            "success": True,
+            "output": f"✅ Great! Cluster name **`{cluster_name}`** is available and reserved.\n\nLet me continue with the next step...",
+            "continue_workflow": True  # Signal to continue to next parameter
+        }
     
     async def _handle_datacenter(self, input_text: str, state: Any) -> Optional[Dict[str, Any]]:
         """Fetch and match datacenter selection."""

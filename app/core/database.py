@@ -34,9 +34,17 @@ async def init_db():
     from app.models import User
     try:
         Base.metadata.create_all(bind=engine)
-        print(f"Database initialized successfully with SQLite: {DATABASE_URL}")
+        # Determine database type for accurate logging
+        db_type = "PostgreSQL" if DATABASE_URL.startswith("postgresql") else "SQLite"
+        # Mask password in log output
+        safe_url = DATABASE_URL
+        if "@" in DATABASE_URL:
+            parts = DATABASE_URL.split("@")
+            prefix = parts[0].split("://")[0] + "://*****"
+            safe_url = prefix + "@" + parts[1]
+        print(f"✅ Database initialized successfully with {db_type}: {safe_url}")
     except Exception as e:
-        print(f"Database initialization error: {e}")
+        print(f"❌ Database initialization error: {e}")
         print("Continuing without database...")
 
 def get_db():

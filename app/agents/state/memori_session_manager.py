@@ -557,6 +557,43 @@ class MemoriSessionManager:
             return []
         finally:
             db.close()
+    
+    def get_recent_active_sessions(
+        self,
+        max_age_minutes: int = 5,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Get recently updated sessions that are in COLLECTING_PARAMS status.
+        Used to find active conversations for session recovery.
+        
+        Args:
+            max_age_minutes: Maximum age of sessions to return
+            limit: Maximum number of sessions to return
+            
+        Returns:
+            List of recent active session dictionaries, sorted by most recent first
+        """
+        db = self._get_session()
+        try:
+            cutoff_time = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+            
+            records = db.query(ConversationSessionRecord).filter(
+                ConversationSessionRecord.status == "collecting_params",
+                ConversationSessionRecord.updated_at >= cutoff_time
+            ).order_by(
+                ConversationSessionRecord.updated_at.desc()
+            ).limit(limit).all()
+            
+            result = [r.to_dict() for r in records]
+            logger.debug(f"🔍 Found {len(result)} recent active sessions within {max_age_minutes} minutes")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get recent active sessions: {str(e)}")
+            return []
+        finally:
+            db.close()
 
 
 # Global instance

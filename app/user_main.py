@@ -17,7 +17,7 @@ import uvicorn
 import jwt
 
 from urllib.parse import urljoin
-from app.api.routes import rag_widget
+from app.api.routes import rag_widget, agent_chat
 from app.api.routes.auth import router as auth_router
 from app.core.database import init_db
 from app.services.milvus_service import milvus_service
@@ -188,6 +188,13 @@ if hasattr(rag_widget, "router"):
     logger.info("✅ Included rag_widget.router into application")
 else:
     logger.warning("⚠ rag_widget module has no 'router' attribute — widget routes not mounted")
+
+# Include agent chat router for multi-agent CRUD operations
+if hasattr(agent_chat, "router"):
+    app.include_router(agent_chat.router, tags=["agent-chat"])
+    logger.info("✅ Included agent_chat.router into application")
+else:
+    logger.warning("⚠ agent_chat module has no 'router' attribute — agent routes not mounted")
 
 # ------------------------ Request Models ------------------------
 class UserQueryRequest(BaseModel):

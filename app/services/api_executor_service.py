@@ -215,6 +215,44 @@ class APIExecutorService:
         logger.error("❌ Failed to fetch engagement ID")
         return None
     
+    async def get_ipc_engagement_id(self, engagement_id: int = None) -> Optional[int]:
+        """
+        Convert PAAS engagement ID to IPC engagement ID.
+        Required for calling getTemplatesByEngagement API.
+        
+        Args:
+            engagement_id: PAAS Engagement ID (fetches if not provided)
+            
+        Returns:
+            IPC Engagement ID or None if failed
+        """
+        # Get PAAS engagement ID if not provided
+        if engagement_id is None:
+            engagement_id = await self.get_engagement_id()
+            if not engagement_id:
+                return None
+        
+        logger.info(f"🔄 Converting PAAS engagement {engagement_id} to IPC engagement ID...")
+        
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_ipc_engagement",
+            params={"engagement_id": engagement_id},
+            user_roles=None
+        )
+        
+        if result.get("success") and result.get("data"):
+            data = result["data"]
+            # Response: {"status": "success", "data": {"ipc_eng": "...", "ipc_engid": 1602}}
+            if data.get("status") == "success" and data.get("data"):
+                ipc_engid = data["data"].get("ipc_engid")
+                if ipc_engid:
+                    logger.info(f"✅ Got IPC engagement ID: {ipc_engid}")
+                    return ipc_engid
+        
+        logger.error("❌ Failed to get IPC engagement ID")
+        return None
+    
     async def get_endpoints(self, engagement_id: int = None) -> Optional[List[Dict[str, Any]]]:
         """
         Get available endpoints (data centers) for an engagement.
@@ -249,6 +287,70 @@ class APIExecutorService:
         
         logger.error("❌ Failed to fetch endpoints")
         return None
+    
+    async def list_endpoints(
+        self,
+        engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List available endpoints (datacenters/locations) for the user's engagement.
+        This is the main workflow method for endpoint listing.
+        
+        Args:
+            engagement_id: Engagement ID (fetches if not provided)
+            
+        Returns:
+            Dict with endpoint list or error
+        """
+        try:
+            # Step 1: Get engagement ID
+            if engagement_id is None:
+                engagement_id = await self.get_engagement_id()
+                if not engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to fetch engagement ID",
+                        "step": "get_engagement"
+                    }
+            
+            # Step 2: Fetch endpoints
+            logger.info(f"📍 Fetching endpoints for engagement {engagement_id}")
+            endpoints = await self.get_endpoints(engagement_id)
+            
+            if endpoints:
+                # Format the response nicely
+                formatted_endpoints = []
+                for ep in endpoints:
+                    formatted_endpoints.append({
+                        "id": ep.get("endpointId"),
+                        "name": ep.get("endpointDisplayName"),
+                        "type": ep.get("endpointType", ""),
+                        "region": ep.get("region", ""),
+                        "status": ep.get("status", "active")
+                    })
+                
+                return {
+                    "success": True,
+                    "data": {
+                        "endpoints": formatted_endpoints,
+                        "total": len(formatted_endpoints),
+                        "engagement_id": engagement_id
+                    },
+                    "message": f"Found {len(formatted_endpoints)} available endpoints/datacenters"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "No endpoints found for this engagement",
+                    "step": "get_endpoints"
+                }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list endpoints: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     async def list_clusters(
         self,
@@ -694,7 +796,7 @@ class APIExecutorService:
     
     async def check_cluster_name_available(self, cluster_name: str) -> Dict[str, Any]:
         """
-        Check if cluster name is available.
+        Check if cluster name is available using resource_schema.json configuration.
         
         Args:
             cluster_name: Name to check
@@ -704,82 +806,111 @@ class APIExecutorService:
         """
         logger.info(f"🔍 Checking cluster name availability: {cluster_name}")
         
-        # TODO: Replace with real API call
-        # result = await self.execute_operation(...)
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="check_cluster_name",
+            params={"clusterName": cluster_name},
+            user_roles=None
+        )
         
-        # Sample response: Empty {} means available, data present means taken
-        # For now, simulate all names are available
+        if result.get("success"):
+            # Empty response or specific success status means available
+            data = result.get("data", {})
+            
+            # If response is empty dict or has no data, name is available
+            is_available = not data or data == {} or data.get("status") == "available"
+            
+            logger.info(f"✅ Cluster name '{cluster_name}' availability: {is_available}")
+            return {
+                "success": True,
+                "available": is_available,
+                "message": f"Cluster name '{cluster_name}' is {'available' if is_available else 'already taken'}"
+            }
+        
+        # API call failed
+        logger.error(f"❌ Failed to check cluster name availability")
         return {
-            "success": True,
-            "available": True,
-            "message": f"Cluster name '{cluster_name}' is available"
+            "success": False,
+            "available": False,
+            "error": "Failed to verify cluster name availability",
+            "message": "Unable to check cluster name availability at this time"
         }
     
     async def get_iks_images_and_datacenters(self, engagement_id: int) -> Dict[str, Any]:
         """
-        Get IKS images with datacenter information.
+        Get IKS images with datacenter information using resource_schema.json configuration.
+        
+        Flow:
+        1. Convert PAAS engagement_id to IPC engagement_id
+        2. Call getTemplatesByEngagement with ipc_engagement_id
+        3. Parse response to extract datacenters and images
         
         Returns dict with:
-        - datacenters: List of unique data centers
-        - images: All images grouped by datacenter
+        - datacenters: List of unique data centers (from endpointName)
+        - images: All images (contains ImageName with K8s version)
         """
         logger.info(f"🖼️ Fetching IKS images for engagement {engagement_id}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/iks/images/version"
-        
-        # Sample response structure
-        sample_data = {
-            "status": "success",
-            "data": {
-                "vks-enabledImages": [
-                    {
-                        "ImageName": "ubuntu-2204--IKS-AUG25--v1.27.16",
-                        "endpoint": "EP_V2_DEL",
-                        "endpointId": 11,
-                        "endpointName": "Delhi",
-                        "id": 43280
-                    },
-                    {
-                        "ImageName": "ubuntu-2204--IKS-AUG25--v1.30.14",
-                        "endpoint": "EP_V2_BLR",
-                        "endpointId": 12,
-                        "endpointName": "Bengaluru",
-                        "id": 46792
-                    }
-                ],
-                "all-images": [
-                    {
-                        "ImageName": "UBUNTU24.04_STD_IKS_01AUG2025-v1.31.13",
-                        "endpoint": "EP_V2_MUMBKC",
-                        "endpointId": 162,
-                        "endpointName": "Mumbai-BKC",
-                        "id": 47582
-                    }
-                ]
+        # Step 1: Get IPC engagement ID
+        ipc_engagement_id = await self.get_ipc_engagement_id(engagement_id)
+        if not ipc_engagement_id:
+            logger.error("❌ Failed to get IPC engagement ID")
+            return {
+                "success": False,
+                "error": "Failed to get IPC engagement ID",
+                "datacenters": [],
+                "images": []
             }
-        }
         
-        # Extract unique datacenters
-        all_images = []
-        for category, images in sample_data["data"].items():
-            all_images.extend(images)
+        # Step 2: Call get_iks_images with IPC engagement ID
+        logger.info(f"📡 Calling getTemplatesByEngagement with IPC engagement ID: {ipc_engagement_id}")
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_iks_images",
+            params={"ipc_engagement_id": ipc_engagement_id},
+            user_roles=None
+        )
         
-        # Get unique datacenters
-        datacenters = {}
-        for img in all_images:
-            dc_id = img["endpointId"]
-            if dc_id not in datacenters:
-                datacenters[dc_id] = {
-                    "id": dc_id,
-                    "name": img["endpointName"],
-                    "endpoint": img["endpoint"]
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse API response
+            # Response: {"status": "success", "data": {"all-images": [...]}}
+            if api_data.get("status") == "success" and api_data.get("data"):
+                all_images = []
+                data = api_data["data"]
+                
+                # Collect images from all categories (e.g., "all-images", "vks-enabledImages")
+                for category, images in data.items():
+                    if isinstance(images, list):
+                        all_images.extend(images)
+                
+                # Get unique datacenters from endpointName and endpointId
+                datacenters = {}
+                for img in all_images:
+                    dc_id = img.get("endpointId")
+                    if dc_id and dc_id not in datacenters:
+                        datacenters[dc_id] = {
+                            "id": dc_id,
+                            "name": img.get("endpointName", f"DC-{dc_id}"),
+                            "endpoint": img.get("endpoint", "")
+                        }
+                
+                logger.info(f"✅ Found {len(datacenters)} datacenters, {len(all_images)} images from API")
+                return {
+                    "success": True,
+                    "datacenters": list(datacenters.values()),
+                    "images": all_images
                 }
         
+        # API failed
+        logger.error("❌ Failed to fetch IKS images from API")
         return {
-            "success": True,
-            "datacenters": list(datacenters.values()),
-            "images": all_images
+            "success": False,
+            "error": "Failed to fetch IKS images from API",
+            "datacenters": [],
+            "images": []
         }
     
     async def get_k8s_versions_for_datacenter(self, datacenter_id: int, all_images: List[Dict]) -> List[str]:
@@ -811,7 +942,7 @@ class APIExecutorService:
     
     async def get_network_drivers(self, endpoint_id: int, k8s_version: str) -> Dict[str, Any]:
         """
-        Get CNI drivers for datacenter + k8s version.
+        Get CNI drivers for datacenter + k8s version using resource_schema.json configuration.
         
         Args:
             endpoint_id: Datacenter ID
@@ -822,29 +953,40 @@ class APIExecutorService:
         """
         logger.info(f"🌐 Fetching CNI drivers for endpoint {endpoint_id}, k8s {k8s_version}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/paasservice/paas/getNetworkList/{endpoint_id}/{k8s_version}/APP"
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_network_list",
+            params={
+                "endpointId": endpoint_id,
+                "k8sVersion": k8s_version
+            },
+            user_roles=None
+        )
         
-        # Sample response
-        sample_drivers = {
-            "status": "success",
-            "data": {
-                "data": [
-                    "calico-v3.25.1",
-                    "cilium-ebpf-v1.16.4",
-                    "cilium-iptables-v1.16.4"
-                ]
-            }
-        }
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse response - API returns {"status": "success", "data": {"data": [...]}}
+            if api_data.get("status") == "success" and api_data.get("data"):
+                drivers = api_data["data"].get("data", [])
+                logger.info(f"✅ Found {len(drivers)} CNI drivers from API")
+                return {
+                    "success": True,
+                    "drivers": drivers
+                }
         
+        # API failed
+        logger.error("❌ Failed to fetch CNI drivers from API")
         return {
-            "success": True,
-            "drivers": sample_drivers["data"]["data"]
+            "success": False,
+            "error": "Failed to fetch CNI driver data from API",
+            "drivers": []
         }
     
     async def get_environments_and_business_units(self, engagement_id: int) -> Dict[str, Any]:
         """
-        Get environments and business units for engagement.
+        Get environments and business units for engagement using resource_schema.json configuration.
         
         Args:
             engagement_id: Engagement ID
@@ -854,60 +996,50 @@ class APIExecutorService:
         """
         logger.info(f"🏢 Fetching environments for engagement {engagement_id}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/portalservice/environment/getEnvironmentListPerEngagement/{engagement_id}"
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_environments",
+            params={"engagement_id": engagement_id},
+            user_roles=None
+        )
         
-        # Sample response
-        sample_data = {
-            "status": "success",
-            "data": {
-                "environments": [
-                    {
-                        "id": 1,
-                        "name": "Production",
-                        "department": "Engineering",
-                        "departmentId": 101,
-                        "endpointName": "EP_V2_DEL"
-                    },
-                    {
-                        "id": 2,
-                        "name": "Development",
-                        "department": "Engineering",
-                        "departmentId": 101,
-                        "endpointName": "EP_V2_DEL"
-                    },
-                    {
-                        "id": 3,
-                        "name": "Staging",
-                        "department": "QA",
-                        "departmentId": 102,
-                        "endpointName": "EP_V2_BLR"
-                    }
-                ]
-            }
-        }
-        
-        environments = sample_data["data"]["environments"]
-        
-        # Extract unique business units
-        business_units = {}
-        for env in environments:
-            bu_id = env["departmentId"]
-            if bu_id not in business_units:
-                business_units[bu_id] = {
-                    "id": bu_id,
-                    "name": env["department"]
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse response
+            if api_data.get("status") == "success" and api_data.get("data"):
+                environments = api_data["data"].get("environments", [])
+                
+                # Extract unique business units
+                business_units = {}
+                for env in environments:
+                    bu_id = env.get("departmentId")
+                    if bu_id and bu_id not in business_units:
+                        business_units[bu_id] = {
+                            "id": bu_id,
+                            "name": env.get("department", f"BU-{bu_id}")
+                        }
+                
+                logger.info(f"✅ Found {len(business_units)} business units, {len(environments)} environments from API")
+                return {
+                    "success": True,
+                    "business_units": list(business_units.values()),
+                    "environments": environments
                 }
         
+        # API failed
+        logger.error("❌ Failed to fetch environments from API")
         return {
-            "success": True,
-            "business_units": list(business_units.values()),
-            "environments": environments
+            "success": False,
+            "error": "Failed to fetch environment data from API",
+            "business_units": [],
+            "environments": []
         }
     
     async def get_zones_list(self, engagement_id: int) -> Dict[str, Any]:
         """
-        Get zones for engagement.
+        Get zones for engagement using resource_schema.json configuration.
         
         Args:
             engagement_id: Engagement ID
@@ -917,42 +1049,37 @@ class APIExecutorService:
         """
         logger.info(f"🗺️ Fetching zones for engagement {engagement_id}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/portalservice/zone/getZoneList/{engagement_id}"
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_zones",
+            params={"engagement_id": engagement_id},
+            user_roles=None
+        )
         
-        # Sample response
-        sample_data = {
-            "status": "success",
-            "data": [
-                {
-                    "zoneId": 16710,
-                    "zoneName": "zone-prod-01",
-                    "departmentName": "Engineering",
-                    "environmentName": "Production"
-                },
-                {
-                    "zoneId": 16711,
-                    "zoneName": "zone-dev-01",
-                    "departmentName": "Engineering",
-                    "environmentName": "Development"
-                },
-                {
-                    "zoneId": 16712,
-                    "zoneName": "zone-qa-01",
-                    "departmentName": "QA",
-                    "environmentName": "Staging"
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse response
+            if isinstance(api_data, dict) and api_data.get("data"):
+                zones = api_data["data"]
+                logger.info(f"✅ Found {len(zones)} zones from API")
+                return {
+                    "success": True,
+                    "zones": zones
                 }
-            ]
-        }
         
+        # API failed
+        logger.error("❌ Failed to fetch zones from API")
         return {
-            "success": True,
-            "zones": sample_data["data"]
+            "success": False,
+            "error": "Failed to fetch zone data from API",
+            "zones": []
         }
     
     async def get_os_images(self, zone_id: int, circuit_id: str, k8s_version: str) -> Dict[str, Any]:
         """
-        Get OS images for zone, filtered by k8s version.
+        Get OS images for zone, filtered by k8s version using resource_schema.json configuration.
         
         Args:
             zone_id: Zone ID
@@ -964,64 +1091,60 @@ class APIExecutorService:
         """
         logger.info(f"💿 Fetching OS images for zone {zone_id}, k8s {k8s_version}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledImages/{zone_id}?circuitId={circuit_id}&isDeployment=false"
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_os_images",
+            params={
+                "zoneId": zone_id,
+                "circuitId": circuit_id
+            },
+            user_roles=None
+        )
         
-        # Sample response
-        sample_data = {
-            "status": "success",
-            "data": {
-                "image": {
-                    "options": [
-                        {
-                            "id": 43280,
-                            "label": "UBUNTU22.04_STD_IKS_01AUG2025-v1.27.16",
-                            "osMake": "Ubuntu",
-                            "osModel": "ubuntu",
-                            "osVersion": "22.04 LTS",
-                            "hypervisor": "VCD_ESXI"
-                        },
-                        {
-                            "id": 47582,
-                            "label": "UBUNTU24.04_STD_IKS_01AUG2025-v1.27.16",
-                            "osMake": "Ubuntu",
-                            "osModel": "ubuntu",
-                            "osVersion": "24.04 LTS",
-                            "hypervisor": "VCD_ESXI"
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse response
+            if api_data.get("status") == "success" and api_data.get("data"):
+                images = api_data["data"].get("image", {}).get("options", [])
+                
+                # Filter by k8s version
+                filtered = [img for img in images if k8s_version in img.get("label", "")]
+                
+                # Group by osMake + osVersion
+                grouped = {}
+                for img in filtered:
+                    key = f"{img.get('osMake', '')} {img.get('osVersion', '')}"
+                    if key not in grouped:
+                        grouped[key] = {
+                            "display_name": key,
+                            "os_id": img.get("id"),
+                            "os_make": img.get("osMake"),
+                            "os_model": img.get("osModel"),
+                            "os_version": img.get("osVersion"),
+                            "hypervisor": img.get("hypervisor"),
+                            "images": []
                         }
-                    ]
+                    grouped[key]["images"].append(img)
+                
+                logger.info(f"✅ Found {len(grouped)} OS options from API")
+                return {
+                    "success": True,
+                    "os_options": list(grouped.values())
                 }
-            }
-        }
         
-        # Filter by k8s version
-        images = sample_data["data"]["image"]["options"]
-        filtered = [img for img in images if k8s_version in img["label"]]
-        
-        # Group by osMake + osVersion
-        grouped = {}
-        for img in filtered:
-            key = f"{img['osMake']} {img['osVersion']}"
-            if key not in grouped:
-                grouped[key] = {
-                    "display_name": key,
-                    "os_id": img["id"],
-                    "os_make": img["osMake"],
-                    "os_model": img["osModel"],
-                    "os_version": img["osVersion"],
-                    "hypervisor": img["hypervisor"],
-                    "images": []
-                }
-            grouped[key]["images"].append(img)
-        
+        # API failed
+        logger.error("❌ Failed to fetch OS images from API")
         return {
-            "success": True,
-            "os_options": list(grouped.values())
+            "success": False,
+            "error": "Failed to fetch OS image data from API",
+            "os_options": []
         }
     
     async def get_flavors(self, zone_id: int, circuit_id: str, os_model: str, node_type: str = None) -> Dict[str, Any]:
         """
-        Get compute flavors for zone, filtered by OS and optionally node type.
+        Get compute flavors for zone, filtered by OS and optionally node type using resource_schema.json configuration.
         
         Args:
             zone_id: Zone ID
@@ -1034,83 +1157,62 @@ class APIExecutorService:
         """
         logger.info(f"💻 Fetching flavors for zone {zone_id}, OS {os_model}, node type {node_type}")
         
-        # TODO: Replace with real API call
-        # url = f"https://ipcloud.tatacommunications.com/portalservice/configservice/ppuEnabledFlavors/{zone_id}?isDeployment=false&circuitId={circuit_id}"
+        # Use the schema-based execute_operation method
+        result = await self.execute_operation(
+            resource_type="k8s_cluster",
+            operation="get_flavors",
+            params={
+                "zoneId": zone_id,
+                "circuitId": circuit_id
+            },
+            user_roles=None
+        )
         
-        # Sample response
-        sample_data = {
-            "status": "success",
-            "data": {
-                "flavor": [
-                    {
-                        "artifactId": 3234,
-                        "FlavorName": "B4",
-                        "skuCode": "B4.UBN",
-                        "vCpu": 2,
-                        "vRam": 4096,
-                        "vDisk": 50,
-                        "osModel": "ubuntu",
-                        "applicationType": "Container",
-                        "flavorCategory": "generalPurpose",
-                        "label": "B4_ubuntu_container"
-                    },
-                    {
-                        "artifactId": 3235,
-                        "FlavorName": "C8",
-                        "skuCode": "C8.UBN",
-                        "vCpu": 4,
-                        "vRam": 8192,
-                        "vDisk": 100,
-                        "osModel": "ubuntu",
-                        "applicationType": "Container",
-                        "flavorCategory": "computeOptimized",
-                        "label": "C8_ubuntu_container"
-                    },
-                    {
-                        "artifactId": 3236,
-                        "FlavorName": "M16",
-                        "skuCode": "M16.UBN",
-                        "vCpu": 4,
-                        "vRam": 16384,
-                        "vDisk": 100,
-                        "osModel": "ubuntu",
-                        "applicationType": "Container",
-                        "flavorCategory": "memoryOptimized",
-                        "label": "M16_ubuntu_container"
-                    }
-                ]
-            }
-        }
+        if result.get("success") and result.get("data"):
+            api_data = result["data"]
+            
+            # Parse response
+            if api_data.get("status") == "success" and api_data.get("data"):
+                flavors = api_data["data"].get("flavor", [])
+                
+                # Filter by OS model and application type
+                filtered = [f for f in flavors if f.get("osModel") == os_model and f.get("applicationType") == "Container"]
+                
+                # Further filter by node type if provided
+                if node_type:
+                    filtered = [f for f in filtered if f.get("flavorCategory") == node_type]
+                
+                # Extract unique node types for the first query
+                node_types = list(set([f.get("flavorCategory") for f in filtered if f.get("flavorCategory")]))
+                
+                # Format flavors
+                formatted_flavors = []
+                for flavor in filtered:
+                    formatted_flavors.append({
+                        "id": flavor.get("artifactId"),
+                        "name": f"{flavor.get('vCpu')} vCPU / {flavor.get('vRam', 0) // 1024} GB RAM / {flavor.get('vDisk')} GB Storage",
+                        "flavor_name": flavor.get("FlavorName"),
+                        "sku_code": flavor.get("skuCode"),
+                        "vcpu": flavor.get("vCpu"),
+                        "vram_gb": flavor.get("vRam", 0) // 1024,
+                        "disk_gb": flavor.get("vDisk"),
+                        "node_type": flavor.get("flavorCategory")
+                    })
+                
+                logger.info(f"✅ Found {len(node_types)} node types, {len(formatted_flavors)} flavors from API")
+                return {
+                    "success": True,
+                    "node_types": node_types,
+                    "flavors": formatted_flavors
+                }
         
-        # Filter by OS model and application type
-        flavors = sample_data["data"]["flavor"]
-        filtered = [f for f in flavors if f["osModel"] == os_model and f["applicationType"] == "Container"]
-        
-        # Further filter by node type if provided
-        if node_type:
-            filtered = [f for f in filtered if f["flavorCategory"] == node_type]
-        
-        # Extract unique node types for the first query
-        node_types = list(set([f["flavorCategory"] for f in filtered]))
-        
-        # Format flavors
-        formatted_flavors = []
-        for flavor in filtered:
-            formatted_flavors.append({
-                "id": flavor["artifactId"],
-                "name": f"{flavor['vCpu']} vCPU / {flavor['vRam'] // 1024} GB RAM / {flavor['vDisk']} GB Storage",
-                "flavor_name": flavor["FlavorName"],
-                "sku_code": flavor["skuCode"],
-                "vcpu": flavor["vCpu"],
-                "vram_gb": flavor["vRam"] // 1024,
-                "disk_gb": flavor["vDisk"],
-                "node_type": flavor["flavorCategory"]
-            })
-        
+        # API failed
+        logger.error("❌ Failed to fetch flavors from API")
         return {
-            "success": True,
-            "node_types": node_types,
-            "flavors": formatted_flavors
+            "success": False,
+            "error": "Failed to fetch flavor data from API",
+            "node_types": [],
+            "flavors": []
         }
     
     async def get_circuit_id(self, engagement_id: int) -> Optional[str]:

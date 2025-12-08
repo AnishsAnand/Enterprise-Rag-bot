@@ -85,13 +85,35 @@ User: "Tell me about clusters in Mumbai and Chennai"
 User: "What are the available clusters?" or "What k8s clusters do we have?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Endpoint/Datacenter Listing Examples:**
+
+User: "What are the available endpoints?" or "List endpoints"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
+User: "Show me all datacenters" or "What datacenters are available?"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
+User: "What DCs do we have?" or "List all DCs"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
+User: "Show me the locations" or "What locations are available?"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
+User: "Where can I deploy?" or "What data centers can I use?"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
+User: "List all available data centers" or "Show available locations"
+→ intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
+
 **Important Notes:**
 - For "list" operation on k8s_cluster, "endpoints" parameter is required (data center selection)
+- For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
 - Do NOT extract location names (like "Mumbai", "Delhi") - the ValidationAgent will handle matching locations to endpoint IDs
 - Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
 - ANY query asking about viewing/counting/listing actual resources (not concepts) should be detected as a list operation
 - "What are the clusters?" = list operation (showing actual clusters)
 - "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)
+- Endpoint aliases: datacenter, dc, data center, location, datacenters, data centers, locations, endpoints, dcs
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
         

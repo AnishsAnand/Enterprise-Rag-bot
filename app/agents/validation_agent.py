@@ -518,6 +518,77 @@ If no match:
         Delegate to ParameterExtractor tool.
         """
         return await self.param_extractor.match_user_selection(input_text, available_options)
+    
+    def _fallback_pattern_match(
+        self,
+        user_text: str,
+        available_options: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Fallback pattern matching when LLM fails.
+        Uses simple string matching for common cases.
+        """
+        user_lower = user_text.lower().strip()
+        
+        # Check for "all"
+        if user_lower in ["all", "all of them", "all datacenters", "all endpoints"]:
+            matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
+            matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
+            logger.info(f"✅ Pattern matched 'all' to {len(matched_ids)} endpoints")
+            return {
+                "matched": True,
+                "all": True,
+                "matched_ids": matched_ids,
+                "matched_names": matched_names
+            }
+        
+        # Split by common delimiters
+        parts = re.split(r'[,;]|\band\b|\bor\b', user_lower)
+        parts = [p.strip() for p in parts if p.strip()]
+        
+        matched_ids = []
+        matched_names = []
+        
+        # Common abbreviations and aliases
+        aliases = {
+            "blr": ["bengaluru", "bangalore"],
+            "del": ["delhi"],
+            "mum": ["mumbai"],
+            "chennai": ["chennai"],
+            "amb": ["chennai-amb"],
+            "bkc": ["mumbai-bkc"],
+            "cressex": ["cressex"],
+            "gcc": ["gcc"]
+        }
+        
+        for part in parts:
+            part_clean = re.sub(r'[^\w\s-]', '', part).strip()
+            if not part_clean:
+                continue
+            
+            # Try direct match first
+            for opt in available_options:
+                opt_name = (opt.get("name") or "").lower()
+                opt_id = opt.get("id")
+                
+                # Exact or partial match
+                if (part_clean in opt_name or opt_name in part_clean or 
+                    any(alias in opt_name for key, values in aliases.items() if part_clean.startswith(key) for alias in values)):
+                    if opt_id and opt_id not in matched_ids:
+                        matched_ids.append(opt_id)
+                        matched_names.append(opt.get("name"))
+                        logger.info(f"✅ Pattern matched '{part}' to '{opt.get('name')}'")
+                        break
+        
+        if matched_ids:
+            return {
+                "matched": True,
+                "matched_ids": matched_ids,
+                "matched_names": matched_names
+            }
+        
+        logger.info(f"❌ No pattern match found for '{user_text}'")
+        return {"matched": False}
 
     async def execute(
         self,
@@ -551,6 +622,24 @@ If no match:
 
             # STEP 3: USE INTELLIGENT TOOLS for parameter collection
             if state.missing_params:
+                # SPECIAL HANDLING FOR ENDPOINT LISTING (no user input needed - just fetch and display)
+                if state.operation == "list" and state.resource_type == "endpoint":
+                    logger.info("🎯 Endpoint listing - fetching endpoints directly (no user selection needed)")
+                    
+                    # For endpoint listing, we just need engagement_id which is fetched automatically
+                    # Mark engagement_id as collected (it will be fetched by API executor)
+                    state.add_parameter("engagement_id", "auto", is_valid=True)
+                    
+                    # Persist state
+                    conversation_state_manager.update_session(state)
+                    
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": "Fetching available endpoints...",
+                        "ready_to_execute": True
+                    }
+                
                 # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
                 if state.operation == "create" and state.resource_type == "k8s_cluster":
                     logger.info("🎯 Routing to customer cluster creation workflow")
@@ -660,11 +749,15 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         logger.info(f"🔍 Analyzing query: '{text_to_analyze}' for location extraction (is_follow_up: {is_follow_up})")
 
                         # USE LLM FOR INTELLIGENT EXTRACTION (not primitive pattern matching!)
-                        extraction_result_json = await self._extract_location_from_query_json(json.dumps({
-                            "user_query": text_to_analyze,
-                            "available_options": available_options
-                        }))
-                        extraction_result = json.loads(extraction_result_json)
+                        try:
+                            extraction_result_json = await self._extract_location_from_query_json(json.dumps({
+                                "user_query": text_to_analyze,
+                                "available_options": available_options
+                            }))
+                            extraction_result = json.loads(extraction_result_json) if extraction_result_json else {}
+                        except Exception as e:
+                            logger.warning(f"⚠️ Location extraction failed: {e}")
+                            extraction_result = {}
 
                         if extraction_result.get("extracted"):
                             # LLM extracted a location!
@@ -677,11 +770,20 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             logger.info(f"🔍 No location in query, using current input: '{text_to_match}'")
 
                         # Try to match user input to available endpoints (LLM-based!)
-                        match_result_json = await self._match_user_selection_json(json.dumps({
-                            "user_text": text_to_match,
-                            "available_options": available_options
-                        }))
-                        match_result = json.loads(match_result_json)
+                        try:
+                            match_result_json = await self._match_user_selection_json(json.dumps({
+                                "user_text": text_to_match,
+                                "available_options": available_options
+                            }))
+                            match_result = json.loads(match_result_json) if match_result_json else {}
+                        except Exception as e:
+                            logger.warning(f"⚠️ LLM matching failed: {e}")
+                            match_result = {}
+                        
+                        # FALLBACK: If LLM failed, try simple pattern matching
+                        if not match_result.get("matched"):
+                            logger.info("🔄 LLM matching failed, trying fallback pattern matching...")
+                            match_result = self._fallback_pattern_match(text_to_match, available_options)
 
                         if match_result.get("matched"):
                             # Successfully matched!
@@ -695,6 +797,19 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             
                             # Persist state after parameter collection
                             conversation_state_manager.update_session(state)
+                            
+                            # Check if ready to execute now that we've collected endpoints
+                            if state.is_ready_to_execute():
+                                logger.info("✅ All parameters collected, ready to execute")
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": True,
+                                    "output": f"Great! Fetching clusters from {', '.join(matched_names)}...",
+                                    "ready_to_execute": True
+                                }
+                            
+                            # If still missing params, continue to collect them
+                            # Fall through to the readiness check at the bottom
 
                         elif match_result.get("ambiguous"):
                             # Multiple matches - ask for clarification

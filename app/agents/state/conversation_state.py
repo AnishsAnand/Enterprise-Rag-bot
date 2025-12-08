@@ -615,7 +615,7 @@ class ConversationStateManager:
             logger.info(f"🧹 Cleaned up {len(sessions_to_delete)} old sessions from cache")
         
         return count + len(sessions_to_delete)
-    
+
     def get_user_sessions(self, user_id: str, limit: int = 10) -> List[ConversationState]:
         """
         Get all sessions for a specific user.
@@ -636,6 +636,53 @@ class ConversationStateManager:
         
         # Fallback to in-memory
         return [s for s in self._states.values() if s.user_id == user_id][:limit]
+    
+    def get_most_recent_active_session(self, max_age_minutes: int = 5) -> Optional[ConversationState]:
+        """
+        Get the most recently updated session that is in COLLECTING_PARAMS status.
+        Used as a fallback when session_id doesn't match but user seems to be responding to a question.
+        
+        Args:
+            max_age_minutes: Maximum age of session to consider (default 5 minutes)
+            
+        Returns:
+            Most recent active ConversationState if found, None otherwise
+        """
+        from datetime import timedelta
+        
+        cutoff_time = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+        
+        # Check in-memory sessions first
+        active_sessions = [
+            s for s in self._states.values()
+            if s.status == ConversationStatus.COLLECTING_PARAMS and s.updated_at >= cutoff_time
+        ]
+        
+        # Sort by most recent first
+        if active_sessions:
+            active_sessions.sort(key=lambda s: s.updated_at, reverse=True)
+            logger.info(f"🔍 Found {len(active_sessions)} active sessions in memory, most recent: {active_sessions[0].session_id}")
+            return active_sessions[0]
+        
+        # Try persistent storage if available
+        if self._persistent_store:
+            try:
+                # Query for recent active sessions
+                recent_dicts = self._persistent_store.get_recent_active_sessions(
+                    max_age_minutes=max_age_minutes,
+                    limit=1
+                )
+                if recent_dicts:
+                    state = ConversationState.from_dict(recent_dicts[0])
+                    # Cache it for future use
+                    self._states[state.session_id] = state
+                    logger.info(f"🔍 Found recent active session in DB: {state.session_id}")
+                    return state
+            except Exception as e:
+                logger.error(f"❌ Failed to query recent active sessions: {e}")
+        
+        logger.info("🔍 No recent active sessions found")
+        return None
     
     def get_stats(self) -> Dict[str, Any]:
         """
