@@ -302,6 +302,31 @@ Be professional, helpful, and always provide actionable information."""
         except Exception as e:
             return f"An error occurred: {str(e)}"
     
+    
+    def _map_endpoint_name_to_display(self, endpoint_name: str) -> str:
+        """
+        Map technical endpoint name to display name.
+        
+        Args:
+            endpoint_name: Technical name like "EP_V2_BL"
+            
+        Returns:
+            Display name like "Bengaluru"
+        """
+        endpoint_map = {
+            "EP_V2_BL": "Bengaluru",
+            "EP_V2_DEL": "Delhi",
+            "EP_V2_CHN_AMB": "Chennai-AMB",
+            "EP_V2_MUM_BKC": "Mumbai-BKC",
+            "EP_V2_MUM_DC3": "Mumbai-DC3",
+            "EP_GCC_DEL": "GCCDelhi",
+            "EP_GCC_MUM": "GCCMumbai",
+            "EP_V2_UKCX": "Cressex",
+            "EP_V2_UKHB": "Highbridge",
+            "EP_V2_SG_TCX": "Singapore East"
+        }
+        return endpoint_map.get(endpoint_name, endpoint_name)
+    
     async def _build_cluster_create_payload(self, state: Any) -> Dict[str, Any]:
         """
         Build the complete payload for cluster creation (customer version).
@@ -466,10 +491,65 @@ Be professional, helpful, and always provide actionable information."""
             elif state.resource_type == "k8s_cluster" and state.operation == "list":
                 logger.info("📋 Using list_clusters workflow method")
                 endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
-                execution_result = await api_executor_service.list_clusters(
-                    endpoint_ids=endpoint_ids,
-                    engagement_id=None  # Will be fetched automatically
-                )
+                
+                # IMPORTANT: Convert endpoint names to IDs if needed
+                # The IntentAgent might extract ["Delhi", "Chennai"] but API needs [11, 204]
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        # We have names, need to convert to IDs
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            # Fetch available endpoints
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                
+                                # Build name -> ID mapping
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        # Add exact match
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        # Add without hyphens/spaces for fuzzy matching
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                # Convert names to IDs
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                    else:
+                                        logger.warning(f"  ⚠️ Could not find ID for endpoint '{name}'")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                                    logger.error(f"❌ {conversion_error}")
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                                logger.error(f"❌ {conversion_error}")
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                            logger.error(f"❌ {conversion_error}")
+                
+                # Call API if no conversion error
+                if conversion_error:
+                    execution_result = {
+                        "success": False,
+                        "error": conversion_error
+                    }
+                else:
+                    execution_result = await api_executor_service.list_clusters(
+                        endpoint_ids=endpoint_ids,
+                        engagement_id=None  # Will be fetched automatically
+                    )
             
             # Special handling for cluster creation - build custom payload
             elif state.resource_type == "k8s_cluster" and state.operation == "create":
@@ -616,6 +696,120 @@ The cluster creation payload has been generated successfully!
         
         resource_name = state.resource_type.replace("_", " ")
         
+        # Handle cluster listing with beautiful formatting
+        if state.resource_type == "k8s_cluster" and state.operation == "list":
+            result_data = execution_result.get("data", {})
+            
+            # Handle both old format (dict with "data" key) and new streaming format (list directly)
+            if isinstance(result_data, dict) and "data" in result_data:
+                clusters = result_data["data"]
+            elif isinstance(result_data, list):
+                clusters = result_data
+            else:
+                clusters = []
+            
+            # Get the requested endpoint names from state
+            requested_endpoint_names = state.collected_params.get("endpoint_names", [])
+            
+            # Get endpoint data from streaming response if available
+            endpoint_data_map = execution_result.get("endpoint_data", {})
+            
+            # Group by endpoint
+            by_endpoint = {}
+            for cluster in clusters:
+                endpoint = cluster.get("displayNameEndpoint", "Unknown")
+                if endpoint not in by_endpoint:
+                    by_endpoint[endpoint] = []
+                by_endpoint[endpoint].append(cluster)
+            
+            # Add empty entries for requested endpoints that had no clusters
+            # Map endpoint names from the streaming response
+            for endpoint_id, endpoint_info in endpoint_data_map.items():
+                endpoint_name = endpoint_info.get("endpoint_name", "")
+                # Try to find the display name from existing clusters
+                display_name = None
+                for cluster in endpoint_info.get("clusters", []):
+                    if "displayNameEndpoint" in cluster:
+                        display_name = cluster["displayNameEndpoint"]
+                        break
+                
+                # If no clusters, use endpoint_name as fallback
+                if not display_name:
+                    display_name = self._map_endpoint_name_to_display(endpoint_name)
+                
+                if display_name and display_name not in by_endpoint:
+                    by_endpoint[display_name] = []
+            
+            # Also add requested endpoints that might not be in the response
+            for endpoint_name in requested_endpoint_names:
+                if endpoint_name not in by_endpoint:
+                    by_endpoint[endpoint_name] = []
+            
+            # Build formatted response optimized for OpenWebUI markdown rendering
+            total_clusters = len(clusters)
+            total_endpoints = len(requested_endpoint_names) if requested_endpoint_names else len(by_endpoint)
+            
+            message = f"## ✅ Found {total_clusters} Kubernetes Cluster{'s' if total_clusters != 1 else ''}\n"
+            message += f"*Across {total_endpoints} data center{'s' if total_endpoints != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            # Display clusters grouped by endpoint (use requested order if available)
+            endpoints_to_show = requested_endpoint_names if requested_endpoint_names else sorted(by_endpoint.keys())
+            
+            for endpoint in endpoints_to_show:
+                endpoint_clusters = by_endpoint.get(endpoint, [])
+                cluster_count = len(endpoint_clusters)
+                
+                message += f"### 📍 {endpoint}\n"
+                message += f"*{cluster_count} cluster{'s' if cluster_count != 1 else ''}*\n\n"
+                
+                if cluster_count == 0:
+                    # Check if there was an error for this endpoint
+                    error_msg = None
+                    for ep_info in endpoint_data_map.values():
+                        ep_display = self._map_endpoint_name_to_display(ep_info.get("endpoint_name", ""))
+                        if ep_display == endpoint and ep_info.get("error"):
+                            error_msg = ep_info.get("error")
+                            break
+                    
+                    if error_msg:
+                        message += f"⚠️ _{error_msg.capitalize()}_\n\n\n"
+                    else:
+                        message += "_No clusters found in this data center._\n\n\n"
+                    continue
+                
+                for cluster in endpoint_clusters:
+                    status = cluster.get("status", "Unknown")
+                    status_emoji = "✅" if status == "Healthy" else ("⚠️" if status == "Draft" else "❌")
+                    
+                    cluster_name = cluster.get("clusterName", "Unknown")
+                    node_count = cluster.get("nodescount", "?")
+                    k8s_version = cluster.get("kubernetesVersion") or "N/A"
+                    cluster_type = cluster.get("type", "")
+                    cluster_id = cluster.get("clusterId", "")
+                    backup_enabled = cluster.get("isIksBackupEnabled", False)
+                    
+                    # Create a compact card format
+                    message += f"**{status_emoji} {cluster_name}**\n"
+                    message += f"> **Status:** {status} | **Nodes:** {node_count} | **Version:** {k8s_version}\n"
+                    message += f"> **Type:** {cluster_type} | **ID:** `{cluster_id}`"
+                    
+                    if str(backup_enabled).lower() == "true":
+                        message += f" | **Backup:** 🔒 Enabled"
+                    
+                    message += "\n\n"
+                
+                message += "\n"
+            
+            # Add duration if available
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n"
+                message += f"⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Default formatting for other operations
         message = f"✅ Successfully {operation_verb} {resource_name}!\n\n"
         
         # Add details from result

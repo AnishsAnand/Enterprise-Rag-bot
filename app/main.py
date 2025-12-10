@@ -14,6 +14,7 @@ import uvicorn
 
 from app.core.config import settings
 from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat
+from app.routers import openai_compatible
 from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
@@ -118,8 +119,10 @@ app = FastAPI(
 
 # ===================== CORS Configuration =====================
 allowed_origins: List[str] = [
-    "http://localhost:4200",
-    "http://127.0.0.1:4200",
+    "http://localhost:4201",      # Angular frontend (user-frontend)
+    "http://127.0.0.1:4201",      # Angular frontend (alternative)
+    "http://localhost:3000",      # Open WebUI
+    "http://127.0.0.1:3000",      # Open WebUI (alternative)
 ]
 
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
@@ -143,6 +146,9 @@ app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widge
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
+
+# OpenAI-compatible API for Open WebUI integration
+app.include_router(openai_compatible.router)
 
 app.include_router(auth_router)
 

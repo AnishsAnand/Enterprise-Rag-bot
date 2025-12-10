@@ -214,12 +214,26 @@ Always confirm destructive operations (delete, update) before executing."""
             # Get or create conversation state
             state = conversation_state_manager.get_session(session_id)
             
+            # Detect OpenWebUI metadata requests (title, tags, follow-ups generation)
+            # These should NOT trigger session resets
+            is_metadata_request = any([
+                user_input.strip().startswith("### Task:"),
+                "Generate a concise" in user_input and "title" in user_input.lower(),
+                "Suggest 3-5 relevant follow-up" in user_input,
+                "Generate 1-3 broad tags" in user_input
+            ])
+            
             # If state exists but is COMPLETED/FAILED, delete it and start fresh
-            # This prevents caching of params from previous completed operations
+            # BUT skip this for metadata requests to preserve context
             if state and state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
-                logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
-                conversation_state_manager.delete_session(session_id)
-                state = None
+                if is_metadata_request:
+                    # Don't reset session for metadata requests, just continue
+                    logger.info(f"📋 Metadata request detected, preserving session state")
+                else:
+                    # Regular completed conversation - start fresh for new user query
+                    logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
+                    conversation_state_manager.delete_session(session_id)
+                    state = None
             
             if not state:
                 state = conversation_state_manager.create_session(session_id, user_id)
@@ -312,37 +326,74 @@ Respond with ONLY ONE of these:
 - ROUTE: DOCUMENTATION"""
 
         try:
+            logger.debug(f"🔍 Routing prompt for query: {user_input}")
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=routing_prompt,
-                max_tokens=20,
-                temperature=0.0
+                max_tokens=100,  # Increased from 20 to 100 for more reliable responses
+                temperature=0.1,  # Slightly increased from 0.0 to avoid potential model issues
+                timeout=15  # Add explicit timeout
             )
             
-            logger.info(f"🤖 LLM routing decision: {llm_response}")
+            logger.info(f"🤖 LLM routing decision (length={len(llm_response)} chars): {llm_response}")
             
-            if "RESOURCE_OPERATIONS" in llm_response:
+            # Check for empty or too short response
+            if not llm_response or len(llm_response.strip()) < 5:
+                logger.error(f"❌ LLM returned empty/very short response ('{llm_response}') for routing")
+                # Use rule-based fallback for common documentation patterns
+                query_lower = user_input.lower()
+                doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
+                               "tutorial", "guide", "documentation", "help me", "tell me about"]
+                if any(pattern in query_lower for pattern in doc_patterns):
+                    logger.info(f"🎯 Rule-based fallback: detected documentation pattern in '{user_input}'")
+                    return {
+                        "route": "rag",
+                        "reason": "Rule-based routing: documentation question detected (LLM response empty)"
+                    }
+                else:
+                    logger.info(f"🎯 Rule-based fallback: assuming resource operation for '{user_input}'")
+                    return {
+                        "route": "intent",
+                        "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
+                    }
+            
+            # Parse LLM response
+            if "RESOURCE_OPERATIONS" in llm_response.upper():
+                logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → IntentAgent")
                 return {
                     "route": "intent",
                     "reason": "LLM detected resource operation intent"
                 }
-            elif "DOCUMENTATION" in llm_response:
+            elif "DOCUMENTATION" in llm_response.upper():
+                logger.info(f"✅ LLM routing: DOCUMENTATION → RAGAgent")
                 return {
                     "route": "rag",
                     "reason": "LLM detected documentation question"
                 }
             else:
                 # Fallback to intent if unclear
-                logger.warning(f"⚠️ LLM routing unclear: {llm_response}, defaulting to intent")
+                logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to intent")
                 return {
                     "route": "intent",
                     "reason": "Ambiguous routing, defaulting to intent detection"
                 }
         except Exception as e:
-            logger.error(f"❌ LLM routing failed: {e}, defaulting to intent")
-            return {
-                "route": "intent",
-                "reason": "LLM routing error, defaulting to intent detection"
-            }
+            logger.error(f"❌ LLM routing failed with exception: {e}, using rule-based fallback")
+            # Use rule-based fallback on exception
+            query_lower = user_input.lower()
+            doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
+                           "tutorial", "guide", "documentation", "help me", "tell me about"]
+            if any(pattern in query_lower for pattern in doc_patterns):
+                logger.info(f"🎯 Rule-based fallback (exception): detected documentation pattern")
+                return {
+                    "route": "rag",
+                    "reason": "Rule-based routing: documentation question detected (LLM error)"
+                }
+            else:
+                logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation")
+                return {
+                    "route": "intent",
+                    "reason": "Rule-based routing: resource operation assumed (LLM error)"
+                }
     
     async def _execute_routing(
         self,

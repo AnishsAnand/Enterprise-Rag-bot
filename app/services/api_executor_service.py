@@ -689,6 +689,7 @@ class APIExecutorService:
     ) -> Dict[str, Any]:
         """
         Make the actual API call with automatic token refresh.
+        Supports both regular JSON and SSE streaming responses.
         
         Args:
             endpoint_config: Endpoint configuration (method, url, etc.)
@@ -708,6 +709,7 @@ class APIExecutorService:
         
         method = endpoint_config.get("method", "GET").upper()
         url = endpoint_config.get("url", "")
+        is_streaming = endpoint_config.get("streaming", False)
         
         # Separate path parameters from body/query parameters
         path_params = {}
@@ -741,7 +743,11 @@ class APIExecutorService:
             if body_params:
                 logger.debug(f"📦 Request body: {json.dumps(body_params, indent=2)}")
             
-            # Make request based on method
+            # Handle SSE streaming response
+            if is_streaming:
+                return await self._handle_streaming_response(client, method, url, headers, body_params)
+            
+            # Make request based on method (regular JSON response)
             if method == "GET":
                 response = await client.get(url, headers=headers, params=body_params)
             elif method == "POST":
@@ -792,6 +798,122 @@ class APIExecutorService:
             return {
                 "success": False,
                 "error": f"Request failed: {str(e)}"
+            }
+    
+    async def _handle_streaming_response(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        body_params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle Server-Sent Events (SSE) streaming response for cluster listing.
+        
+        Args:
+            client: HTTP client
+            method: HTTP method
+            url: API URL
+            headers: Request headers
+            body_params: Request body parameters
+            
+        Returns:
+            Dict with parsed cluster data from all endpoints
+        """
+        logger.info("🌊 Handling SSE streaming response")
+        
+        all_clusters = []
+        endpoint_data = {}
+        errors = {}
+        
+        try:
+            async with client.stream(method, url, headers=headers, json=body_params) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    
+                    # Skip empty lines and keepalive pings
+                    if not line or line == ":ping":
+                        continue
+                    
+                    # Parse SSE format
+                    if line.startswith("event:"):
+                        event_type = line.split(":", 1)[1].strip()
+                        
+                        if event_type == "complete":
+                            logger.info("✅ Stream completed")
+                            break
+                            
+                        elif event_type == "endpoint":
+                            # Next line should be id, then data
+                            continue
+                    
+                    elif line.startswith("id:"):
+                        endpoint_id = line.split(":", 1)[1].strip()
+                        
+                    elif line.startswith("data:"):
+                        data_str = line.split(":", 1)[1].strip()
+                        
+                        # Skip "done" messages
+                        if data_str == "done":
+                            continue
+                        
+                        try:
+                            # Fix malformed JSON: datetime values without quotes
+                            # Pattern: "createdTime":2025-04-08 10:08:38.0
+                            # Should be: "createdTime":"2025-04-08 10:08:38.0"
+                            import re
+                            data_str = re.sub(
+                                r'("createdTime":)(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d)',
+                                r'\1"\2"',
+                                data_str
+                            )
+                            
+                            endpoint_info = json.loads(data_str)
+                            endpoint_id = endpoint_info.get("endpointId")
+                            endpoint_name = endpoint_info.get("endpointName")
+                            clusters = endpoint_info.get("clusters", [])
+                            error = endpoint_info.get("error")
+                            
+                            if error:
+                                logger.warning(f"⚠️ Endpoint {endpoint_name} ({endpoint_id}): {error}")
+                                errors[endpoint_name] = error
+                            else:
+                                logger.info(f"📊 Endpoint {endpoint_name} ({endpoint_id}): {len(clusters)} clusters")
+                            
+                            # Store endpoint data
+                            endpoint_data[endpoint_id] = {
+                                "endpoint_id": endpoint_id,
+                                "endpoint_name": endpoint_name,
+                                "clusters": clusters,
+                                "error": error
+                            }
+                            
+                            # Collect all clusters
+                            all_clusters.extend(clusters)
+                            
+                        except json.JSONDecodeError as e:
+                            logger.error(f"❌ Failed to parse SSE data: {e}")
+                            logger.debug(f"Problematic data: {data_str[:200]}...")
+                            continue
+            
+            logger.info(f"✅ SSE streaming complete: {len(all_clusters)} total clusters from {len(endpoint_data)} endpoints")
+            
+            return {
+                "success": True,
+                "data": all_clusters,
+                "endpoint_data": endpoint_data,
+                "errors": errors if errors else None,
+                "status_code": 200
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ SSE streaming error: {str(e)}")
+            return {
+                "success": False,
+                "error": f"Streaming failed: {str(e)}"
             }
     
     async def check_cluster_name_available(self, cluster_name: str) -> Dict[str, Any]:

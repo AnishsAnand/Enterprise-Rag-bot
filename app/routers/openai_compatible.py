@@ -15,6 +15,11 @@ import json
 import logging
 from datetime import datetime
 
+# Import actual agent system components
+from app.agents import get_agent_manager
+from app.services.milvus_service import milvus_service
+from app.services.ai_service import ai_service
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["OpenAI Compatible"])
@@ -47,7 +52,7 @@ class ChatCompletionRequest(BaseModel):
     class Config:
         schema_extra = {
             "example": {
-                "model": "enterprise-rag-bot",
+                "model": "Vayu Maya",
                 "messages": [
                     {"role": "user", "content": "Create a Kubernetes cluster"}
                 ],
@@ -86,7 +91,7 @@ class ChatCompletionResponse(BaseModel):
                 "id": "chatcmpl-abc123",
                 "object": "chat.completion",
                 "created": 1677652288,
-                "model": "enterprise-rag-bot",
+                "model": "Vayu Maya",
                 "choices": [
                     {
                         "index": 0,
@@ -111,7 +116,7 @@ class ModelInfo(BaseModel):
     id: str
     object: str = "model"
     created: int
-    owned_by: str = "enterprise-rag-bot"
+    owned_by: str = "Tata Communications"
     permission: Optional[List[Dict]] = None
     root: Optional[str] = None
     parent: Optional[str] = None
@@ -139,40 +144,30 @@ def create_completion_id() -> str:
 
 async def get_agent_service():
     """
-    Dependency to get the agent service.
+    Dependency to get the actual agent manager instance.
     
-    TODO: Replace this with your actual agent service initialization.
-    This should import and return your AgentService instance.
+    This initializes and returns the multi-agent system that handles:
+    - Intent classification
+    - RAG-based question answering
+    - CRUD operation orchestration
+    - Multi-turn conversations
     """
-    # Example:
-    # from app.services.agent_service import get_agent_service
-    # return get_agent_service()
-    
-    # For now, we'll create a mock service
-    # You should replace this with your actual implementation
-    class MockAgentService:
-        async def process_message(self, message: str, user_id: str, 
-                                 user_roles: List[str], 
-                                 conversation_history: List[Dict] = None,
-                                 **kwargs) -> Dict[str, Any]:
-            """Mock implementation - replace with actual agent service."""
-            return {
-                "success": True,
-                "response": f"[Mock Response] Received: {message}",
-                "agent_name": "MockAgent",
-                "metadata": {}
-            }
+    try:
+        # Get the agent manager with vector and AI services
+        manager = get_agent_manager(
+            vector_service=milvus_service,
+            ai_service=ai_service
+        )
         
-        async def process_message_stream(self, message: str, user_id: str, 
-                                        user_roles: List[str], 
-                                        conversation_history: List[Dict] = None,
-                                        **kwargs) -> AsyncGenerator[str, None]:
-            """Mock streaming implementation - replace with actual agent service."""
-            response = f"[Mock Streaming Response] Processing: {message}"
-            for word in response.split():
-                yield word + " "
-    
-    return MockAgentService()
+        logger.debug("Agent manager initialized successfully")
+        return manager
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize agent manager: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Agent service unavailable: {str(e)}"
+        )
 
 
 # ============================================================================
@@ -202,26 +197,26 @@ async def list_models(
     # You can make this dynamic based on your configuration
     models = [
         ModelInfo(
-            id="enterprise-rag-bot",
+            id="Vayu Maya",
             created=int(time.time()),
-            owned_by="enterprise"
+            owned_by="Tata Communications"
         ),
         ModelInfo(
-            id="enterprise-rag-bot-v2",
+            id="Vayu Maya v2",
             created=int(time.time()),
-            owned_by="enterprise"
+            owned_by="Tata Communications"
         )
     ]
     
     return ModelListResponse(data=models)
 
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", response_model=None)
 async def chat_completions(
     request: ChatCompletionRequest,
     http_request: Request,
     authorization: Optional[str] = Header(None),
-) -> ChatCompletionResponse | StreamingResponse:
+):
     """
     OpenAI-compatible chat completions endpoint.
     
@@ -242,8 +237,8 @@ async def chat_completions(
         logger.info(f"Chat completion request: model={request.model}, "
                    f"messages={len(request.messages)}, stream={request.stream}")
         
-        # Get agent service (replace with your actual service)
-        agent_service = await get_agent_service()
+        # Get agent manager (initializes with vector and AI services)
+        agent_manager = await get_agent_service()
         
         # Extract the latest user message
         if not request.messages:
@@ -263,28 +258,54 @@ async def chat_completions(
         # Default roles (you might want to extract this from JWT or session)
         user_roles = ["user"]
         
+        # Generate stable session ID for Open WebUI conversations
+        # Open WebUI maintains conversation context via messages array
+        # We create a stable session ID based on the conversation
+        import hashlib
+        
+        # Extract conversation ID from Open WebUI metadata if available
+        # Open WebUI passes chat_id in some contexts, but primarily uses message history
+        conversation_signature = ""
+        
+        # Try to get a stable identifier from the conversation
+        if len(conversation_history) > 0:
+            # Use first message as conversation anchor
+            first_msg = conversation_history[0].get("content", "")[:100]
+            conversation_signature = hashlib.md5(f"{user_id}:{first_msg}".encode()).hexdigest()[:16]
+            session_id = f"openwebui_{conversation_signature}"
+            logger.info(f"📋 Using stable session ID from conversation: {session_id}")
+        else:
+            # New conversation - create a time-bucketed session (10-minute windows)
+            from datetime import datetime
+            time_bucket = str(datetime.utcnow().hour) + str(datetime.utcnow().minute // 10)
+            conversation_signature = hashlib.md5(f"{user_id}:{time_bucket}".encode()).hexdigest()[:16]
+            session_id = f"openwebui_new_{conversation_signature}"
+            logger.info(f"📋 New conversation session: {session_id}")
+        
         # Handle streaming vs non-streaming
         if request.stream:
             return await _handle_streaming_response(
-                agent_service=agent_service,
+                agent_manager=agent_manager,
                 user_message=user_message,
                 user_id=user_id,
                 user_roles=user_roles,
                 conversation_history=conversation_history,
                 model=request.model,
                 temperature=request.temperature,
-                max_tokens=request.max_tokens
+                max_tokens=request.max_tokens,
+                session_id=session_id
             )
         else:
             return await _handle_non_streaming_response(
-                agent_service=agent_service,
+                agent_manager=agent_manager,
                 user_message=user_message,
                 user_id=user_id,
                 user_roles=user_roles,
                 conversation_history=conversation_history,
                 model=request.model,
                 temperature=request.temperature,
-                max_tokens=request.max_tokens
+                max_tokens=request.max_tokens,
+                session_id=session_id
             )
         
     except HTTPException:
@@ -295,32 +316,52 @@ async def chat_completions(
 
 
 async def _handle_non_streaming_response(
-    agent_service,
+    agent_manager,
     user_message: str,
     user_id: str,
     user_roles: List[str],
     conversation_history: List[Dict],
     model: str,
     temperature: float,
-    max_tokens: int
+    max_tokens: int,
+    session_id: str
 ) -> ChatCompletionResponse:
-    """Handle non-streaming chat completion."""
+    """Handle non-streaming chat completion using the multi-agent system."""
     
-    # Call your agent service
-    result = await agent_service.process_message(
-        message=user_message,
-        user_id=user_id,
-        user_roles=user_roles,
-        conversation_history=conversation_history,
-        temperature=temperature,
-        max_tokens=max_tokens
-    )
+    logger.info(f"Processing message for user {user_id} | Session: {session_id}")
     
-    # Extract response content
-    if not result.get("success", False):
-        response_content = f"I apologize, but I encountered an error: {result.get('error', 'Unknown error')}"
-    else:
-        response_content = result.get("response", "No response generated")
+    try:
+        # Call the agent manager's process_request method
+        # This goes through the full agent pipeline:
+        # 1. Intent classification
+        # 2. Route to appropriate agent (RAG, Execution, etc.)
+        # 3. Multi-turn parameter collection if needed
+        # 4. Execute operations via API executor
+        result = await agent_manager.process_request(
+            user_input=user_message,
+            session_id=session_id,
+            user_id=user_id,
+            user_roles=user_roles
+        )
+        
+        # Extract response content from agent result
+        if not result.get("success", True):
+            response_content = f"I apologize, but I encountered an error: {result.get('error', 'Unknown error')}"
+            logger.warning(f"Agent returned error: {result.get('error')}")
+        else:
+            response_content = result.get("response", "No response generated")
+            logger.info(f"Agent response generated | Length: {len(response_content)} chars")
+        
+        # Add metadata about the agent routing if available
+        routing_info = result.get("routing", "Unknown")
+        execution_result = result.get("execution_result")
+        
+        # Log additional context for debugging
+        logger.debug(f"Routing: {routing_info} | Execution: {bool(execution_result)}")
+        
+    except Exception as e:
+        logger.error(f"Error in agent processing: {str(e)}", exc_info=True)
+        response_content = f"I apologize, but I encountered a technical error. Please try again."
     
     # Estimate token usage
     prompt_tokens = estimate_tokens(user_message)
@@ -350,33 +391,49 @@ async def _handle_non_streaming_response(
 
 
 async def _handle_streaming_response(
-    agent_service,
+    agent_manager,
     user_message: str,
     user_id: str,
     user_roles: List[str],
     conversation_history: List[Dict],
     model: str,
     temperature: float,
-    max_tokens: int
+    max_tokens: int,
+    session_id: str
 ) -> StreamingResponse:
-    """Handle streaming chat completion."""
+    """Handle streaming chat completion using the multi-agent system."""
     
     async def generate_stream():
-        """Generate SSE (Server-Sent Events) stream."""
+        """Generate SSE (Server-Sent Events) stream in OpenAI format."""
         
         completion_id = create_completion_id()
         created = int(time.time())
         
         try:
-            # Get streaming response from agent
-            async for chunk in agent_service.process_message_stream(
-                message=user_message,
+            logger.info(f"Starting streaming response for session {session_id}")
+            
+            # Process through agent system (non-streaming for now)
+            # TODO: Implement true streaming at agent level if needed
+            result = await agent_manager.process_request(
+                user_input=user_message,
+                session_id=session_id,
                 user_id=user_id,
-                user_roles=user_roles,
-                conversation_history=conversation_history,
-                temperature=temperature,
-                max_tokens=max_tokens
-            ):
+                user_roles=user_roles
+            )
+            
+            # Get response text
+            response_text = result.get("response", "No response generated")
+            
+            # Stream the response preserving markdown structure
+            # Split by lines instead of words to preserve formatting
+            lines = response_text.split('\n')
+            
+            for i, line in enumerate(lines):
+                # Add line with newline (except we handle them separately)
+                chunk_content = line
+                if i < len(lines) - 1:
+                    chunk_content += "\n"
+                
                 # Format as OpenAI streaming response
                 delta = {
                     "id": completion_id,
@@ -386,7 +443,7 @@ async def _handle_streaming_response(
                     "choices": [
                         {
                             "index": 0,
-                            "delta": {"content": chunk},
+                            "delta": {"content": chunk_content},
                             "finish_reason": None
                         }
                     ]
@@ -411,6 +468,8 @@ async def _handle_streaming_response(
             
             yield f"data: {json.dumps(final_delta)}\n\n"
             yield "data: [DONE]\n\n"
+            
+            logger.info(f"Streaming complete for session {session_id}")
             
         except Exception as e:
             logger.error(f"Streaming error: {str(e)}", exc_info=True)

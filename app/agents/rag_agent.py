@@ -185,7 +185,8 @@ Always be helpful, accurate, and transparent about the source of your informatio
                 enable_advanced_search=True,
                 search_depth="balanced",
                 auto_execute=False,  # Don't auto-execute tasks for Q&A
-                store_interaction=False  # Don't store agent internal queries
+                store_interaction=False,  # Don't store agent internal queries
+                force_rag_only=True  # CRITICAL: Skip agent routing to prevent infinite loop
             )
             
             # Call existing RAG system

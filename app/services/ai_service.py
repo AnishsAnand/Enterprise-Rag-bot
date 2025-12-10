@@ -803,6 +803,8 @@ class AIService:
                             logger.info(f"✅ Switched to working model: {attempt_model}")
                             self.current_chat_model = attempt_model
                         return content
+                    else:
+                        logger.warning(f"⚠️ Model {attempt_model} returned empty content in response.choices[0]")
                 
                 if isinstance(resp, dict) and resp.get("choices"):
                     first = resp["choices"][0]
@@ -811,12 +813,21 @@ class AIService:
                             content = first["message"].get("content") or ""
                             if content and attempt_model != self.current_chat_model:
                                 self.current_chat_model = attempt_model
-                            return content
+                            if content:
+                                return content
+                            else:
+                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'content' field")
                         if "text" in first:
                             content = first.get("text") or ""
                             if content and attempt_model != self.current_chat_model:
                                 self.current_chat_model = attempt_model
-                            return content
+                            if content:
+                                return content
+                            else:
+                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'text' field")
+                
+                # If we get here, response was valid but empty
+                logger.warning(f"⚠️ Model {attempt_model} returned valid response but no content extracted")
                 
             except Exception as e:
                 last_error = e

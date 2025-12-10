@@ -19,6 +19,7 @@ import jwt
 from urllib.parse import urljoin
 from app.api.routes import rag_widget, agent_chat
 from app.api.routes.auth import router as auth_router
+from app.routers import openai_compatible
 from app.core.database import init_db
 from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
@@ -195,6 +196,10 @@ if hasattr(agent_chat, "router"):
     logger.info("✅ Included agent_chat.router into application")
 else:
     logger.warning("⚠ agent_chat module has no 'router' attribute — agent routes not mounted")
+
+# Include OpenAI-compatible API for Open WebUI integration
+app.include_router(openai_compatible.router)
+logger.info("✅ Included openai_compatible.router for Open WebUI integration")
 
 # ------------------------ Request Models ------------------------
 class UserQueryRequest(BaseModel):

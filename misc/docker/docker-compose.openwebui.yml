@@ -14,7 +14,7 @@ services:
       - "3000:8080"
     environment:
       # Connection to Enterprise RAG Bot backend
-      - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8000/api/v1
+      - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8001/api/v1
       - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-change-this-secure-key}
       
       # Feature flags
@@ -28,7 +28,7 @@ services:
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-generate-a-secure-random-secret-key-here}
       
       # Default configuration
-      - DEFAULT_MODELS=enterprise-rag-bot
+      - DEFAULT_MODELS=Vayu Maya
       - DEFAULT_USER_ROLE=user
       
       # Optional: Langfuse for analytics
@@ -37,7 +37,7 @@ services:
       # - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       
       # Optional: Custom branding
-      - WEBUI_NAME=Enterprise RAG Assistant
+      - WEBUI_NAME=Vayu Maya - AI Cloud Assistant
       # - WEBUI_LOGO_URL=https://your-domain.com/logo.png
       
     volumes:
@@ -63,7 +63,7 @@ services:
       dockerfile: Dockerfile
     container_name: enterprise-rag-bot
     ports:
-      - "8000:8000"
+      - "8001:8001"
     environment:
       # Database
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/ragbot}
@@ -79,7 +79,11 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-jwt-secret}
       
       # CORS for Open WebUI
-      - CORS_ORIGINS=http://localhost:3000,http://enterprise-rag-openwebui:8080
+      - CORS_ORIGINS=http://localhost:3000,http://enterprise-rag-openwebui:8080,http://localhost:4201
+      
+      # Application Port
+      - PORT=8001
+      - HOST=0.0.0.0
       
       # Open WebUI compatibility
       - ENABLE_OPENAI_COMPATIBLE_API=true
@@ -96,7 +100,7 @@ services:
     networks:
       - rag-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -39,6 +39,7 @@ class WidgetQueryRequest(BaseModel):
     store_interaction: bool = Field(default=True, description="Store interaction in knowledge base")
     session_id: Optional[str] = Field(default=None, description="Session ID for multi-turn conversations")
     user_id: Optional[str] = Field(default=None, description="User ID for tracking")
+    force_rag_only: bool = Field(default=False, description="Force pure RAG lookup, skip agent routing (used by RAGAgent)")
 
 class WidgetScrapeRequest(BaseModel):
     url: HttpUrl
@@ -559,7 +560,7 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute})")
+        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute}, force_rag_only: {request.force_rag_only})")
         
         # STEP 1: Get or create session ID for conversation continuity
         # Use a consistent session per user (can be enhanced with user auth later)
@@ -717,6 +718,12 @@ Examples:
             if has_resource and mentions_location and not has_action:
                 logger.info(f"🎯 Detected implicit list operation (resource + location indicator)")
                 has_action = True  # Treat as implicit "list" operation
+        
+        # IMPORTANT: Skip agent routing if force_rag_only is set (prevents infinite loop when RAGAgent calls this)
+        if request.force_rag_only:
+            logger.info(f"🔒 force_rag_only=True: Skipping agent routing, doing pure RAG lookup")
+            has_action = False
+            has_resource = False
         
         if has_action and has_resource:
             logger.info(f"🎯 Routing to Agent Manager (detected resource operation)")
