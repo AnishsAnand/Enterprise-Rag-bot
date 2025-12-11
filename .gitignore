@@ -22,6 +22,20 @@ env/
 milvus_data/
 minio_data/
 etcd_data/
+postgres_data/
+
+# Runtime directories
+logs/
+uploads/
+outputs/
+backups/
+
+# Build artifacts (should not be committed)
+angular-frontend/dist/
+user-frontend/dist/
+
+# Docker volumes
+*_data/
 
 # Package lock files (optional, but often ignored)
 package-lock.json

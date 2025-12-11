@@ -21,7 +21,7 @@ Pillow==10.1.0
 opencv-python==4.8.1.78
 pytube==15.0.0
 chromadb==0.4.18
-openai==1.3.7
+openai>=1.6.1,<2.0.0
 voyageai==0.2.1
 ollama==0.1.7
 replicate==0.24.0 
