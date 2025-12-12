@@ -414,6 +414,176 @@ class APIExecutorService:
                 "error": str(e)
             }
     
+    async def list_managed_services(
+        self,
+        service_type: str,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List managed services (Kafka, GitLab, etc.) for given endpoints.
+        This is the main workflow method that handles the multi-step process.
+        
+        Args:
+            service_type: Service type to list (e.g., "IKSKafka", "IKSGitlab")
+            endpoint_ids: List of endpoint IDs to query (fetches all if not provided)
+            ipc_engagement_id: IPC Engagement ID (fetches and converts if not provided)
+            
+        Returns:
+            Dict with service list or error
+        """
+        try:
+            # Step 1: Get PAAS engagement ID (if needed for endpoints)
+            paas_engagement_id = None
+            if endpoint_ids is None:
+                paas_engagement_id = await self.get_engagement_id()
+                if not paas_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to fetch PAAS engagement ID",
+                        "step": "get_engagement"
+                    }
+            
+            # Step 2: Get IPC engagement ID (required for managed services API)
+            if ipc_engagement_id is None:
+                if paas_engagement_id is None:
+                    paas_engagement_id = await self.get_engagement_id()
+                
+                ipc_engagement_id = await self.get_ipc_engagement_id(paas_engagement_id)
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to convert PAAS engagement to IPC engagement ID",
+                        "step": "get_ipc_engagement"
+                    }
+                logger.info(f"🔄 Converted PAAS engagement {paas_engagement_id} to IPC engagement {ipc_engagement_id}")
+            
+            # Step 3: Get endpoints if not provided
+            if endpoint_ids is None:
+                if paas_engagement_id is None:
+                    paas_engagement_id = await self.get_engagement_id()
+                
+                endpoints = await self.get_endpoints(paas_engagement_id)
+                if not endpoints:
+                    return {
+                        "success": False,
+                        "error": "Failed to fetch endpoints",
+                        "step": "get_endpoints"
+                    }
+                
+                # Use all endpoint IDs
+                endpoint_ids = [ep["endpointId"] for ep in endpoints]
+                logger.info(f"📍 Using all {len(endpoint_ids)} endpoints: {endpoint_ids}")
+            
+            # Step 4: Fetch managed services list
+            logger.info(f"📋 Fetching {service_type} services for IPC engagement {ipc_engagement_id} with endpoints {endpoint_ids}")
+            
+            # Build the API URL
+            url = f"https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{service_type}"
+            
+            # Build the payload
+            payload = {
+                "engagementId": ipc_engagement_id,
+                "endpoints": endpoint_ids,
+                "serviceType": service_type
+            }
+            
+            # Make the API call
+            client = await self._get_http_client()
+            headers = await self._get_auth_headers()
+            
+            logger.info(f"🌐 POST {url}")
+            logger.debug(f"📦 Payload: {json.dumps(payload, indent=2)}")
+            
+            response = await client.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=self.api_timeout
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract services from response
+                services = data.get("data", [])
+                logger.info(f"✅ Found {len(services)} {service_type} services")
+                
+                return {
+                    "success": True,
+                    "data": services,
+                    "total": len(services),
+                    "service_type": service_type,
+                    "ipc_engagement_id": ipc_engagement_id,
+                    "endpoints": endpoint_ids,
+                    "message": f"Found {len(services)} {service_type} services"
+                }
+            else:
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    pass
+                
+                logger.error(f"❌ Failed to fetch {service_type} services: {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "status_code": response.status_code
+                }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to list {service_type} services: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def list_kafka(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List Kafka managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with Kafka service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSKafka",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
+    async def list_gitlab(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List GitLab managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with GitLab service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSGitlab",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
     def get_resource_config(self, resource_type: str) -> Optional[Dict[str, Any]]:
         """
         Get configuration for a resource type.

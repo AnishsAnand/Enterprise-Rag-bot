@@ -47,7 +47,7 @@ class IntentAgent(BaseAgent):
 """ + resources_info + """
 
 **Your tasks:**
-1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, etc.)
+1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, kafka, gitlab, etc.)
 2. **Identify the operation** (create, read, update, delete, list)
 3. **Extract parameters** from the user's message
 4. **Return structured JSON** with your findings
@@ -55,7 +55,7 @@ class IntentAgent(BaseAgent):
 **Output Format:**
 Always respond with a JSON object containing:
 - intent_detected: boolean (true/false)
-- resource_type: string (k8s_cluster, firewall, etc.)
+- resource_type: string (k8s_cluster, firewall, kafka, gitlab, etc.)
 - operation: string (create, read, update, delete, list)
 - extracted_params: object with extracted parameters
 - confidence: number (0.0 to 1.0)
@@ -85,6 +85,28 @@ User: "Tell me about clusters in Mumbai and Chennai"
 User: "What are the available clusters?" or "What k8s clusters do we have?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Kafka Service Examples:**
+
+User: "List Kafka services" or "Show me Kafka" or "What Kafka services do we have?"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+User: "Show Kafka in Mumbai" or "List Kafka services in Delhi"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+User: "How many Kafka services?" or "Count Kafka instances"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+**GitLab Service Examples:**
+
+User: "List GitLab services" or "Show me GitLab" or "What GitLab services do we have?"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
+User: "Show GitLab in Chennai" or "List GitLab services in Bengaluru"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
+User: "How many GitLab instances?" or "Count GitLab services"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -106,7 +128,7 @@ User: "List all available data centers" or "Show available locations"
 → intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
 
 **Important Notes:**
-- For "list" operation on k8s_cluster, "endpoints" parameter is required (data center selection)
+- For "list" operation on k8s_cluster, kafka, gitlab: "endpoints" parameter is required (data center selection)
 - For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
 - Do NOT extract location names (like "Mumbai", "Delhi") - the ValidationAgent will handle matching locations to endpoint IDs
 - Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
@@ -114,6 +136,8 @@ User: "List all available data centers" or "Show available locations"
 - "What are the clusters?" = list operation (showing actual clusters)
 - "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)
 - Endpoint aliases: datacenter, dc, data center, location, datacenters, data centers, locations, endpoints, dcs
+- Kafka aliases: kafka, kafka service, kafka services, apache kafka
+- GitLab aliases: gitlab, gitlab service, gitlab services, git lab
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
         

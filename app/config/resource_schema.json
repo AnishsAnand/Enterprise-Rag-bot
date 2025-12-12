@@ -578,6 +578,225 @@
         "operations": ["create", "read", "update", "delete", "list"],
         "api_endpoints": {  },
         "parameters": {  }
+      },
+      "managed_service": {
+        "operations": ["list"],
+        "aliases": ["managed service", "managed services"],
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{serviceType}",
+            "description": "List managed services by type (Kafka, GitLab, etc.). Supports streaming response.",
+            "streaming": false
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["serviceType", "engagement_id", "endpoints"],
+            "optional": []
+          }
+        },
+        "service_types": {
+          "kafka": {
+            "api_value": "IKSKafka",
+            "display_name": "Kafka",
+            "description": "Apache Kafka messaging service"
+          },
+          "gitlab": {
+            "api_value": "IKSGitlab",
+            "display_name": "GitLab",
+            "description": "GitLab source code management"
+          }
+        },
+        "response_mapping": {
+          "services": "data",
+          "total": "data.length"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_managed_services": {
+            "description": "Multi-step workflow to list managed services by type",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Get PAAS engagement_id first"
+              },
+              {
+                "step": 2,
+                "action": "get_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Convert PAAS engagement_id to IPC engagement_id (needed for managed services)"
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["engagement_id"],
+                "user_selection": true,
+                "selection_prompt": "Which endpoints would you like to query for managed services?"
+              },
+              {
+                "step": 4,
+                "action": "list_managed_services",
+                "resource": "managed_service",
+                "operation": "list",
+                "depends_on": ["ipc_engagement_id", "selected_endpoints", "serviceType"],
+                "display_result": true,
+                "display_format": "table"
+              }
+            ]
+          }
+        }
+      },
+      "kafka": {
+        "operations": ["list"],
+        "aliases": ["kafka service", "kafka services", "apache kafka"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSKafka",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSKafka",
+            "description": "List Kafka managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSKafka"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_kafka": {
+            "description": "List Kafka services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_kafka_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSKafka",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSKafka"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "gitlab": {
+        "operations": ["list"],
+        "aliases": ["gitlab service", "gitlab services", "git lab"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSGitlab",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSGitlab",
+            "description": "List GitLab managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSGitlab"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_gitlab": {
+            "description": "List GitLab services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_gitlab_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSGitlab",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSGitlab"
+                }
+              }
+            ]
+          }
+        }
       }
     }
   }

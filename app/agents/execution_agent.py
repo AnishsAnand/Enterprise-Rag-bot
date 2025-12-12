@@ -551,6 +551,100 @@ Be professional, helpful, and always provide actionable information."""
                         engagement_id=None  # Will be fetched automatically
                     )
             
+            # Special handling for Kafka listing
+            elif state.resource_type == "kafka" and state.operation == "list":
+                logger.info("📋 Using list_kafka workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                # Convert endpoint names to IDs if needed (same logic as clusters)
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_kafka(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None  # Will be fetched and converted automatically
+                    )
+            
+            # Special handling for GitLab listing
+            elif state.resource_type == "gitlab" and state.operation == "list":
+                logger.info("📋 Using list_gitlab workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                # Convert endpoint names to IDs if needed (same logic as clusters)
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_gitlab(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None  # Will be fetched and converted automatically
+                    )
+            
             # Special handling for cluster creation - build custom payload
             elif state.resource_type == "k8s_cluster" and state.operation == "create":
                 logger.info("🏗️ Building cluster creation payload")
@@ -806,6 +900,78 @@ The cluster creation payload has been generated successfully!
             if duration:
                 message += f"---\n\n"
                 message += f"⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle Kafka service listing
+        if state.resource_type == "kafka" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} Kafka Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No Kafka services found in the selected endpoints._\n\n"
+                message += "💡 Kafka services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    service_name = service.get("serviceName", "Unknown")
+                    status = service.get("status", "Unknown")
+                    endpoint_name = service.get("endpointName", "Unknown")
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    
+                    status_emoji = "✅" if status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Endpoint:** {endpoint_name} | **Cluster:** {cluster_name}\n\n"
+            
+            # Add duration if available
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle GitLab service listing
+        if state.resource_type == "gitlab" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} GitLab Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No GitLab services found in the selected endpoints._\n\n"
+                message += "💡 GitLab services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    service_name = service.get("serviceName", "Unknown")
+                    status = service.get("status", "Unknown")
+                    endpoint_name = service.get("endpointName", "Unknown")
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    url = service.get("url", "N/A")
+                    
+                    status_emoji = "✅" if status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Endpoint:** {endpoint_name} | **Cluster:** {cluster_name}\n"
+                    if url != "N/A":
+                        message += f"> **URL:** {url}\n"
+                    message += "\n"
+            
+            # Add duration if available
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
             
             return message
         
