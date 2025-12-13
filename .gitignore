@@ -39,3 +39,4 @@ user-frontend/dist/
 
 # Package lock files (optional, but often ignored)
 package-lock.json
+app/config/resource_schema.json
