@@ -19,8 +19,8 @@ load_dotenv()
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "25"))
 MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "2"))  # Reduced from 3 to 2 for faster failure
 RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B").strip()
-HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "openai/gpt-oss-20b-embedding")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "voyage-3").strip()
+# Removed HOSTED_EMBEDDING_MODEL fallback - causes delays and errors
 
 REQUIRED_EMBEDDING_DIM = 4096
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
@@ -719,33 +719,14 @@ class AIService:
                         self.connected_services["embedding"] = False
                         break
 
-        # HTTP fallback
+        # HTTP fallback - simplified, no secondary fallback
         if self.http_client and self.connected_services["http_fallback"]:
             try:
                 logger.info(f"Attempting HTTP embedding with model: {EMBEDDING_MODEL}")
                 embeddings = await self._generate_embeddings_http(cleaned_texts, EMBEDDING_MODEL)
-                
-                all_zero = all(
-                    len(e) == EMBEDDING_SIZE_FALLBACK and all(v == 0.0 for v in e)
-                    for e in embeddings
-                )
-                
-                if all_zero and HOSTED_EMBEDDING_MODEL:
-                    logger.warning(f"⚠️ Primary model produced zeros, trying hosted fallback: {HOSTED_EMBEDDING_MODEL}")
-                    hosted_embeddings = await self._generate_embeddings_http(cleaned_texts, HOSTED_EMBEDDING_MODEL)
-                    return hosted_embeddings
-                
                 return embeddings
-                
             except Exception as e:
-                logger.error(f"HTTP embedding with primary model failed: {e}")
-                if self.http_client and HOSTED_EMBEDDING_MODEL:
-                    try:
-                        logger.info(f"Attempting hosted fallback model: {HOSTED_EMBEDDING_MODEL}")
-                        hosted_embeddings = await self._generate_embeddings_http(cleaned_texts, HOSTED_EMBEDDING_MODEL)
-                        return hosted_embeddings
-                    except Exception as e2:
-                        logger.error(f"Hosted embedding fallback also failed: {e2}")
+                logger.error(f"HTTP embedding failed: {e}")
 
         # Store requirement if all failed
         await self.store_user_requirement({

@@ -51,3 +51,4 @@ setuptools<81
 # Session persistence (SQL-backed memory)
 # Note: memorisdk is optional - we use a custom SQL-based session manager
 # that provides similar functionality without external dependencies
+sentence-transformers==2.2.2

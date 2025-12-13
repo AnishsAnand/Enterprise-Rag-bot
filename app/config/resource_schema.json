@@ -606,6 +606,26 @@
             "api_value": "IKSGitlab",
             "display_name": "GitLab",
             "description": "GitLab source code management"
+          },
+          "container_registry": {
+            "api_value": "IKSContainerRegistry",
+            "display_name": "Container Registry",
+            "description": "Docker container registry service"
+          },
+          "jenkins": {
+            "api_value": "IKSJenkins",
+            "display_name": "Jenkins",
+            "description": "Jenkins CI/CD automation server"
+          },
+          "postgres": {
+            "api_value": "IKSPostgres",
+            "display_name": "PostgreSQL",
+            "description": "PostgreSQL relational database service"
+          },
+          "documentdb": {
+            "api_value": "IKSDocumentDB",
+            "display_name": "DocumentDB",
+            "description": "MongoDB-compatible document database"
           }
         },
         "response_mapping": {
@@ -793,6 +813,423 @@
                   "endpoints": "{{selected_endpoints}}",
                   "serviceType": "IKSGitlab"
                 }
+              }
+            ]
+          }
+        }
+      },
+      "container_registry": {
+        "operations": ["list"],
+        "aliases": ["container registry", "registry", "docker registry", "image registry"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSContainerRegistry",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSContainerRegistry",
+            "description": "List Container Registry managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSContainerRegistry"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_container_registry": {
+            "description": "List Container Registry services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_container_registry_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSContainerRegistry",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSContainerRegistry"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "jenkins": {
+        "operations": ["list"],
+        "aliases": ["jenkins", "jenkins service", "ci cd", "continuous integration"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSJenkins",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSJenkins",
+            "description": "List Jenkins managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSJenkins"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_jenkins": {
+            "description": "List Jenkins services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_jenkins_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSJenkins",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSJenkins"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "postgres": {
+        "operations": ["list"],
+        "aliases": ["postgres", "postgresql", "postgres service", "postgresql database"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSPostgres",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSPostgres",
+            "description": "List PostgreSQL managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSPostgres"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_postgres": {
+            "description": "List PostgreSQL services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_postgres_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSPostgres",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSPostgres"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "documentdb": {
+        "operations": ["list"],
+        "aliases": ["documentdb", "document db", "mongodb", "mongo", "nosql database"],
+        "parent_resource": "managed_service",
+        "service_type": "IKSDocumentDB",
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSDocumentDB",
+            "description": "List DocumentDB managed services across endpoints"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": [],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "serviceType": "IKSDocumentDB"
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_documentdb": {
+            "description": "List DocumentDB services across endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["paas_engagement_id"],
+                "user_selection": true
+              },
+              {
+                "step": 4,
+                "action": "list_documentdb_services",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSDocumentDB",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpoints": "{{selected_endpoints}}",
+                  "serviceType": "IKSDocumentDB"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "vm": {
+        "operations": ["list"],
+        "aliases": ["vm", "vms", "virtual machine", "virtual machines", "instance", "instances", "server", "servers"],
+        "api_endpoints": {
+          "list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/instances/vmlist/{ipc_engagement_id}",
+            "description": "List all virtual machines for the engagement",
+            "url_params": ["ipc_engagement_id"]
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": [],
+            "optional": ["endpoint", "zone", "department"],
+            "internal": {
+              "ipc_engagement_id": "from_api"
+            }
+          }
+        },
+        "response_mapping": {
+          "vms": "data.vmList",
+          "total": "data.vmList.length",
+          "last_synced": "data.lastSyncedAt"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_vms": {
+            "description": "List all virtual machines for the engagement",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Get PAAS engagement_id"
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Convert PAAS engagement_id to IPC engagement_id"
+              },
+              {
+                "step": 3,
+                "action": "list_vms",
+                "method": "GET",
+                "url": "https://ipcloud.tatacommunications.com/portalservice/instances/vmlist/{ipc_engagement_id}",
+                "url_params": {
+                  "ipc_engagement_id": "{{ipc_engagement_id}}"
+                },
+                "display_result": true,
+                "display_format": "table"
+              }
+            ]
+          }
+        }
+      },
+      "firewall": {
+        "operations": ["list"],
+        "aliases": ["firewall", "firewalls", "fw", "vayu firewall", "network firewall"],
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/networkservice/firewallconfig/details",
+            "description": "List firewalls for a specific endpoint"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["endpoints"],
+            "optional": ["variant"],
+            "internal": {
+              "engagementId": "ipc_engagement_id",
+              "variant": ""
+            }
+          }
+        },
+        "response_mapping": {
+          "firewalls": "data",
+          "total": "data.length"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_firewalls": {
+            "description": "List firewalls for specified endpoints",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Get PAAS engagement_id"
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600,
+                "note": "Convert PAAS engagement_id to IPC engagement_id"
+              },
+              {
+                "step": 3,
+                "action": "get_endpoints",
+                "resource": "endpoint",
+                "operation": "list",
+                "depends_on": ["engagement_id"],
+                "user_selection": true,
+                "selection_prompt": "Which endpoints would you like to query for firewalls?"
+              },
+              {
+                "step": 4,
+                "action": "list_firewalls_per_endpoint",
+                "method": "POST",
+                "url": "https://ipcloud.tatacommunications.com/networkservice/firewallconfig/details",
+                "payload": {
+                  "engagementId": "{{ipc_engagement_id}}",
+                  "endpointId": "{{endpoint_id}}",
+                  "variant": ""
+                },
+                "note": "Call API for each selected endpoint using IPC engagement ID"
               }
             ]
           }

@@ -167,6 +167,29 @@ class APIExecutorService:
             )
         return self.http_client
     
+    async def _get_auth_headers(self) -> Dict[str, str]:
+        """
+        Get authentication headers with current token.
+        
+        Returns:
+            Dictionary of headers including authorization
+        """
+        headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Ensure we have a valid token
+        await self._ensure_valid_token()
+        
+        # Add authentication with dynamically fetched token
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+            logger.debug("✅ Using dynamically fetched auth token")
+        else:
+            logger.warning("⚠️ No auth token available for API call")
+        
+        return headers
+    
     async def close(self) -> None:
         """Close HTTP client."""
         if self.http_client:
@@ -503,11 +526,23 @@ class APIExecutorService:
             )
             
             if response.status_code == 200:
-                data = response.json()
+                response_data = response.json()
                 
-                # Extract services from response
-                services = data.get("data", [])
+                # API returns nested structure: {"data": {"data": [...]}}
+                # Extract the inner data array
+                outer_data = response_data.get("data", {})
+                if isinstance(outer_data, dict):
+                    services = outer_data.get("data", [])
+                else:
+                    # Fallback: if data is already a list
+                    services = outer_data if isinstance(outer_data, list) else []
+                
                 logger.info(f"✅ Found {len(services)} {service_type} services")
+                
+                # Ensure services is a list
+                if not isinstance(services, list):
+                    logger.warning(f"⚠️ Expected list but got {type(services)}, wrapping in list")
+                    services = [services] if services else []
                 
                 return {
                     "success": True,
@@ -516,7 +551,8 @@ class APIExecutorService:
                     "service_type": service_type,
                     "ipc_engagement_id": ipc_engagement_id,
                     "endpoints": endpoint_ids,
-                    "message": f"Found {len(services)} {service_type} services"
+                    "message": f"Found {len(services)} {service_type} services",
+                    "raw_response": response_data  # Include raw response for debugging
                 }
             else:
                 error_msg = f"API returned status {response.status_code}"
@@ -583,6 +619,344 @@ class APIExecutorService:
             endpoint_ids=endpoint_ids,
             ipc_engagement_id=ipc_engagement_id
         )
+    
+    async def list_container_registry(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List Container Registry managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with Container Registry service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSContainerRegistry",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
+    async def list_jenkins(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List Jenkins managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with Jenkins service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSJenkins",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
+    async def list_postgres(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List PostgreSQL managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with PostgreSQL service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSPostgres",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
+    async def list_documentdb(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None
+    ) -> Dict[str, Any]:
+        """
+        List DocumentDB managed services.
+        Convenience wrapper around list_managed_services.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID
+            
+        Returns:
+            Dict with DocumentDB service list or error
+        """
+        return await self.list_managed_services(
+            service_type="IKSDocumentDB",
+            endpoint_ids=endpoint_ids,
+            ipc_engagement_id=ipc_engagement_id
+        )
+    
+    async def list_vms(
+        self,
+        ipc_engagement_id: int = None,
+        endpoint_filter: str = None,
+        zone_filter: str = None,
+        department_filter: str = None
+    ) -> Dict[str, Any]:
+        """
+        List all virtual machines for the engagement.
+        
+        Args:
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            endpoint_filter: Optional endpoint name to filter VMs
+            zone_filter: Optional zone name to filter VMs
+            department_filter: Optional department name to filter VMs
+            
+        Returns:
+            Dict with VM list or error
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                logger.info("🔄 Fetching IPC engagement ID for VM listing...")
+                ipc_engagement_id = await self.get_ipc_engagement_id()
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Could not retrieve IPC engagement ID"
+                    }
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            # Build URL
+            url = f"https://ipcloud.tatacommunications.com/portalservice/instances/vmlist/{ipc_engagement_id}"
+            
+            logger.info(f"📡 Calling VM list API: GET {url}")
+            
+            # Get auth headers
+            headers = await self._get_auth_headers()
+            
+            # Get HTTP client
+            client = await self._get_http_client()
+            
+            # Make GET request
+            response = await client.get(
+                url,
+                headers=headers,
+                timeout=30.0
+            )
+            
+            logger.info(f"📥 VM API response: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Extract VM list
+                vm_list = data.get("data", {}).get("vmList", [])
+                last_synced = data.get("data", {}).get("lastSyncedAt", "N/A")
+                
+                logger.info(f"✅ Found {len(vm_list)} VMs (last synced: {last_synced})")
+                
+                # Apply filters if provided
+                filtered_vms = vm_list
+                
+                if endpoint_filter:
+                    filtered_vms = [
+                        vm for vm in filtered_vms
+                        if endpoint_filter.lower() in vm.get("virtualMachine", {}).get("endpoint", {}).get("endpointName", "").lower()
+                    ]
+                    logger.info(f"🔍 Filtered by endpoint '{endpoint_filter}': {len(filtered_vms)} VMs")
+                
+                if zone_filter:
+                    filtered_vms = [
+                        vm for vm in filtered_vms
+                        if zone_filter.lower() in vm.get("virtualMachine", {}).get("zone", {}).get("zoneName", "").lower()
+                    ]
+                    logger.info(f"🔍 Filtered by zone '{zone_filter}': {len(filtered_vms)} VMs")
+                
+                if department_filter:
+                    filtered_vms = [
+                        vm for vm in filtered_vms
+                        if department_filter.lower() in vm.get("virtualMachine", {}).get("department", {}).get("departmentName", "").lower()
+                    ]
+                    logger.info(f"🔍 Filtered by department '{department_filter}': {len(filtered_vms)} VMs")
+                
+                duration = time.time() - start_time
+                
+                return {
+                    "success": True,
+                    "data": filtered_vms,
+                    "total": len(filtered_vms),
+                    "total_unfiltered": len(vm_list),
+                    "last_synced": last_synced,
+                    "ipc_engagement_id": ipc_engagement_id,
+                    "filters_applied": {
+                        "endpoint": endpoint_filter,
+                        "zone": zone_filter,
+                        "department": department_filter
+                    },
+                    "duration_seconds": duration,
+                    "message": f"Found {len(filtered_vms)} VMs"
+                }
+            else:
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    pass
+                
+                logger.error(f"❌ VM list API failed: {error_msg}")
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "status_code": response.status_code
+                }
+        
+        except Exception as e:
+            logger.error(f"❌ Exception in list_vms: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    async def list_firewalls(
+        self,
+        endpoint_ids: List[int] = None,
+        ipc_engagement_id: int = None,
+        variant: str = ""
+    ) -> Dict[str, Any]:
+        """
+        List firewalls across multiple endpoints.
+        
+        Args:
+            endpoint_ids: List of endpoint IDs to query
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            variant: Firewall variant filter (default: empty string)
+            
+        Returns:
+            Dict with firewall list or error
+        """
+        import time
+        start_time = time.time()
+        
+        try:
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                logger.info("🔄 Fetching IPC engagement ID for firewall listing...")
+                ipc_engagement_id = await self.get_ipc_engagement_id()
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Could not retrieve IPC engagement ID"
+                    }
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            # Get endpoints if not provided
+            if not endpoint_ids:
+                logger.info("🔄 Fetching all endpoints...")
+                endpoints_result = await self.list_endpoints()
+                if not endpoints_result.get("success"):
+                    return {
+                        "success": False,
+                        "error": "Could not fetch endpoints"
+                    }
+                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                endpoint_ids = [ep.get("id") for ep in available_endpoints if ep.get("id")]
+                logger.info(f"✅ Found {len(endpoint_ids)} endpoints")
+            
+            # Query each endpoint
+            all_firewalls = []
+            endpoint_results = {}
+            
+            url = "https://ipcloud.tatacommunications.com/networkservice/firewallconfig/details"
+            headers = await self._get_auth_headers()
+            
+            # Get HTTP client
+            client = await self._get_http_client()
+            
+            for endpoint_id in endpoint_ids:
+                try:
+                    payload = {
+                        "engagementId": ipc_engagement_id,
+                        "endpointId": endpoint_id,
+                        "variant": variant
+                    }
+                    
+                    logger.info(f"📡 Querying firewalls for endpoint {endpoint_id}...")
+                    
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers=headers,
+                        timeout=30.0
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        firewalls = data.get("data", [])
+                        
+                        logger.info(f"✅ Endpoint {endpoint_id}: Found {len(firewalls)} firewalls")
+                        
+                        # Add endpoint info to each firewall
+                        for fw in firewalls:
+                            fw["_queried_endpoint_id"] = endpoint_id
+                        
+                        all_firewalls.extend(firewalls)
+                        endpoint_results[endpoint_id] = {
+                            "success": True,
+                            "count": len(firewalls)
+                        }
+                    else:
+                        logger.warning(f"⚠️ Endpoint {endpoint_id}: API returned {response.status_code}")
+                        endpoint_results[endpoint_id] = {
+                            "success": False,
+                            "error": f"Status {response.status_code}"
+                        }
+                
+                except Exception as e:
+                    logger.error(f"❌ Endpoint {endpoint_id}: {e}")
+                    endpoint_results[endpoint_id] = {
+                        "success": False,
+                        "error": str(e)
+                    }
+            
+            duration = time.time() - start_time
+            
+            logger.info(f"✅ Total firewalls found: {len(all_firewalls)} across {len(endpoint_ids)} endpoints")
+            
+            return {
+                "success": True,
+                "data": all_firewalls,
+                "total": len(all_firewalls),
+                "endpoints_queried": endpoint_ids,
+                "endpoint_results": endpoint_results,
+                "ipc_engagement_id": ipc_engagement_id,
+                "variant": variant,
+                "duration_seconds": duration,
+                "message": f"Found {len(all_firewalls)} firewalls"
+            }
+        
+        except Exception as e:
+            logger.error(f"❌ Exception in list_firewalls: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def get_resource_config(self, resource_type: str) -> Optional[Dict[str, Any]]:
         """

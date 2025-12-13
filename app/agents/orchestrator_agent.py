@@ -285,6 +285,24 @@ Always confirm destructive operations (delete, update) before executing."""
         Returns:
             Dict with routing decision
         """
+        # OPTION 2: Early detection of OpenWebUI metadata requests - skip LLM routing entirely
+        # These requests are for UI enhancement and should not trigger agent routing
+        is_metadata_request = any([
+            user_input.strip().startswith("### Task:"),
+            "Generate a concise" in user_input and ("title" in user_input.lower() or "tag" in user_input.lower()),
+            "Suggest 3-5 relevant follow-up" in user_input or "Suggest relevant follow-up" in user_input,
+            "Generate 1-3 broad tags" in user_input or "Generate broad tags" in user_input,
+            "suggest follow-up questions" in user_input.lower(),
+            "generate a title" in user_input.lower()
+        ])
+        
+        if is_metadata_request:
+            logger.info(f"📋 Metadata request detected early, skipping LLM routing: {user_input[:80]}...")
+            return {
+                "route": "skip",
+                "reason": "OpenWebUI metadata request - no agent routing needed"
+            }
+        
         # Check if we're in the middle of parameter collection
         if state.status == ConversationStatus.COLLECTING_PARAMS:
             if state.missing_params:
@@ -329,7 +347,7 @@ Respond with ONLY ONE of these:
             logger.debug(f"🔍 Routing prompt for query: {user_input}")
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=routing_prompt,
-                max_tokens=100,  # Increased from 20 to 100 for more reliable responses
+                max_tokens=250,  # OPTION 1: Increased from 100 to 250 for more reliable responses from LLM
                 temperature=0.1,  # Slightly increased from 0.0 to avoid potential model issues
                 timeout=15  # Add explicit timeout
             )
@@ -378,7 +396,21 @@ Respond with ONLY ONE of these:
                 }
         except Exception as e:
             logger.error(f"❌ LLM routing failed with exception: {e}, using rule-based fallback")
-            # Use rule-based fallback on exception
+            
+            # Check if this is a metadata request - don't route to RAG or Intent
+            if any([
+                user_input.strip().startswith("### Task:"),
+                "Generate a concise" in user_input and "title" in user_input.lower(),
+                "Suggest 3-5 relevant follow-up" in user_input,
+                "Generate 1-3 broad tags" in user_input
+            ]):
+                logger.info(f"🎯 Metadata request detected with LLM failure - skipping routing")
+                return {
+                    "route": "skip",
+                    "reason": "Metadata request should be handled by OpenWebUI, not by agents"
+                }
+            
+            # Use rule-based fallback on exception for regular queries
             query_lower = user_input.lower()
             doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
                            "tutorial", "guide", "documentation", "help me", "tell me about"]
@@ -417,7 +449,16 @@ Respond with ONLY ONE of these:
         route = routing_decision["route"]
         
         try:
-            if route == "intent":
+            if route == "skip":
+                # Metadata request - return simple acknowledgment
+                logger.info(f"⏭️ Skipping routing for metadata request")
+                return {
+                    "success": True,
+                    "response": "Processing metadata request...",
+                    "route": "skip"
+                }
+            
+            elif route == "intent":
                 # Route to intent agent
                 state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
                 

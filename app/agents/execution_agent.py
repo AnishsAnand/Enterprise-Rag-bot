@@ -645,6 +645,254 @@ Be professional, helpful, and always provide actionable information."""
                         ipc_engagement_id=None  # Will be fetched and converted automatically
                     )
             
+            # Special handling for Container Registry listing
+            elif state.resource_type == "container_registry" and state.operation == "list":
+                logger.info("📋 Using list_container_registry workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_container_registry(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None
+                    )
+            
+            # Special handling for Jenkins listing
+            elif state.resource_type == "jenkins" and state.operation == "list":
+                logger.info("📋 Using list_jenkins workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_jenkins(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None
+                    )
+            
+            # Special handling for PostgreSQL listing
+            elif state.resource_type == "postgres" and state.operation == "list":
+                logger.info("📋 Using list_postgres workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_postgres(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None
+                    )
+            
+            # Special handling for DocumentDB listing
+            elif state.resource_type == "documentdb" and state.operation == "list":
+                logger.info("📋 Using list_documentdb workflow method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_documentdb(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None
+                    )
+            
+            # Special handling for VM listing
+            elif state.resource_type == "vm" and state.operation == "list":
+                logger.info("📋 Using list_vms method")
+                
+                # Extract optional filters from collected params
+                endpoint_filter = state.collected_params.get("endpoint")
+                zone_filter = state.collected_params.get("zone")
+                department_filter = state.collected_params.get("department")
+                
+                execution_result = await api_executor_service.list_vms(
+                    ipc_engagement_id=None,  # Will be fetched automatically
+                    endpoint_filter=endpoint_filter,
+                    zone_filter=zone_filter,
+                    department_filter=department_filter
+                )
+            
+            # Special handling for Firewall listing
+            elif state.resource_type == "firewall" and state.operation == "list":
+                logger.info("📋 Using list_firewalls method")
+                endpoint_ids = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
+                
+                # Convert endpoint names to IDs if needed
+                conversion_error = None
+                if endpoint_ids and isinstance(endpoint_ids, list) and len(endpoint_ids) > 0:
+                    if isinstance(endpoint_ids[0], str) and not endpoint_ids[0].isdigit():
+                        logger.info(f"🔄 Converting endpoint names {endpoint_ids} to IDs...")
+                        try:
+                            endpoints_result = await api_executor_service.list_endpoints()
+                            if endpoints_result.get("success"):
+                                available_endpoints = endpoints_result.get("data", {}).get("endpoints", [])
+                                name_to_id = {}
+                                for ep in available_endpoints:
+                                    ep_name = ep.get("name", "").strip()
+                                    ep_id = ep.get("id")
+                                    if ep_name and ep_id:
+                                        name_to_id[ep_name.lower()] = ep_id
+                                        name_to_id[ep_name.lower().replace("-", "").replace(" ", "")] = ep_id
+                                
+                                converted_ids = []
+                                for name in endpoint_ids:
+                                    name_clean = name.lower().strip().replace("-", "").replace(" ", "")
+                                    if name_clean in name_to_id:
+                                        converted_ids.append(name_to_id[name_clean])
+                                        logger.info(f"  ✅ '{name}' -> ID {name_to_id[name_clean]}")
+                                
+                                if converted_ids:
+                                    endpoint_ids = converted_ids
+                                    logger.info(f"✅ Converted to IDs: {endpoint_ids}")
+                                else:
+                                    conversion_error = f"Could not find endpoint IDs for: {', '.join(endpoint_ids)}"
+                            else:
+                                conversion_error = "Failed to fetch endpoints for name-to-ID conversion"
+                        except Exception as e:
+                            conversion_error = f"Error converting endpoint names to IDs: {str(e)}"
+                
+                if conversion_error:
+                    execution_result = {"success": False, "error": conversion_error}
+                else:
+                    execution_result = await api_executor_service.list_firewalls(
+                        endpoint_ids=endpoint_ids,
+                        ipc_engagement_id=None,  # Will be fetched automatically
+                        variant=""
+                    )
+            
             # Special handling for cluster creation - build custom payload
             elif state.resource_type == "k8s_cluster" and state.operation == "create":
                 logger.info("🏗️ Building cluster creation payload")
@@ -918,17 +1166,27 @@ The cluster creation payload has been generated successfully!
                 message += "💡 Kafka services may not be deployed yet, or they might be in different endpoints.\n"
             else:
                 for service in services:
-                    service_name = service.get("serviceName", "Unknown")
+                    # Handle case where service might be a string or unexpected type
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    # Map actual API fields
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
                     status = service.get("status", "Unknown")
-                    endpoint_name = service.get("endpointName", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
                     version = service.get("version", "N/A")
                     cluster_name = service.get("clusterName", "N/A")
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
                     
-                    status_emoji = "✅" if status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    status_emoji = "✅" if status == "Active" else ("⚠️" if status == "Pending" else "❌")
                     
                     message += f"**{status_emoji} {service_name}**\n"
                     message += f"> **Status:** {status} | **Version:** {version}\n"
-                    message += f"> **Endpoint:** {endpoint_name} | **Cluster:** {cluster_name}\n\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n\n"
             
             # Add duration if available
             duration = execution_result.get("duration_seconds")
@@ -952,23 +1210,363 @@ The cluster creation payload has been generated successfully!
                 message += "💡 GitLab services may not be deployed yet, or they might be in different endpoints.\n"
             else:
                 for service in services:
-                    service_name = service.get("serviceName", "Unknown")
+                    # Handle case where service might be a string or unexpected type
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    # Map actual API fields
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
                     status = service.get("status", "Unknown")
-                    endpoint_name = service.get("endpointName", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
                     version = service.get("version", "N/A")
                     cluster_name = service.get("clusterName", "N/A")
-                    url = service.get("url", "N/A")
+                    ingress_url = service.get("ingressUrl", service.get("url", "N/A"))
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
                     
-                    status_emoji = "✅" if status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    status_emoji = "✅" if status == "Active" else ("⚠️" if status == "Pending" else "❌")
                     
                     message += f"**{status_emoji} {service_name}**\n"
                     message += f"> **Status:** {status} | **Version:** {version}\n"
-                    message += f"> **Endpoint:** {endpoint_name} | **Cluster:** {cluster_name}\n"
-                    if url != "N/A":
-                        message += f"> **URL:** {url}\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n"
+                    if ingress_url != "N/A":
+                        message += f"> **Ingress URL:** `{ingress_url}`\n"
                     message += "\n"
             
             # Add duration if available
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle Container Registry service listing
+        if state.resource_type == "container_registry" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} Container Registry Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No Container Registry services found in the selected endpoints._\n\n"
+                message += "💡 Container Registry services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
+                    status = service.get("status", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    ingress_url = service.get("ingressUrl", service.get("url", "N/A"))
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
+                    
+                    status_emoji = "✅" if status == "Active" or status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n"
+                    if ingress_url != "N/A":
+                        message += f"> **Registry URL:** `{ingress_url}`\n"
+                    message += "\n"
+            
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle Jenkins service listing
+        if state.resource_type == "jenkins" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} Jenkins Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No Jenkins services found in the selected endpoints._\n\n"
+                message += "💡 Jenkins services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
+                    status = service.get("status", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    ingress_url = service.get("ingressUrl", service.get("url", "N/A"))
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
+                    
+                    status_emoji = "✅" if status == "Active" or status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n"
+                    if ingress_url != "N/A":
+                        message += f"> **Jenkins URL:** `{ingress_url}`\n"
+                    message += "\n"
+            
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle PostgreSQL service listing
+        if state.resource_type == "postgres" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} PostgreSQL Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No PostgreSQL services found in the selected endpoints._\n\n"
+                message += "💡 PostgreSQL services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
+                    status = service.get("status", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
+                    db_size = service.get("volumeSize", "N/A")
+                    
+                    status_emoji = "✅" if status == "Active" or status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n"
+                    message += f"> **Storage:** {db_size}GB\n"
+                    message += "\n"
+            
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle DocumentDB service listing
+        if state.resource_type == "documentdb" and state.operation == "list":
+            services = execution_result.get("data", [])
+            total = execution_result.get("total", len(services))
+            endpoints_queried = execution_result.get("endpoints", [])
+            
+            message = f"## ✅ Found {total} DocumentDB Service{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No DocumentDB services found in the selected endpoints._\n\n"
+                message += "💡 DocumentDB services may not be deployed yet, or they might be in different endpoints.\n"
+            else:
+                for service in services:
+                    if not isinstance(service, dict):
+                        logger.warning(f"⚠️ Service is not a dict: {type(service)} = {service}")
+                        message += f"• {service}\n\n"
+                        continue
+                    
+                    service_name = service.get("name", service.get("serviceName", "Unknown"))
+                    status = service.get("status", "Unknown")
+                    location = service.get("locationName", service.get("endpointName", "Unknown"))
+                    version = service.get("version", "N/A")
+                    cluster_name = service.get("clusterName", "N/A")
+                    replicas = service.get("replicas", "N/A")
+                    namespace = service.get("instanceNamespace", service.get("namespace", "N/A"))
+                    db_size = service.get("volumeSize", "N/A")
+                    
+                    status_emoji = "✅" if status == "Active" or status == "Running" else ("⚠️" if status == "Pending" else "❌")
+                    
+                    message += f"**{status_emoji} {service_name}**\n"
+                    message += f"> **Status:** {status} | **Version:** {version}\n"
+                    message += f"> **Location:** {location} | **Cluster:** {cluster_name}\n"
+                    message += f"> **Replicas:** {replicas} | **Namespace:** {namespace}\n"
+                    message += f"> **Storage:** {db_size}GB\n"
+                    message += "\n"
+            
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle VM listing
+        if state.resource_type == "vm" and state.operation == "list":
+            vms = execution_result.get("data", [])
+            total = execution_result.get("total", len(vms))
+            total_unfiltered = execution_result.get("total_unfiltered", total)
+            last_synced = execution_result.get("last_synced", "N/A")
+            filters_applied = execution_result.get("filters_applied", {})
+            
+            message = f"## ✅ Found {total} Virtual Machine{'s' if total != 1 else ''}\n"
+            if total != total_unfiltered:
+                message += f"*Showing {total} of {total_unfiltered} total VMs (filtered)*\n"
+            message += f"*Last synced: {last_synced}*\n\n"
+            message += "---\n\n"
+            
+            # Show active filters
+            active_filters = [f"{k}: {v}" for k, v in filters_applied.items() if v]
+            if active_filters:
+                message += f"**Filters:** {', '.join(active_filters)}\n\n"
+            
+            if total == 0:
+                message += "_No virtual machines found._\n\n"
+                if any(filters_applied.values()):
+                    message += "💡 Try removing some filters to see more VMs.\n"
+            else:
+                # Group VMs by endpoint for better organization
+                by_endpoint = {}
+                for vm_wrapper in vms:
+                    vm = vm_wrapper.get("virtualMachine", {})
+                    endpoint_name = vm.get("endpoint", {}).get("endpointName", "Unknown")
+                    if endpoint_name not in by_endpoint:
+                        by_endpoint[endpoint_name] = []
+                    by_endpoint[endpoint_name].append(vm)
+                
+                # Display VMs grouped by endpoint
+                for endpoint_name, endpoint_vms in sorted(by_endpoint.items()):
+                    message += f"### 📍 {endpoint_name} ({len(endpoint_vms)} VM{'s' if len(endpoint_vms) != 1 else ''})\n\n"
+                    
+                    for vm in endpoint_vms:
+                        vm_name = vm.get("vmName", "Unknown")
+                        vm_status = vm.get("vmAttributes", {}).get("VM Status", "Unknown")
+                        vm_ip = vm.get("vmAttributes", {}).get("IP", "N/A")
+                        vcpu = vm.get("vmAttributes", {}).get("vCPU", "N/A")
+                        ram_mb = vm.get("vmAttributes", {}).get("RAM", "N/A")
+                        ram_gb = f"{int(ram_mb)/1024:.1f}GB" if ram_mb != "N/A" and ram_mb else "N/A"
+                        storage = vm.get("storage", "N/A")
+                        os_version = vm.get("vmAttributes", {}).get("OSVersion", "N/A")
+                        os_make = vm.get("vmAttributes", {}).get("OSMake", "N/A")
+                        zone_name = vm.get("zone", {}).get("zoneName", "N/A")
+                        department = vm.get("department", {}).get("departmentName", "N/A")
+                        created_time = vm.get("createdTime", "N/A")
+                        
+                        # Status emoji
+                        status_emoji = "✅" if vm_status == "ACTIVE" else ("⚠️" if vm_status in ["PENDING", "RESTORE"] else "❌")
+                        
+                        message += f"**{status_emoji} {vm_name}**\n"
+                        message += f"> **Status:** {vm_status} | **IP:** `{vm_ip}`\n"
+                        message += f"> **Resources:** {vcpu} vCPU, {ram_gb} RAM, {storage}GB Storage\n"
+                        message += f"> **OS:** {os_make} {os_version}\n"
+                        message += f"> **Zone:** {zone_name}\n"
+                        message += f"> **Department:** {department}\n"
+                        message += f"> **Created:** {created_time}\n"
+                        message += "\n"
+            
+            duration = execution_result.get("duration_seconds")
+            if duration:
+                message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
+            
+            return message
+        
+        # Handle Firewall listing
+        if state.resource_type == "firewall" and state.operation == "list":
+            firewalls = execution_result.get("data", [])
+            total = execution_result.get("total", len(firewalls))
+            endpoints_queried = execution_result.get("endpoints_queried", [])
+            endpoint_results = execution_result.get("endpoint_results", {})
+            
+            message = f"## ✅ Found {total} Firewall{'s' if total != 1 else ''}\n"
+            message += f"*Queried {len(endpoints_queried)} endpoint{'s' if len(endpoints_queried) != 1 else ''}*\n\n"
+            message += "---\n\n"
+            
+            if total == 0:
+                message += "_No firewalls found in the selected endpoints._\n\n"
+                message += "💡 Firewalls may not be configured yet, or they might be in different endpoints.\n"
+            else:
+                # Group firewalls by endpoint for better organization
+                by_endpoint = {}
+                for fw in firewalls:
+                    endpoint_id = fw.get("endId", fw.get("_queried_endpoint_id", "Unknown"))
+                    if endpoint_id not in by_endpoint:
+                        by_endpoint[endpoint_id] = []
+                    by_endpoint[endpoint_id].append(fw)
+                
+                # Display firewalls grouped by endpoint
+                for endpoint_id, endpoint_fws in sorted(by_endpoint.items()):
+                    # Get endpoint name from first firewall or use ID
+                    endpoint_name = f"Endpoint {endpoint_id}"
+                    if endpoint_fws:
+                        # Try to get a readable endpoint name from the firewall data
+                        first_fw = endpoint_fws[0]
+                        # Endpoint name might be in various places, try to find it
+                        endpoint_name = f"Endpoint {endpoint_id}"
+                    
+                    message += f"### 📍 {endpoint_name} ({len(endpoint_fws)} firewall{'s' if len(endpoint_fws) != 1 else ''})\n\n"
+                    
+                    for fw in endpoint_fws:
+                        fw_name = fw.get("displayName", fw.get("technicalName", "Unknown"))
+                        fw_tech_name = fw.get("technicalName", "N/A")
+                        fw_ip = fw.get("ip", "N/A")
+                        component = fw.get("component", "N/A")
+                        component_type = fw.get("componentType", "N/A")
+                        hypervisor = fw.get("hypervisor", "N/A")
+                        
+                        # Get departments
+                        departments = fw.get("department", [])
+                        dept_names = [d.get("name", "Unknown") for d in departments[:3]]  # Show first 3
+                        dept_str = ", ".join(dept_names) if dept_names else "N/A"
+                        if len(departments) > 3:
+                            dept_str += f" (+{len(departments)-3} more)"
+                        
+                        # Get basic details
+                        basic = fw.get("basicDetails", {})
+                        throughput = basic.get("throughput", "N/A")
+                        iks_enabled = basic.get("iksEnabled", "N/A")
+                        project_name = basic.get("projectName", "N/A")
+                        
+                        # Get config
+                        config = fw.get("config", {})
+                        vdom_name = config.get("vdomName", "N/A")
+                        category = config.get("category", "N/A")
+                        
+                        # Status based on various flags
+                        self_provisioned = fw.get("selfProvisioned", False)
+                        status_emoji = "✅" if not fw.get("migrationStatus") else "⚠️"
+                        
+                        message += f"**{status_emoji} {fw_name}**\n"
+                        message += f"> **Technical Name:** `{fw_tech_name}` | **IP:** `{fw_ip}`\n"
+                        message += f"> **Component:** {component} ({component_type}) | **Category:** {category}\n"
+                        message += f"> **VDOM:** {vdom_name} | **Hypervisor:** {hypervisor}\n"
+                        if throughput != "N/A":
+                            message += f"> **Throughput:** {throughput}\n"
+                        message += f"> **IKS Enabled:** {iks_enabled} | **Self-Provisioned:** {'Yes' if self_provisioned else 'No'}\n"
+                        if project_name != "N/A":
+                            message += f"> **Project:** {project_name}\n"
+                        message += f"> **Departments:** {dept_str}\n"
+                        message += "\n"
+            
             duration = execution_result.get("duration_seconds")
             if duration:
                 message += f"---\n\n⏱️ *Completed in {duration:.2f} seconds*\n"
