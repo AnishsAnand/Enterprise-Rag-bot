@@ -368,9 +368,18 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 resource_type = intent_data.get("resource_type")
                 operation = intent_data.get("operation")
                 
-                if resource_type and operation:
+                # Handle multi-resource: if resource_type is a list, convert to string
+                # For param lookup, use the first resource type
+                if isinstance(resource_type, list):
+                    logger.info(f"🔧 Multi-resource detected: {resource_type}")
+                    # For parameter schema, use the first resource
+                    lookup_resource_type = resource_type[0] if resource_type else None
+                else:
+                    lookup_resource_type = resource_type
+                
+                if lookup_resource_type and operation:
                     operation_config = api_executor_service.get_operation_config(
-                        resource_type, operation
+                        lookup_resource_type, operation
                     )
                     
                     if operation_config:

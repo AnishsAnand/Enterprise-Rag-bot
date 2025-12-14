@@ -9,8 +9,14 @@ import logging
 import json
 
 from app.agents.base_agent import BaseAgent
-from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
+from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus, ConversationState
 from app.services.api_executor_service import api_executor_service
+
+# Import specialized resource agents
+from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
+from app.agents.resource_agents.managed_services_agent import ManagedServicesAgent
+from app.agents.resource_agents.virtual_machine_agent import VirtualMachineAgent
+from app.agents.resource_agents.network_agent import NetworkAgent
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +32,35 @@ class ExecutionAgent(BaseAgent):
             agent_name="ExecutionAgent",
             agent_description=(
                 "Executes validated CRUD operations on cloud resources. "
-                "Makes API calls and provides clear feedback on results."
+                "Routes to specialized resource agents for domain-specific handling."
             ),
             temperature=0.3
         )
+        
+        # Initialize specialized resource agents
+        self.k8s_agent = K8sClusterAgent()
+        self.managed_services_agent = ManagedServicesAgent()
+        self.vm_agent = VirtualMachineAgent()
+        self.network_agent = NetworkAgent()
+        
+        # Resource type to agent mapping
+        self.resource_agent_map = {
+            "k8s_cluster": self.k8s_agent,
+            "kafka": self.managed_services_agent,
+            "gitlab": self.managed_services_agent,
+            "jenkins": self.managed_services_agent,
+            "postgres": self.managed_services_agent,
+            "postgresql": self.managed_services_agent,
+            "documentdb": self.managed_services_agent,
+            "container_registry": self.managed_services_agent,
+            "registry": self.managed_services_agent,
+            "vm": self.vm_agent,
+            "virtual_machine": self.vm_agent,
+            "firewall": self.network_agent,
+            "load_balancer": self.network_agent
+        }
+        
+        logger.info(f"✅ ExecutionAgent initialized with {len(self.resource_agent_map)} resource agent mappings")
         
         # Setup agent
         self.setup_agent()
@@ -481,6 +512,52 @@ Be professional, helpful, and always provide actionable information."""
                 f"🚀 Executing {state.operation} on {state.resource_type} "
                 f"with params: {list(state.collected_params.keys())}"
             )
+            
+            # 🆕 CHECK FOR MULTI-RESOURCE REQUESTS (e.g., "gitlab, kafka")
+            if state.resource_type and ("," in state.resource_type or " and " in state.resource_type.lower()):
+                logger.info(f"🔀 Multi-resource request detected: {state.resource_type}")
+                return await self._execute_multi_resource(state, user_roles, session_id)
+            
+            # 🆕 NEW ROUTING LOGIC: Check if we have a specialized resource agent
+            resource_agent = self.resource_agent_map.get(state.resource_type)
+            
+            if resource_agent:
+                # Route to specialized resource agent for intelligent handling
+                logger.info(f"🎯 Routing to {resource_agent.agent_name} for {state.resource_type}")
+                
+                agent_result = await resource_agent.execute_operation(
+                    operation=state.operation,
+                    params=state.collected_params,
+                    context={
+                        "session_id": session_id,
+                        "user_id": state.user_id,
+                        "user_query": state.user_query,
+                        "user_roles": user_roles,
+                        "resource_type": state.resource_type
+                    }
+                )
+                
+                if agent_result.get("success"):
+                    state.status = ConversationStatus.COMPLETED
+                    logger.info(f"✅ {resource_agent.agent_name} completed successfully")
+                else:
+                    state.status = ConversationStatus.FAILED
+                    logger.error(f"❌ {resource_agent.agent_name} failed: {agent_result.get('error')}")
+                
+                return {
+                    "agent_name": self.agent_name,
+                    "success": agent_result.get("success"),
+                    "output": agent_result.get("response", ""),
+                    "execution_result": agent_result,
+                    "metadata": {
+                        "routed_to": resource_agent.agent_name,
+                        "resource_type": state.resource_type,
+                        "operation": state.operation
+                    }
+                }
+            
+            # 🔄 FALLBACK: Traditional execution logic (if no resource agent)
+            logger.info(f"⚠️ No specialized agent for {state.resource_type}, using traditional execution")
             
             # Special handling for endpoint listing - use the list_endpoints workflow method
             if state.resource_type == "endpoint" and state.operation == "list":
@@ -1650,4 +1727,204 @@ The cluster creation payload has been generated successfully!
             message += "💡 Please check your parameters and try again. If the issue persists, contact support."
         
         return message
+    
+    async def _execute_multi_resource(
+        self,
+        state: ConversationState,
+        user_roles: List[str],
+        session_id: str
+    ) -> Dict[str, Any]:
+        """
+        Execute operations on multiple resource types in parallel.
+        
+        Example: "show gitlab and kafka in all endpoints"
+        → Executes both gitlab.list and kafka.list in parallel
+        → Combines results intelligently
+        
+        Args:
+            state: Conversation state with comma-separated resource_type
+            user_roles: User roles for permission checking
+            session_id: Session identifier
+            
+        Returns:
+            Combined execution result
+        """
+        import asyncio
+        from app.services.ai_service import ai_service
+        
+        # Parse resource types from comma-separated or "and"-separated string
+        resource_type_str = state.resource_type or ""
+        
+        # Split by comma or " and "
+        if "," in resource_type_str:
+            resource_types = [r.strip() for r in resource_type_str.split(",")]
+        elif " and " in resource_type_str.lower():
+            resource_types = [r.strip() for r in resource_type_str.lower().split(" and ")]
+        else:
+            resource_types = [resource_type_str.strip()]
+        
+        # Remove empty strings and duplicates
+        resource_types = list(set([rt for rt in resource_types if rt]))
+        
+        logger.info(f"🔀 Executing {len(resource_types)} resource operations in parallel: {resource_types}")
+        logger.info(f"👥 User roles for multi-resource execution: {user_roles}")
+        
+        # Execute all resources in parallel
+        tasks = []
+        for resource_type in resource_types:
+            # Get the resource agent
+            resource_agent = self.resource_agent_map.get(resource_type)
+            
+            if resource_agent:
+                logger.info(f"  📦 Adding {resource_type} to execution queue")
+                task = resource_agent.execute_operation(
+                    operation=state.operation,
+                    params=state.collected_params,
+                    context={
+                        "session_id": session_id,
+                        "user_id": state.user_id,
+                        "user_query": state.user_query,
+                        "user_roles": user_roles,
+                        "resource_type": resource_type
+                    }
+                )
+                tasks.append((resource_type, task))
+            else:
+                logger.warning(f"  ⚠️ No agent found for {resource_type}, skipping")
+        
+        if not tasks:
+            return {
+                "agent_name": self.agent_name,
+                "success": False,
+                "output": f"I don't have specialized handlers for these resources: {', '.join(resource_types)}",
+                "execution_result": {}
+            }
+        
+        # Execute all tasks in parallel
+        logger.info(f"⚡ Executing {len(tasks)} tasks in parallel...")
+        results = await asyncio.gather(*[task for _, task in tasks], return_exceptions=True)
+        
+        # Collect results
+        combined_results = {}
+        combined_data = []
+        all_success = True
+        error_messages = []
+        
+        for i, (resource_type, result) in enumerate(zip([rt for rt, _ in tasks], results)):
+            if isinstance(result, Exception):
+                logger.error(f"❌ {resource_type} execution failed with exception: {result}")
+                all_success = False
+                error_messages.append(f"{resource_type}: {str(result)}")
+            else:
+                combined_results[resource_type] = result
+                if result.get("success"):
+                    logger.info(f"✅ {resource_type} completed successfully")
+                    # Collect data from each resource
+                    resource_data = result.get("data", [])
+                    combined_data.extend([{
+                        **item,
+                        "_resource_type": resource_type
+                    } for item in resource_data])
+                else:
+                    logger.error(f"❌ {resource_type} failed: {result.get('error')}")
+                    all_success = False
+                    error_messages.append(f"{resource_type}: {result.get('error', 'Unknown error')}")
+        
+        # Format combined response using LLM
+        if all_success:
+            state.status = ConversationStatus.COMPLETED
+            
+            # Use LLM to intelligently combine and format the results
+            try:
+                combined_text_responses = []
+                total_count = 0
+                
+                for resource_type, result in combined_results.items():
+                    if result.get("success"):
+                        response_text = result.get("response", "")
+                        count = result.get("metadata", {}).get("count", 0)
+                        total_count += count
+                        
+                        combined_text_responses.append(f"## {resource_type.title()}\n{response_text}")
+                
+                # Combine with LLM for natural flow
+                combine_prompt = f"""You are a cloud infrastructure assistant. The user asked to see multiple resource types, and I have the results for each.
+
+**User's Query:** {state.user_query}
+
+**Results:**
+{chr(10).join(combined_text_responses)}
+
+**Instructions:**
+1. Combine these results into a single, coherent response
+2. Start with a summary: "Found X resources across Y types"
+3. Present each resource type clearly (use headings/sections)
+4. Keep the formatting from each individual result (tables, emojis, etc.)
+5. Be conversational and helpful
+6. If there are interesting patterns or insights across resource types, mention them
+
+Format as markdown. Be concise yet informative."""
+                
+                final_response = await ai_service._call_chat_with_retries(
+                    prompt=combine_prompt,
+                    max_tokens=3000,
+                    temperature=0.3,
+                    timeout=20
+                )
+                
+                if not final_response:
+                    # Fallback: simple concatenation
+                    final_response = f"# Combined Results\n\n" + "\n\n---\n\n".join(combined_text_responses)
+            
+            except Exception as e:
+                logger.error(f"Error combining results with LLM: {e}")
+                final_response = f"# Combined Results\n\n" + "\n\n---\n\n".join(combined_text_responses)
+            
+            return {
+                "agent_name": self.agent_name,
+                "success": True,
+                "output": final_response,
+                "execution_result": {
+                    "success": True,
+                    "data": combined_data,
+                    "multi_resource": True,
+                    "resource_types": resource_types,
+                    "individual_results": combined_results,
+                    "total_items": total_count
+                },
+                "metadata": {
+                    "resource_types": resource_types,
+                    "operation": state.operation,
+                    "total_items": total_count,
+                    "multi_resource_execution": True
+                }
+            }
+        else:
+            state.status = ConversationStatus.FAILED
+            
+            error_summary = f"I encountered errors while fetching {', '.join(resource_types)}:\n\n"
+            error_summary += "\n".join(f"- **{err}**" for err in error_messages)
+            
+            # Include partial results if any succeeded
+            if combined_results:
+                success_types = [rt for rt, res in combined_results.items() if res.get("success")]
+                if success_types:
+                    error_summary += f"\n\n✅ Successfully retrieved: {', '.join(success_types)}"
+                    error_summary += "\n\nShowing partial results..."
+                    
+                    # Format successful results
+                    for resource_type in success_types:
+                        result = combined_results[resource_type]
+                        error_summary += f"\n\n## {resource_type.title()}\n{result.get('response', '')}"
+            
+            return {
+                "agent_name": self.agent_name,
+                "success": False,
+                "output": error_summary,
+                "execution_result": {
+                    "success": False,
+                    "errors": error_messages,
+                    "partial_results": combined_results
+                }
+            }
 

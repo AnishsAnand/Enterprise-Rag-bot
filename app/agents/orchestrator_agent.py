@@ -39,10 +39,11 @@ class OrchestratorAgent(BaseAgent):
         self.validation_agent: Optional[BaseAgent] = None
         self.execution_agent: Optional[BaseAgent] = None
         self.rag_agent: Optional[BaseAgent] = None
-        self.function_calling_agent: Optional[BaseAgent] = None  # NEW: Modern function calling agent
+        self.function_calling_agent: Optional[BaseAgent] = None  # OLD: Kept for backwards compatibility
         
         # Feature flag for function calling mode
-        self.use_function_calling = True  # Set to False to use traditional flow
+        # 🆕 DISABLED: Now using multi-agent flow with specialized Resource Agents
+        self.use_function_calling = False  # Set to True to use old FunctionCallingAgent (bypasses multi-agent flow)
         
         # Setup agent with tools
         self.setup_agent()
@@ -312,6 +313,31 @@ Always confirm destructive operations (delete, update) before executing."""
                 "reason": "OpenWebUI metadata request - no agent routing needed"
             }
         
+        # 🆕 CHECK FOR FILTER/REFINEMENT REQUESTS ON PREVIOUS RESULTS
+        # Detect when user wants to filter/refine the last result instead of making a new query
+        filter_keywords = [
+            "filter", "show only", "just show", "only show",
+            "version below", "version above", "version less than", "version greater than",
+            "filter the above", "filter that", "from the above", "from that result",
+            "in the above", "from those", "just the", "only the", 
+            "exclude", "without", "remove", "except"
+        ]
+        
+        is_filter_request = any(keyword in user_input.lower() for keyword in filter_keywords)
+        has_previous_result = (
+            state.execution_result is not None 
+            and state.execution_result.get("data") 
+            and len(state.execution_result.get("data", [])) > 0
+        )
+        
+        if is_filter_request and has_previous_result:
+            logger.info(f"🔍 Filter/refinement request detected on previous results")
+            return {
+                "route": "filter",
+                "reason": "User wants to filter/refine previous execution results",
+                "filter_query": user_input
+            }
+        
         # Check if we're in the middle of parameter collection
         if state.status == ConversationStatus.COLLECTING_PARAMS:
             if state.missing_params:
@@ -498,6 +524,173 @@ Respond with ONLY ONE of these:
                     "route": "skip"
                 }
             
+            elif route == "filter":
+                # 🆕 FILTER/REFINEMENT REQUEST - Apply filter to previous results
+                logger.info(f"🔍 Processing filter request on previous execution results")
+                
+                # Get previous execution result
+                previous_result = state.execution_result
+                previous_data = previous_result.get("data", [])
+                
+                if not previous_data:
+                    return {
+                        "success": False,
+                        "response": "I don't have any previous results to filter. Could you please make a query first?",
+                        "route": "filter"
+                    }
+                
+                # Determine which resource agent to use based on previous operation
+                resource_type = state.resource_type
+                if not resource_type:
+                    return {
+                        "success": False,
+                        "response": "I couldn't determine what type of data to filter. Could you please specify?",
+                        "route": "filter"
+                    }
+                
+                # Get the appropriate resource agent
+                resource_agent = None
+                if self.execution_agent and hasattr(self.execution_agent, 'resource_agent_map'):
+                    resource_agent = self.execution_agent.resource_agent_map.get(resource_type)
+                
+                if not resource_agent:
+                    # Fallback: Use LLM to filter manually
+                    logger.warning(f"⚠️ No resource agent found for {resource_type}, using direct LLM filtering")
+                    from app.services.ai_service import ai_service
+                    
+                    filter_prompt = f"""Given this user query: "{user_input}"
+And this data from a previous query:
+{json.dumps(previous_data[:5], indent=2)}... ({len(previous_data)} total items)
+
+Identify what filter criteria the user wants to apply.
+Respond with a JSON object containing:
+- filter_field: The field name to filter on (e.g., "k8sVersion", "status", "name")
+- filter_operator: The operator (e.g., "less_than", "equals", "contains", "greater_than")
+- filter_value: The value to compare against
+
+Example: "version below 1.30" → {{"filter_field": "k8sVersion", "filter_operator": "less_than", "filter_value": "1.30"}}
+"""
+                    
+                    try:
+                        filter_criteria_json = await ai_service._call_chat_with_retries(
+                            prompt=filter_prompt,
+                            max_tokens=300,
+                            temperature=0.1
+                        )
+                        filter_criteria = json.loads(filter_criteria_json)
+                        
+                        # Apply filter manually
+                        filtered_data = []
+                        filter_field = filter_criteria.get("filter_field")
+                        filter_operator = filter_criteria.get("filter_operator")
+                        filter_value = filter_criteria.get("filter_value")
+                        
+                        for item in previous_data:
+                            item_value = item.get(filter_field)
+                            if filter_operator == "less_than":
+                                # Handle version comparison
+                                if item_value and str(item_value) < str(filter_value):
+                                    filtered_data.append(item)
+                            elif filter_operator == "equals":
+                                if item_value == filter_value:
+                                    filtered_data.append(item)
+                            elif filter_operator == "contains":
+                                if filter_value.lower() in str(item_value).lower():
+                                    filtered_data.append(item)
+                        
+                        # Format response with LLM
+                        format_prompt = f"""The user asked: "{user_input}"
+
+I filtered {len(previous_data)} items and found {len(filtered_data)} matching items:
+{json.dumps(filtered_data, indent=2)}
+
+Please provide a natural, helpful response to the user showing these filtered results.
+Include relevant details in a formatted way (use tables if appropriate)."""
+                        
+                        formatted_response = await ai_service._call_chat_with_retries(
+                            prompt=format_prompt,
+                            max_tokens=2000,
+                            temperature=0.3
+                        )
+                        
+                        # Update execution result with filtered data
+                        state.execution_result = {
+                            "success": True,
+                            "data": filtered_data,
+                            "resource_type": resource_type,
+                            "operation": "filter",
+                            "filter_applied": filter_criteria
+                        }
+                        state.status = ConversationStatus.COMPLETED
+                        
+                        return {
+                            "success": True,
+                            "response": formatted_response,
+                            "route": "filter",
+                            "execution_result": state.execution_result,
+                            "metadata": {
+                                "original_count": len(previous_data),
+                                "filtered_count": len(filtered_data),
+                                "filter_criteria": filter_criteria
+                            }
+                        }
+                    except Exception as e:
+                        logger.error(f"❌ Filter processing failed: {e}")
+                        return {
+                            "success": False,
+                            "response": f"I had trouble applying that filter: {str(e)}",
+                            "route": "filter"
+                        }
+                else:
+                    # Use resource agent's filter_with_llm method
+                    logger.info(f"🎯 Using {resource_agent.agent_name} to filter data")
+                    
+                    try:
+                        filtered_data = await resource_agent.filter_with_llm(
+                            data=previous_data,
+                            filter_criteria=user_input,
+                            resource_type=resource_type
+                        )
+                        
+                        # Format response
+                        formatted_response = await resource_agent.format_response_with_llm(
+                            operation="list",
+                            raw_data=filtered_data,
+                            user_query=user_input,
+                            context={
+                                "filtered": True,
+                                "original_count": len(previous_data),
+                                "endpoint_names": state.collected_params.get("endpoint_names", [])
+                            }
+                        )
+                        
+                        # Update execution result with filtered data
+                        state.execution_result = {
+                            "success": True,
+                            "data": filtered_data,
+                            "resource_type": resource_type,
+                            "operation": "filter"
+                        }
+                        state.status = ConversationStatus.COMPLETED
+                        
+                        return {
+                            "success": True,
+                            "response": formatted_response,
+                            "route": "filter",
+                            "execution_result": state.execution_result,
+                            "metadata": {
+                                "original_count": len(previous_data),
+                                "filtered_count": len(filtered_data)
+                            }
+                        }
+                    except Exception as e:
+                        logger.error(f"❌ Resource agent filter failed: {e}")
+                        return {
+                            "success": False,
+                            "response": f"I had trouble applying that filter: {str(e)}",
+                            "route": "filter"
+                        }
+            
             elif route == "function_calling":
                 # NEW: Route to modern function calling agent
                 logger.info(f"🎯 Routing to FunctionCallingAgent (modern approach)")
@@ -559,8 +752,15 @@ Respond with ONLY ONE of these:
                     # Update state based on intent detection
                     if result.get("success") and result.get("intent_detected"):
                         intent_data = result.get("intent_data", {})
+                        
+                        # Handle resource_type: convert list to comma-separated string
+                        resource_type = intent_data.get("resource_type")
+                        if isinstance(resource_type, list):
+                            resource_type = ",".join(resource_type)
+                            logger.info(f"🔧 Converted resource_type list to string: {resource_type}")
+                        
                         state.set_intent(
-                            resource_type=intent_data.get("resource_type"),
+                            resource_type=resource_type,
                             operation=intent_data.get("operation"),
                             required_params=intent_data.get("required_params", []),
                             optional_params=intent_data.get("optional_params", [])
@@ -570,6 +770,93 @@ Respond with ONLY ONE of these:
                         extracted_params = intent_data.get("extracted_params", {})
                         if extracted_params:
                             state.add_parameters(extracted_params)
+                        
+                        # 🆕 CHECK FOR CLARIFICATIONS OR AMBIGUITIES FIRST!
+                        clarification_needed = intent_data.get("clarification_needed")
+                        ambiguities = intent_data.get("ambiguities", [])
+                        
+                        logger.info(f"📋 State resource_type: {state.resource_type}, Ambiguities: {ambiguities}")
+                        
+                        # SPECIAL CASE: Multi-resource requests with null resource_type
+                        # Extract resources from ambiguity/clarification text
+                        if not state.resource_type and (ambiguities or clarification_needed):
+                            logger.info(f"🔧 Attempting to extract resources from ambiguity text")
+                            
+                            # Try to extract from ambiguities first
+                            for ambiguity in ambiguities:
+                                # Simple extraction: look for resource names we know about
+                                resources_found = []
+                                known_resources = ["gitlab", "kafka", "jenkins", "postgres", "documentdb", "container_registry", "registry"]
+                                for resource in known_resources:
+                                    if resource in ambiguity.lower():
+                                        resources_found.append(resource)
+                                
+                                if len(resources_found) >= 2:
+                                    resources_str = ",".join(resources_found)
+                                    logger.info(f"✅ Extracted multi-resource: '{resources_str}'")
+                                    state.resource_type = resources_str
+                                    state.intent = f"list_{resources_str}"
+                                    break
+                            
+                            # Also try clarification_needed text
+                            if not state.resource_type and clarification_needed:
+                                resources_found = []
+                                for resource in ["gitlab", "kafka", "jenkins", "postgres", "documentdb", "container_registry", "registry"]:
+                                    if resource in clarification_needed.lower():
+                                        resources_found.append(resource)
+                                
+                                if len(resources_found) >= 2:
+                                    resources_str = ",".join(resources_found)
+                                    logger.info(f"✅ Extracted multi-resource from clarification: '{resources_str}'")
+                                    state.resource_type = resources_str
+                                    state.intent = f"list_{resources_str}"
+                        
+                        # EXCEPTION: If resource_type has comma/and, this is multi-resource
+                        # Don't ask for clarification - proceed with execution
+                        is_multi_resource = state.resource_type and ("," in str(state.resource_type) or " and " in str(state.resource_type).lower())
+                        
+                        if is_multi_resource:
+                            logger.info(f"✅ Multi-resource confirmed: {state.resource_type}, skipping clarification")
+                            # Clear ambiguities about multiple resources
+                            ambiguities = [amb for amb in ambiguities if not any(
+                                keyword in amb.lower() for keyword in ["multiple resource", "two resource", "two different"]
+                            )]
+                            if not ambiguities:
+                                clarification_needed = None
+                        
+                        if clarification_needed or ambiguities:
+                            # IntentAgent needs clarification from user
+                            logger.info(f"🤔 Intent clarification needed or ambiguities detected")
+                            
+                            # Format ambiguities for user
+                            ambiguity_text = ""
+                            if ambiguities:
+                                ambiguity_text = f"\n\n**Ambiguities detected:**\n" + "\n".join(f"- {amb}" for amb in ambiguities)
+                            
+                            response_text = clarification_needed or "I need some clarification to proceed."
+                            response_text += ambiguity_text
+                            
+                            return {
+                                "success": True,
+                                "response": response_text,
+                                "routing": "intent",
+                                "intent_data": intent_data,
+                                "metadata": {
+                                    "clarification_needed": True,
+                                    "ambiguities": ambiguities
+                                }
+                            }
+                        
+                        # 🆕 CHECK IF RESOURCE TYPE IS NULL/NONE
+                        logger.info(f"🔍 Checking resource type: '{state.resource_type}' (type: {type(state.resource_type).__name__})")
+                        if not state.resource_type or state.resource_type == "None":
+                            logger.error(f"❌ IntentAgent failed to determine resource type")
+                            return {
+                                "success": False,
+                                "response": "I couldn't determine what resource you're asking about. Could you please clarify?",
+                                "routing": "intent",
+                                "intent_data": intent_data
+                            }
                         
                         # STEP 2: Check if we need more parameters OR if ready to execute
                         if state.missing_params:

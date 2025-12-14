@@ -255,9 +255,12 @@ async def chat_completions(
         # Determine user ID (from request or default)
         user_id = request.user or "openwebui_user"
         
-        # Default roles - Changed from ["user"] to ["viewer"] for API access
-        # TODO: Extract actual roles from JWT token or OpenWebUI authentication
-        user_roles = ["viewer"]  # viewer has read permissions for clusters/endpoints
+        # Grant full permissions for Open WebUI users
+        # Since Open WebUI is the authenticated frontend, we trust its users
+        # TODO: If you want role-based access, extract roles from JWT token or OpenWebUI headers
+        user_roles = ["admin", "developer", "viewer"]  # Full permissions for authenticated users
+        
+        logger.info(f"👤 User: {user_id} | Roles: {user_roles}")
         
         # Generate stable session ID for Open WebUI conversations
         # Open WebUI maintains conversation context via messages array

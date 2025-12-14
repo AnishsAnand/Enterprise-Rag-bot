@@ -115,14 +115,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("Milvus initialization failed (continuing): %s", e)
 
-    try:
-        test_embeddings = await ai_service.generate_embeddings(["test"])
-        if test_embeddings and len(test_embeddings[0]) > 0:
-            logger.info("✅ AI services operational")
-        else:
-            logger.warning("⚠️ AI service generate_embeddings returned empty result during startup test")
-    except Exception as e:
-        logger.exception("AI service initialization/test failed (continuing): %s", e)
+    # Skip embedding test during startup for faster reload
+    # try:
+    #     test_embeddings = await ai_service.generate_embeddings(["test"])
+    #     if test_embeddings and len(test_embeddings[0]) > 0:
+    #         logger.info("✅ AI services operational")
+    #     else:
+    #         logger.warning("⚠️ AI service generate_embeddings returned empty result during startup test")
+    # except Exception as e:
+    #     logger.exception("AI service initialization/test failed (continuing): %s", e)
+    logger.info("⚠️ Skipping embedding test for faster startup (embeddings will be tested on first use)")
 
     logger.info("✅ user_main lifespan startup complete")
     yield
