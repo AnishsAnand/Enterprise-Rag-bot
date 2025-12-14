@@ -39,6 +39,10 @@ class OrchestratorAgent(BaseAgent):
         self.validation_agent: Optional[BaseAgent] = None
         self.execution_agent: Optional[BaseAgent] = None
         self.rag_agent: Optional[BaseAgent] = None
+        self.function_calling_agent: Optional[BaseAgent] = None  # NEW: Modern function calling agent
+        
+        # Feature flag for function calling mode
+        self.use_function_calling = True  # Set to False to use traditional flow
         
         # Setup agent with tools
         self.setup_agent()
@@ -48,7 +52,8 @@ class OrchestratorAgent(BaseAgent):
         intent_agent: BaseAgent,
         validation_agent: BaseAgent,
         execution_agent: BaseAgent,
-        rag_agent: BaseAgent
+        rag_agent: BaseAgent,
+        function_calling_agent: Optional[BaseAgent] = None
     ) -> None:
         """
         Set references to specialized agents.
@@ -58,12 +63,16 @@ class OrchestratorAgent(BaseAgent):
             validation_agent: Agent for parameter validation
             execution_agent: Agent for API execution
             rag_agent: Agent for RAG-based responses
+            function_calling_agent: Modern function calling agent (optional)
         """
         self.intent_agent = intent_agent
         self.validation_agent = validation_agent
         self.execution_agent = execution_agent
         self.rag_agent = rag_agent
+        self.function_calling_agent = function_calling_agent
         logger.info("✅ Orchestrator agent configured with specialized agents")
+        if function_calling_agent:
+            logger.info("🎯 Function calling agent enabled - using modern approach")
     
     def get_system_prompt(self) -> str:
         """Return system prompt for orchestrator."""
@@ -368,19 +377,35 @@ Respond with ONLY ONE of these:
                         "reason": "Rule-based routing: documentation question detected (LLM response empty)"
                     }
                 else:
-                    logger.info(f"🎯 Rule-based fallback: assuming resource operation for '{user_input}'")
-                    return {
-                        "route": "intent",
-                        "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
-                    }
+                    # Default to function_calling if available, otherwise intent
+                    if self.use_function_calling and self.function_calling_agent:
+                        logger.info(f"🎯 Rule-based fallback: assuming resource operation → FunctionCallingAgent")
+                        return {
+                            "route": "function_calling",
+                            "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
+                        }
+                    else:
+                        logger.info(f"🎯 Rule-based fallback: assuming resource operation → IntentAgent")
+                        return {
+                            "route": "intent",
+                            "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
+                        }
             
             # Parse LLM response
             if "RESOURCE_OPERATIONS" in llm_response.upper():
-                logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → IntentAgent")
-                return {
-                    "route": "intent",
-                    "reason": "LLM detected resource operation intent"
-                }
+                # Route to FunctionCallingAgent if available, otherwise IntentAgent
+                if self.use_function_calling and self.function_calling_agent:
+                    logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → FunctionCallingAgent")
+                    return {
+                        "route": "function_calling",
+                        "reason": "LLM detected resource operation - using modern function calling"
+                    }
+                else:
+                    logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → IntentAgent (fallback)")
+                    return {
+                        "route": "intent",
+                        "reason": "LLM detected resource operation intent (traditional flow)"
+                    }
             elif "DOCUMENTATION" in llm_response.upper():
                 logger.info(f"✅ LLM routing: DOCUMENTATION → RAGAgent")
                 return {
@@ -388,12 +413,19 @@ Respond with ONLY ONE of these:
                     "reason": "LLM detected documentation question"
                 }
             else:
-                # Fallback to intent if unclear
-                logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to intent")
-                return {
-                    "route": "intent",
-                    "reason": "Ambiguous routing, defaulting to intent detection"
-                }
+                # Fallback to function_calling (if available) or intent
+                if self.use_function_calling and self.function_calling_agent:
+                    logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to function_calling")
+                    return {
+                        "route": "function_calling",
+                        "reason": "Ambiguous routing, defaulting to function calling"
+                    }
+                else:
+                    logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to intent")
+                    return {
+                        "route": "intent",
+                        "reason": "Ambiguous routing, defaulting to intent detection"
+                    }
         except Exception as e:
             logger.error(f"❌ LLM routing failed with exception: {e}, using rule-based fallback")
             
@@ -421,11 +453,19 @@ Respond with ONLY ONE of these:
                     "reason": "Rule-based routing: documentation question detected (LLM error)"
                 }
             else:
-                logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation")
-                return {
-                    "route": "intent",
-                    "reason": "Rule-based routing: resource operation assumed (LLM error)"
-                }
+                # Default to function_calling if available, otherwise intent
+                if self.use_function_calling and self.function_calling_agent:
+                    logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation → FunctionCallingAgent")
+                    return {
+                        "route": "function_calling",
+                        "reason": "Rule-based routing: resource operation assumed (LLM error)"
+                    }
+                else:
+                    logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation → IntentAgent")
+                    return {
+                        "route": "intent",
+                        "reason": "Rule-based routing: resource operation assumed (LLM error)"
+                    }
     
     async def _execute_routing(
         self,
@@ -457,6 +497,53 @@ Respond with ONLY ONE of these:
                     "response": "Processing metadata request...",
                     "route": "skip"
                 }
+            
+            elif route == "function_calling":
+                # NEW: Route to modern function calling agent
+                logger.info(f"🎯 Routing to FunctionCallingAgent (modern approach)")
+                state.handoff_to_agent("OrchestratorAgent", "FunctionCallingAgent", routing_decision["reason"])
+                
+                if self.function_calling_agent:
+                    # Build conversation history for context
+                    conversation_history = []
+                    for msg in state.conversation_history[-10:]:  # Last 10 messages
+                        conversation_history.append({
+                            "role": msg.get("role", "user"),
+                            "content": msg.get("content", "")
+                        })
+                    
+                    result = await self.function_calling_agent.execute(user_input, {
+                        "session_id": state.session_id,
+                        "user_id": state.user_id,
+                        "user_roles": user_roles or [],
+                        "conversation_history": conversation_history,
+                        "conversation_state": state.to_dict()
+                    })
+                    
+                    # Mark conversation as completed
+                    if result.get("success"):
+                        state.status = ConversationStatus.COMPLETED
+                    
+                    return {
+                        "success": result.get("success", True),
+                        "response": result.get("output", ""),
+                        "routing": "function_calling",
+                        "function_calls_made": result.get("function_calls_made", []),
+                        "iterations": result.get("iterations", 1),
+                        "metadata": {
+                            "agent_type": "function_calling",
+                            "modern_approach": True
+                        }
+                    }
+                else:
+                    # Fallback to traditional intent agent if function calling not available
+                    logger.warning("⚠️ Function calling agent not available, falling back to intent agent")
+                    return await self._execute_routing(
+                        {"route": "intent", "reason": "Fallback to traditional flow"},
+                        user_input,
+                        state,
+                        user_roles
+                    )
             
             elif route == "intent":
                 # Route to intent agent
