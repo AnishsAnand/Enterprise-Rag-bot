@@ -11,6 +11,7 @@ import json
 from app.agents.base_agent import BaseAgent
 from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus, ConversationState
 from app.services.api_executor_service import api_executor_service
+from app.services.llm_formatter_service import llm_formatter
 
 # Import specialized resource agents
 from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
@@ -182,6 +183,7 @@ Be professional, helpful, and always provide actionable information."""
             operation = data.get("operation")
             params = data.get("params", {})
             user_roles = data.get("user_roles", [])
+            user_id = data.get("user_id")  # Get user_id from context if available
             
             # Execute operation
             import asyncio
@@ -192,7 +194,8 @@ Be professional, helpful, and always provide actionable information."""
                     operation=operation,
                     params=params,
                     user_roles=user_roles,
-                    dry_run=False
+                    dry_run=False,
+                    user_id=user_id  # Pass user_id to retrieve credentials
                 )
             )
             
@@ -504,8 +507,9 @@ Be professional, helpful, and always provide actionable information."""
                     "output": state.get_missing_params_message()
                 }
             
-            # Get user roles for permission checking
+            # Get user roles and user_id for permission checking and credential retrieval
             user_roles = context.get("user_roles", []) if context else []
+            user_id = context.get("user_id") if context else None
             
             # Execute the operation
             logger.info(
@@ -906,6 +910,60 @@ Be professional, helpful, and always provide actionable information."""
                         ipc_engagement_id=None
                     )
             
+            # Special handling for Business Unit listing with LLM formatting
+            elif state.resource_type == "business_unit" and state.operation == "list":
+                logger.info("📋 Using get_business_units_list method with LLM formatting")
+                execution_result = await api_executor_service.get_business_units_list(
+                    ipc_engagement_id=None,  # Will be fetched automatically
+                    user_id=user_id
+                )
+                
+                # Apply LLM formatting if successful
+                if execution_result.get("success"):
+                    raw_data = execution_result.get("data", {})
+                    user_query = context.get("user_query", "list business units") if context else "list business units"
+                    formatted_response = await llm_formatter.format_response(
+                        resource_type="business_unit",
+                        operation="list",
+                        raw_data=raw_data,
+                        user_query=user_query
+                    )
+                    # Return early with formatted response
+                    state.status = ConversationStatus.COMPLETED
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": formatted_response,
+                        "execution_result": execution_result
+                    }
+            
+            # Special handling for Environment listing with LLM formatting
+            elif state.resource_type == "environment" and state.operation == "list":
+                logger.info("📋 Using get_environments_list method with LLM formatting")
+                execution_result = await api_executor_service.get_environments_list(
+                    ipc_engagement_id=None,  # Will be fetched automatically
+                    user_id=user_id
+                )
+                
+                # Apply LLM formatting if successful
+                if execution_result.get("success"):
+                    raw_data = execution_result.get("data", execution_result.get("environments", []))
+                    user_query = context.get("user_query", "list environments") if context else "list environments"
+                    formatted_response = await llm_formatter.format_response(
+                        resource_type="environment",
+                        operation="list",
+                        raw_data=raw_data,
+                        user_query=user_query
+                    )
+                    # Return early with formatted response
+                    state.status = ConversationStatus.COMPLETED
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": formatted_response,
+                        "execution_result": execution_result
+                    }
+            
             # Special handling for VM listing
             elif state.resource_type == "vm" and state.operation == "list":
                 logger.info("📋 Using list_vms method")
@@ -1010,13 +1068,14 @@ Be professional, helpful, and always provide actionable information."""
             
             else:
                 # Standard execution for other operations
-                execution_result = await api_executor_service.execute_operation(
-                    resource_type=state.resource_type,
-                    operation=state.operation,
-                    params=state.collected_params,
-                    user_roles=user_roles,
-                    dry_run=False
-                )
+                        execution_result = await api_executor_service.execute_operation(
+                            resource_type=state.resource_type,
+                            operation=state.operation,
+                            params=state.collected_params,
+                            user_roles=user_roles,
+                            dry_run=False,
+                            user_id=user_id  # Pass user_id to retrieve credentials
+                        )
             
             # Update conversation state with result
             state.set_execution_result(execution_result)

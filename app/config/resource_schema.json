@@ -74,6 +74,124 @@
           }
         }
       },
+      "business_unit": {
+        "operations": ["list"],
+        "aliases": ["bu", "business unit", "business units", "department", "departments"],
+        "api_endpoints": {
+          "list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}",
+            "description": "List business units (departments) for engagement with zone, environment, and VM counts"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["ipc_engagement_id"],
+            "optional": []
+          }
+        },
+        "response_mapping": {
+          "engagement": "data.engagement",
+          "departments": "data.department",
+          "department_ids": "data.department[*].id",
+          "department_names": "data.department[*].name"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_business_units": {
+            "description": "List business units for the engagement",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "list_business_units",
+                "resource": "business_unit",
+                "operation": "list",
+                "depends_on": ["ipc_engagement_id"],
+                "display_result": true,
+                "display_format": "table",
+                "display_columns": ["name", "id", "noOfEnvironments", "noOfZones", "noOfVMs", "endpoint.location"]
+              }
+            ]
+          }
+        }
+      },
+      "environment": {
+        "operations": ["list"],
+        "aliases": ["env", "environment", "environments"],
+        "api_endpoints": {
+          "list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/environmentsperengagement/{ipc_engagement_id}",
+            "description": "List environments per engagement"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["ipc_engagement_id"],
+            "optional": []
+          }
+        },
+        "response_mapping": {
+          "environments": "data",
+          "environment_ids": "data[*].id",
+          "environment_names": "data[*].name"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_environments": {
+            "description": "List environments for the engagement",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "list_environments",
+                "resource": "environment",
+                "operation": "list",
+                "depends_on": ["ipc_engagement_id"],
+                "display_result": true,
+                "display_format": "table"
+              }
+            ]
+          }
+        }
+      },
       "k8s_cluster": {
         "operations": ["create", "update", "delete", "list"],
         "api_endpoints": {
@@ -118,10 +236,15 @@
             "url": "https://ipcloud.tatacommunications.com/paasservice/paas/cluster/getIksMsWithEndpoint/{endpointId}?version={k8sVersion}&type=network&clusterType=APP",
             "description": "Get CNI drivers for datacenter + k8s version + cluster type"
           },
+          "get_business_units": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}",
+            "description": "Get business units (departments) listing for engagement. Returns BUs with their zones, environments, and VMs count."
+          },
           "get_environments": {
             "method": "GET",
-            "url": "https://ipcloud.tatacommunications.com/portalservice/environment/getEnvironmentListPerEngagement/{engagement_id}",
-            "description": "Get business units and environments for engagement"
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/environmentsperengagement/{ipc_engagement_id}",
+            "description": "Get environments listing per engagement"
           },
           "get_zones": {
             "method": "GET",
@@ -160,8 +283,12 @@
             "required": ["endpointId", "k8sVersion"],
             "optional": []
           },
+          "get_business_units": {
+            "required": ["ipc_engagement_id"],
+            "optional": []
+          },
           "get_environments": {
-            "required": ["engagement_id"],
+            "required": ["ipc_engagement_id"],
             "optional": []
           },
           "get_zones": {

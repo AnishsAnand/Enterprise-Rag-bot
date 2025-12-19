@@ -18,6 +18,7 @@ from app.routers import openai_compatible
 from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
+from app.api.routes import user_credentials
 from app.core.database import init_db
 
 load_dotenv()
@@ -151,6 +152,7 @@ app.include_router(agent_chat.router, tags=["agent-chat"])
 app.include_router(openai_compatible.router)
 
 app.include_router(auth_router)
+app.include_router(user_credentials.router)
 
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -186,6 +188,19 @@ def serve_embed_script():
     
     logger.warning("❌ embed.js not found in candidate locations: %s", candidate_paths)
     raise HTTPException(status_code=404, detail="embed.js not found")
+
+# ===================== Auth Redirects (OpenWebUI Compatibility) =====================
+@app.get("/auth")
+@app.get("/auth/login")
+async def auth_redirect():
+    """
+    Redirect /auth routes to login page for OpenWebUI compatibility.
+    OpenWebUI may redirect here on logout, so we handle it gracefully.
+    """
+    from fastapi.responses import RedirectResponse
+    # Redirect to OpenWebUI login (port 3000) or backend login (port 8000)
+    login_url = os.getenv("OPENWEBUI_LOGIN_URL", "http://localhost:3000")
+    return RedirectResponse(url=f"{login_url}/login", status_code=302)
 
 # ===================== SPA Fallback =====================
 if embedded_static_mounted:

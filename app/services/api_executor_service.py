@@ -14,6 +14,13 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# Import user credentials service
+try:
+    from app.services.user_credentials_service import user_credentials_service
+except ImportError:
+    user_credentials_service = None
+    logger.warning("⚠️ UserCredentialsService not available, will use env vars only")
+
 
 class APIExecutorService:
     """
@@ -41,9 +48,8 @@ class APIExecutorService:
         self.api_timeout = float(os.getenv("API_EXECUTOR_TIMEOUT", "30"))
         self.max_retries = int(os.getenv("API_EXECUTOR_MAX_RETRIES", "3"))
         
-        # Token management
-        self.auth_token: Optional[str] = None
-        self.token_expires_at: Optional[datetime] = None
+        # Token management - per user (since different users may have different credentials)
+        self.user_tokens: Dict[str, Dict[str, Any]] = {}  # {user_id: {"token": str, "expires_at": datetime}}
         self.token_lock = asyncio.Lock()  # Prevent concurrent token refreshes
         
         # Auth API configuration
@@ -51,10 +57,18 @@ class APIExecutorService:
             "API_AUTH_URL",
             "https://ipcloud.tatacommunications.com/portalservice/api/v1/getAuthToken"
         )
-        self.auth_email = os.getenv("API_AUTH_EMAIL", "")
-        self.auth_password = os.getenv("API_AUTH_PASSWORD", "")
+        # Keep env vars as fallback for backward compatibility
+        self.default_auth_email = os.getenv("API_AUTH_EMAIL", "")
+        self.default_auth_password = os.getenv("API_AUTH_PASSWORD", "")
         
-        # Engagement caching - store engagement ID per email
+        # Per-user session storage for engagement IDs and other frequently accessed data
+        # Structure: {user_id: {"paas_engagement_id": int, "ipc_engagement_id": int, 
+        #                       "engagement_data": dict, "cached_at": datetime, "endpoints": list}}
+        self.user_sessions: Dict[str, Dict[str, Any]] = {}
+        self.session_cache_duration = timedelta(hours=24)  # Cache for 24 hours (they rarely change)
+        self.session_lock = asyncio.Lock()  # Prevent concurrent session updates
+        
+        # Legacy engagement caching - kept for backward compatibility
         self.cached_engagement: Optional[Dict[str, Any]] = None
         self.engagement_cache_time: Optional[datetime] = None
         self.engagement_cache_duration = timedelta(hours=1)  # Cache for 1 hour
@@ -74,23 +88,119 @@ class APIExecutorService:
             logger.error(f"❌ Failed to parse resource schema: {str(e)}")
             self.resource_schema = {"resources": {}}
     
-    async def _fetch_auth_token(self) -> Optional[str]:
+    def _get_user_id_from_email(self, email: str = None) -> str:
+        """
+        Get user ID from email for session storage.
+        
+        Args:
+            email: User email (uses default if not provided)
+            
+        Returns:
+            User ID (email or 'default')
+        """
+        if email:
+            return email
+        if self.default_auth_email:
+            return self.default_auth_email
+        return "default"
+    
+    async def _get_user_session(self, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get user session data from cache.
+        
+        Args:
+            user_id: User ID (email)
+            force_refresh: Force refresh the session
+            
+        Returns:
+            User session dict or empty dict if not cached or expired
+        """
+        if not user_id:
+            user_id = self._get_user_id_from_email()
+        
+        async with self.session_lock:
+            session = self.user_sessions.get(user_id, {})
+            
+            if not session or force_refresh:
+                return {}
+            
+            # Check if session is expired
+            cached_at = session.get("cached_at")
+            if cached_at and datetime.utcnow() < (cached_at + self.session_cache_duration):
+                logger.debug(f"✅ Using cached session for user: {user_id}")
+                return session
+            else:
+                logger.debug(f"⏰ Session expired for user: {user_id}")
+                return {}
+    
+    async def _update_user_session(self, user_id: str = None, **kwargs) -> None:
+        """
+        Update user session data in cache.
+        
+        Args:
+            user_id: User ID (email)
+            **kwargs: Session data to update (paas_engagement_id, ipc_engagement_id, etc.)
+        """
+        if not user_id:
+            user_id = self._get_user_id_from_email()
+        
+        async with self.session_lock:
+            if user_id not in self.user_sessions:
+                self.user_sessions[user_id] = {
+                    "cached_at": datetime.utcnow()
+                }
+            
+            # Update session data
+            self.user_sessions[user_id].update(kwargs)
+            self.user_sessions[user_id]["cached_at"] = datetime.utcnow()
+            
+            logger.debug(f"💾 Updated session for user: {user_id} with keys: {list(kwargs.keys())}")
+    
+    async def _clear_user_session(self, user_id: str = None) -> None:
+        """
+        Clear user session data from cache.
+        
+        Args:
+            user_id: User ID (email), clears all if None
+        """
+        async with self.session_lock:
+            if user_id:
+                if user_id in self.user_sessions:
+                    del self.user_sessions[user_id]
+                    logger.info(f"🗑️ Cleared session for user: {user_id}")
+            else:
+                self.user_sessions.clear()
+                logger.info("🗑️ Cleared all user sessions")
+    
+    async def _fetch_auth_token(
+        self,
+        auth_email: str = None,
+        auth_password: str = None
+    ) -> Optional[str]:
         """
         Fetch authentication token from the auth API.
+        
+        Args:
+            auth_email: Email for authentication (uses default from env if not provided)
+            auth_password: Password for authentication (uses default from env if not provided)
         
         Returns:
             Bearer token string or None if failed
         """
-        if not self.auth_email or not self.auth_password:
-            logger.error("❌ API_AUTH_EMAIL or API_AUTH_PASSWORD not configured")
+        # Use provided credentials or fall back to env vars
+        email = auth_email or self.default_auth_email
+        password = auth_password or self.default_auth_password
+        
+        if not email or not password:
+            logger.error("❌ API credentials not configured (email or password missing)")
             return None
         
         try:
             client = await self._get_http_client()
             
             auth_payload = {
-                "email": self.auth_email,
-                "password": self.auth_password
+                "email": email,
+                "password": password
             }
             
             logger.info(f"🔑 Fetching auth token from {self.auth_url}")
@@ -105,6 +215,13 @@ class APIExecutorService:
             response.raise_for_status()
             data = response.json()
             
+            # Check for error response
+            status_code = data.get("statusCode")
+            if status_code == 500:
+                error_msg = data.get("accessToken", "Unknown error")
+                logger.error(f"❌ Auth API returned error: {error_msg}")
+                return None
+            
             # Extract token from response
             # Tata Communications API returns: {"statusCode": 200, "accessToken": "..."}
             token = (
@@ -114,12 +231,12 @@ class APIExecutorService:
                 data.get("authToken")
             )
             
-            if token:
+            if token and token != "Failed to generate token after retries":
                 logger.info(f"✅ Successfully fetched auth token (token length: {len(token)})")
                 logger.debug(f"Token starts with: {token[:50]}...")
                 return token
             else:
-                logger.error(f"❌ Token not found in response. Keys available: {list(data.keys())}")
+                logger.error(f"❌ Token not found in response or failed. Response: {data}")
                 return None
                 
         except httpx.HTTPStatusError as e:
@@ -129,34 +246,84 @@ class APIExecutorService:
             logger.error(f"❌ Failed to fetch auth token: {str(e)}")
             return None
     
-    async def _ensure_valid_token(self) -> bool:
+    async def _ensure_valid_token(
+        self,
+        user_id: str = None,
+        auth_email: str = None,
+        auth_password: str = None
+    ) -> bool:
         """
-        Ensure we have a valid authentication token.
+        Ensure we have a valid authentication token for a user.
         Fetches a new token if expired or missing.
+        
+        Args:
+            user_id: User identifier (for per-user token caching)
+            auth_email: Email for authentication (uses default from env if not provided)
+            auth_password: Password for authentication (uses default from env if not provided)
         
         Returns:
             True if valid token available, False otherwise
         """
+        # Use default user_id if not provided
+        cache_key = user_id or "default"
+        
         async with self.token_lock:
             # Check if token is still valid (with 5-minute buffer)
-            if self.auth_token and self.token_expires_at:
-                if datetime.utcnow() < (self.token_expires_at - timedelta(minutes=5)):
-                    logger.debug("✅ Using cached auth token")
-                    return True
+            user_token_data = self.user_tokens.get(cache_key)
+            if user_token_data:
+                token = user_token_data.get("token")
+                expires_at = user_token_data.get("expires_at")
+                if token and expires_at:
+                    if datetime.utcnow() < (expires_at - timedelta(minutes=5)):
+                        logger.debug(f"✅ Using cached auth token for user: {cache_key}")
+                        return True
             
             # Fetch new token
-            logger.info("🔄 Refreshing auth token...")
-            new_token = await self._fetch_auth_token()
+            logger.info(f"🔄 Refreshing auth token for user: {cache_key}")
+            new_token = await self._fetch_auth_token(auth_email, auth_password)
             
             if new_token:
-                self.auth_token = new_token
-                # Token is valid for 10 minutes, cache for 8 minutes to allow buffer
-                self.token_expires_at = datetime.utcnow() + timedelta(minutes=8)
-                logger.info("✅ Auth token refreshed successfully")
+                # Store token per user
+                self.user_tokens[cache_key] = {
+                    "token": new_token,
+                    "expires_at": datetime.utcnow() + timedelta(minutes=8)  # Cache for 8 minutes
+                }
+                logger.info(f"✅ Auth token refreshed successfully for user: {cache_key}")
                 return True
             else:
-                logger.error("❌ Failed to refresh auth token")
+                logger.error(f"❌ Failed to refresh auth token for user: {cache_key}")
                 return False
+    
+    async def _get_or_refresh_token(
+        self,
+        user_id: str = None,
+        auth_email: str = None,
+        auth_password: str = None
+    ) -> Optional[str]:
+        """
+        Get a valid authentication token, refreshing if necessary.
+        
+        Args:
+            user_id: User identifier (for per-user token caching)
+            auth_email: Email for authentication (uses default from env if not provided)
+            auth_password: Password for authentication (uses default from env if not provided)
+        
+        Returns:
+            Valid token string or None if unable to get token
+        """
+        cache_key = user_id or "default"
+        
+        # Ensure we have a valid token
+        if await self._ensure_valid_token(user_id, auth_email, auth_password):
+            # Return the token
+            user_token_data = self.user_tokens.get(cache_key, {})
+            token = user_token_data.get("token")
+            if token:
+                logger.debug(f"✅ Returning valid token for user: {cache_key}")
+                return token
+        
+        logger.error(f"❌ No valid token available for user: {cache_key}")
+        return None
     
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -167,9 +334,55 @@ class APIExecutorService:
             )
         return self.http_client
     
-    async def _get_auth_headers(self) -> Dict[str, str]:
+    def _get_user_credentials(self, user_id: str = None) -> Optional[Dict[str, str]]:
         """
-        Get authentication headers with current token.
+        Get API credentials for a user.
+        First tries to get from database by email, then by username, then falls back to env vars.
+        
+        Args:
+            user_id: User identifier (can be email or username)
+            
+        Returns:
+            Dict with 'email' and 'password' keys, or None if not found
+        """
+        if user_credentials_service and user_id:
+            # First try to get by email (most common case from OpenWebUI X-User-Email header)
+            credentials = user_credentials_service.get_credentials_by_email(user_id)
+            if credentials:
+                logger.info(f"✅ Got credentials by email for: {user_id}")
+                return credentials
+            
+            # Then try by username
+            credentials = user_credentials_service.get_user_credentials(user_id)
+            if credentials:
+                logger.info(f"✅ Got credentials by username for: {user_id}")
+                return credentials
+        
+        # Fall back to env vars if user_id not provided or credentials not found
+        if self.default_auth_email and self.default_auth_password:
+            if user_id:
+                logger.info(f"⚠️ No stored credentials for {user_id}, using default from env")
+            return {
+                "email": self.default_auth_email,
+                "password": self.default_auth_password
+            }
+        
+        logger.warning(f"❌ No credentials found for user: {user_id}")
+        return None
+    
+    async def _get_auth_headers(
+        self,
+        user_id: str = None,
+        auth_email: str = None,
+        auth_password: str = None
+    ) -> Dict[str, str]:
+        """
+        Get authentication headers with current token for a user.
+        
+        Args:
+            user_id: User identifier (for per-user token caching)
+            auth_email: Email for authentication (uses default from env if not provided)
+            auth_password: Password for authentication (uses default from env if not provided)
         
         Returns:
             Dictionary of headers including authorization
@@ -179,14 +392,18 @@ class APIExecutorService:
         }
         
         # Ensure we have a valid token
-        await self._ensure_valid_token()
+        await self._ensure_valid_token(user_id, auth_email, auth_password)
         
-        # Add authentication with dynamically fetched token
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-            logger.debug("✅ Using dynamically fetched auth token")
+        # Get token for this user
+        cache_key = user_id or "default"
+        user_token_data = self.user_tokens.get(cache_key, {})
+        token = user_token_data.get("token")
+        
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            logger.debug(f"✅ Using dynamically fetched auth token for user: {cache_key}")
         else:
-            logger.warning("⚠️ No auth token available for API call")
+            logger.warning(f"⚠️ No auth token available for API call (user: {cache_key})")
         
         return headers
     
@@ -196,24 +413,30 @@ class APIExecutorService:
             await self.http_client.aclose()
             self.http_client = None
     
-    async def get_engagement_id(self, force_refresh: bool = False) -> Optional[int]:
+    async def get_engagement_id(self, force_refresh: bool = False, user_id: str = None) -> Optional[int]:
         """
         Get engagement ID for the authenticated user.
-        Caches the result to avoid repeated API calls.
+        Uses per-user session storage to avoid repeated API calls.
         
         Args:
             force_refresh: Force fetch even if cached
+            user_id: User ID (email) for session lookup
             
         Returns:
-            Engagement ID or None if failed
+            PAAS Engagement ID or None if failed
         """
-        # Check cache first
-        if not force_refresh and self.cached_engagement and self.engagement_cache_time:
-            if datetime.utcnow() < (self.engagement_cache_time + self.engagement_cache_duration):
-                logger.debug(f"✅ Using cached engagement ID: {self.cached_engagement.get('id')}")
-                return self.cached_engagement.get("id")
+        if not user_id:
+            user_id = self._get_user_id_from_email()
         
-        # Fetch engagement details
+        # Check user session cache first
+        if not force_refresh:
+            session = await self._get_user_session(user_id)
+            if session and "paas_engagement_id" in session:
+                paas_id = session["paas_engagement_id"]
+                logger.debug(f"✅ Using cached PAAS engagement ID from session: {paas_id}")
+                return paas_id
+        
+        # Fetch engagement details from API
         logger.info("🔍 Fetching engagement details from API...")
         result = await self.execute_operation(
             resource_type="engagement",
@@ -229,29 +452,52 @@ class APIExecutorService:
                 engagements = data["data"]
                 if engagements and len(engagements) > 0:
                     engagement = engagements[0]  # Use first engagement
+                    paas_engagement_id = engagement.get("id")
+                    
+                    # Update user session with engagement data
+                    await self._update_user_session(
+                        user_id=user_id,
+                        paas_engagement_id=paas_engagement_id,
+                        engagement_data=engagement
+                    )
+                    
+                    # Also update legacy cache for backward compatibility
                     self.cached_engagement = engagement
                     self.engagement_cache_time = datetime.utcnow()
                     
-                    logger.info(f"✅ Cached engagement: {engagement.get('engagementName')} (ID: {engagement.get('id')})")
-                    return engagement.get("id")
+                    logger.info(f"✅ Cached PAAS engagement: {engagement.get('engagementName')} (ID: {paas_engagement_id})")
+                    return paas_engagement_id
         
         logger.error("❌ Failed to fetch engagement ID")
         return None
     
-    async def get_ipc_engagement_id(self, engagement_id: int = None) -> Optional[int]:
+    async def get_ipc_engagement_id(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Optional[int]:
         """
         Convert PAAS engagement ID to IPC engagement ID.
-        Required for calling getTemplatesByEngagement API.
+        Uses per-user session storage to avoid repeated API calls.
         
         Args:
             engagement_id: PAAS Engagement ID (fetches if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
             
         Returns:
             IPC Engagement ID or None if failed
         """
+        if not user_id:
+            user_id = self._get_user_id_from_email()
+        
+        # Check user session cache first
+        if not force_refresh:
+            session = await self._get_user_session(user_id)
+            if session and "ipc_engagement_id" in session:
+                ipc_id = session["ipc_engagement_id"]
+                logger.debug(f"✅ Using cached IPC engagement ID from session: {ipc_id}")
+                return ipc_id
+        
         # Get PAAS engagement ID if not provided
         if engagement_id is None:
-            engagement_id = await self.get_engagement_id()
+            engagement_id = await self.get_engagement_id(user_id=user_id)
             if not engagement_id:
                 return None
         
@@ -270,25 +516,46 @@ class APIExecutorService:
             if data.get("status") == "success" and data.get("data"):
                 ipc_engid = data["data"].get("ipc_engid")
                 if ipc_engid:
-                    logger.info(f"✅ Got IPC engagement ID: {ipc_engid}")
+                    # Update user session with IPC engagement ID
+                    await self._update_user_session(
+                        user_id=user_id,
+                        ipc_engagement_id=ipc_engid,
+                        paas_engagement_id=engagement_id
+                    )
+                    
+                    logger.info(f"✅ Cached IPC engagement ID: {ipc_engid}")
                     return ipc_engid
         
         logger.error("❌ Failed to get IPC engagement ID")
         return None
     
-    async def get_endpoints(self, engagement_id: int = None) -> Optional[List[Dict[str, Any]]]:
+    async def get_endpoints(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
         Get available endpoints (data centers) for an engagement.
+        Uses per-user session storage to avoid repeated API calls.
         
         Args:
             engagement_id: Engagement ID (fetches if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
             
         Returns:
             List of endpoint dicts or None if failed
         """
+        if not user_id:
+            user_id = self._get_user_id_from_email()
+        
+        # Check user session cache first
+        if not force_refresh:
+            session = await self._get_user_session(user_id)
+            if session and "endpoints" in session:
+                endpoints = session["endpoints"]
+                logger.debug(f"✅ Using cached endpoints from session ({len(endpoints)} endpoints)")
+                return endpoints
+        
         # Get engagement ID if not provided
         if engagement_id is None:
-            engagement_id = await self.get_engagement_id()
+            engagement_id = await self.get_engagement_id(user_id=user_id)
             if not engagement_id:
                 return None
         
@@ -305,7 +572,14 @@ class APIExecutorService:
             # API returns {"status": "success", "data": [{...}]}
             if isinstance(data, dict) and "data" in data:
                 endpoints = data["data"]
-                logger.info(f"✅ Found {len(endpoints)} endpoints")
+                
+                # Update user session with endpoints
+                await self._update_user_session(
+                    user_id=user_id,
+                    endpoints=endpoints
+                )
+                
+                logger.info(f"✅ Cached {len(endpoints)} endpoints")
                 return endpoints
         
         logger.error("❌ Failed to fetch endpoints")
@@ -747,7 +1021,7 @@ class APIExecutorService:
             
             logger.info(f"📡 Calling VM list API: GET {url}")
             
-            # Get auth headers
+            # Get auth headers (will use default/env credentials if user_id not provided)
             headers = await self._get_auth_headers()
             
             # Get HTTP client
@@ -1142,7 +1416,10 @@ class APIExecutorService:
         operation: str,
         params: Dict[str, Any],
         user_roles: List[str] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        user_id: str = None,
+        auth_email: str = None,
+        auth_password: str = None
     ) -> Dict[str, Any]:
         """
         Execute a CRUD operation on a resource.
@@ -1159,6 +1436,16 @@ class APIExecutorService:
         """
         start_time = datetime.utcnow()
         
+        # Get user credentials if user_id is provided and credentials not explicitly passed
+        if user_id and not auth_email and not auth_password:
+            credentials = self._get_user_credentials(user_id)
+            if credentials:
+                auth_email = credentials.get("email")
+                auth_password = credentials.get("password")
+                logger.info(f"✅ Retrieved API credentials for user: {user_id}")
+            else:
+                logger.warning(f"⚠️ No API credentials found for user: {user_id}, using default/env")
+        
         try:
             # Get operation configuration
             operation_config = self.get_operation_config(resource_type, operation)
@@ -1172,12 +1459,36 @@ class APIExecutorService:
             # Check permissions
             if user_roles is not None:
                 if not self.check_permissions(resource_type, operation, user_roles):
-                    return {
-                        "success": False,
-                        "error": f"Permission denied for {operation} on {resource_type}",
-                        "required_permissions": operation_config.get("permissions", []),
-                        "timestamp": start_time.isoformat()
-                    }
+                    # Check if this is a read-only user trying to perform actions
+                    is_read_only = user_roles == ["viewer"]
+                    is_write_operation = operation in ["create", "update", "delete", "provision"]
+                    
+                    if is_read_only and is_write_operation:
+                        # Provide enrollment information for unauthorized users
+                        return {
+                            "success": False,
+                            "error": "Unauthorized",
+                            "message": "You don't have permission to perform this action.",
+                            "enrollment_info": {
+                                "title": "Want to perform actions?",
+                                "description": "Enroll for full access to create and manage cloud resources.",
+                                "enrollment_url": "https://cloud.tatacommunications.com/enroll",
+                                "contact": "support@tatacommunications.com",
+                                "sso_login": "Sign in with Tata Communications for full access"
+                            },
+                            "required_permissions": operation_config.get("permissions", []),
+                            "your_permissions": user_roles,
+                            "timestamp": start_time.isoformat()
+                        }
+                    else:
+                        # Generic permission denied
+                        return {
+                            "success": False,
+                            "error": f"Permission denied for {operation} on {resource_type}",
+                            "required_permissions": operation_config.get("permissions", []),
+                            "your_permissions": user_roles,
+                            "timestamp": start_time.isoformat()
+                        }
             
             # Validate parameters
             validation_result = self.validate_parameters(resource_type, operation, params)
@@ -1201,7 +1512,13 @@ class APIExecutorService:
             
             # Execute API call
             endpoint_config = operation_config["endpoint"]
-            result = await self._make_api_call(endpoint_config, params)
+            result = await self._make_api_call(
+                endpoint_config,
+                params,
+                user_id=user_id,
+                auth_email=auth_email,
+                auth_password=auth_password
+            )
             
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
@@ -1229,7 +1546,10 @@ class APIExecutorService:
     async def _make_api_call(
         self,
         endpoint_config: Dict[str, Any],
-        params: Dict[str, Any]
+        params: Dict[str, Any],
+        user_id: str = None,
+        auth_email: str = None,
+        auth_password: str = None
     ) -> Dict[str, Any]:
         """
         Make the actual API call with automatic token refresh.
@@ -1238,14 +1558,17 @@ class APIExecutorService:
         Args:
             endpoint_config: Endpoint configuration (method, url, etc.)
             params: Request parameters
+            user_id: User identifier (for per-user token caching)
+            auth_email: Email for authentication (uses default from env if not provided)
+            auth_password: Password for authentication (uses default from env if not provided)
             
         Returns:
             API response dict
         """
         # Ensure we have a valid token before making the call
-        token_valid = await self._ensure_valid_token()
+        token_valid = await self._ensure_valid_token(user_id, auth_email, auth_password)
         if not token_valid:
-            logger.error("❌ Cannot make API call: No valid auth token")
+            logger.error(f"❌ Cannot make API call: No valid auth token (user: {user_id or 'default'})")
             return {
                 "success": False,
                 "error": "Authentication failed: Unable to obtain valid token"
@@ -1275,12 +1598,9 @@ class APIExecutorService:
         headers = endpoint_config.get("headers", {})
         headers.setdefault("Content-Type", "application/json")
         
-        # Add authentication with dynamically fetched token
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
-            logger.debug("✅ Using dynamically fetched auth token")
-        else:
-            logger.warning("⚠️ No auth token available for API call")
+        # Get auth headers with user-specific token
+        auth_headers = await self._get_auth_headers(user_id, auth_email, auth_password)
+        headers.update(auth_headers)
         
         try:
             logger.info(f"🌐 API Call: {method} {url}")
@@ -1896,6 +2216,223 @@ class APIExecutorService:
         # TODO: Implement if there's a specific API endpoint
         # For now, return default from createcluster.ts line 110
         return "E-IPCTEAM-1602"
+    
+    async def get_business_units_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get business units (departments) listing for engagement.
+        Uses per-user session storage to avoid repeated API calls.
+        
+        Args:
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
+            
+        Returns:
+            Dict with business units data including zones, environments, and VMs count
+        """
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+            
+            # Check user session cache first
+            if not force_refresh:
+                session = await self._get_user_session(user_id)
+                if session and "business_units" in session:
+                    bu_data = session["business_units"]
+                    logger.debug(f"✅ Using cached business units from session ({len(bu_data.get('departments', []))} BUs)")
+                    return {
+                        "success": True,
+                        "data": bu_data,
+                        "engagement": bu_data.get("engagement"),
+                        "departments": bu_data.get("departments", []),
+                        "ipc_engagement_id": session.get("ipc_engagement_id")
+                    }
+            
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "data": None
+                    }
+                
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}"
+            logger.info(f"🏢 Fetching business units from: {url}")
+            
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {
+                    "success": False,
+                    "error": "Failed to get authentication token",
+                    "data": None
+                }
+            
+            # Make API call
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get("status") == "success":
+                    departments = data.get("data", {}).get("department", [])
+                    engagement_info = data.get("data", {}).get("engagement", {})
+                    bu_data = data.get("data")
+                    
+                    # Update user session with business units data
+                    await self._update_user_session(
+                        user_id=user_id,
+                        business_units=bu_data
+                    )
+                    
+                    logger.info(f"✅ Cached {len(departments)} business units for engagement '{engagement_info.get('name')}'")
+                    
+                    return {
+                        "success": True,
+                        "data": bu_data,
+                        "engagement": engagement_info,
+                        "departments": departments,
+                        "ipc_engagement_id": ipc_engagement_id
+                    }
+                else:
+                    logger.error(f"❌ API returned error: {data}")
+                    return {
+                        "success": False,
+                        "error": data.get("message", "Unknown error"),
+                        "data": None
+                    }
+                    
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching business units: {e}")
+            return {
+                "success": False,
+                "error": f"HTTP {e.response.status_code}: {str(e)}",
+                "data": None
+            }
+        except Exception as e:
+            logger.error(f"❌ Error fetching business units: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": None
+            }
+    
+    async def get_environments_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get environments listing per engagement.
+        Uses per-user session storage to avoid repeated API calls.
+        
+        Args:
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
+            
+        Returns:
+            Dict with environments data
+        """
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+            
+            # Check user session cache first
+            if not force_refresh:
+                session = await self._get_user_session(user_id)
+                if session and "environments_list" in session:
+                    environments = session["environments_list"]
+                    logger.debug(f"✅ Using cached environments from session ({len(environments)} environments)")
+                    return {
+                        "success": True,
+                        "data": environments,
+                        "environments": environments,
+                        "ipc_engagement_id": session.get("ipc_engagement_id")
+                    }
+            
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "data": None
+                    }
+                
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/environmentsperengagement/{ipc_engagement_id}"
+            logger.info(f"🌍 Fetching environments from: {url}")
+            
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {
+                    "success": False,
+                    "error": "Failed to get authentication token",
+                    "data": None
+                }
+            
+            # Make API call
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get("status") == "success":
+                    environments = data.get("data", [])
+                    
+                    # Update user session with environments data
+                    # Note: Using key "environments_list" to avoid conflict with "environments" in business_units
+                    await self._update_user_session(
+                        user_id=user_id,
+                        environments_list=environments
+                    )
+                    
+                    logger.info(f"✅ Cached {len(environments)} environments")
+                    
+                    return {
+                        "success": True,
+                        "data": environments,
+                        "environments": environments,
+                        "ipc_engagement_id": ipc_engagement_id
+                    }
+                else:
+                    logger.error(f"❌ API returned error: {data}")
+                    return {
+                        "success": False,
+                        "error": data.get("message", "Unknown error"),
+                        "data": None
+                    }
+                    
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching environments: {e}")
+            return {
+                "success": False,
+                "error": f"HTTP {e.response.status_code}: {str(e)}",
+                "data": None
+            }
+        except Exception as e:
+            logger.error(f"❌ Error fetching environments: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": None
+            }
     
     def __repr__(self) -> str:
         resource_count = len(self.resource_schema.get("resources", {}))

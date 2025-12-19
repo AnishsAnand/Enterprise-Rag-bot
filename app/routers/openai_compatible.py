@@ -252,15 +252,19 @@ async def chat_completions(
             for msg in request.messages[:-1]
         ]
         
-        # Determine user ID (from request or default)
-        user_id = request.user or "openwebui_user"
+        # Extract user info from OpenWebUI headers
+        user_email = http_request.headers.get("X-User-Email", "")
+        user_role = http_request.headers.get("X-User-Role", "user")
         
-        # Grant full permissions for Open WebUI users
-        # Since Open WebUI is the authenticated frontend, we trust its users
-        # TODO: If you want role-based access, extract roles from JWT token or OpenWebUI headers
-        user_roles = ["admin", "developer", "viewer"]  # Full permissions for authenticated users
+        # Use email as user_id for credential lookup (stored during login)
+        # Falls back to request.user or "openwebui_user" if no email header
+        user_id = user_email or request.user or "openwebui_user"
         
-        logger.info(f"👤 User: {user_id} | Roles: {user_roles}")
+        # All authenticated OpenWebUI users get full access
+        # Actual authorization happens at the API executor level via Tata Auth API
+        # User's stored credentials (from signup/login) will be used for API calls
+        user_roles = ["admin", "developer", "viewer", "user"]
+        logger.info(f"👤 User: {user_id} | Using stored credentials for API auth")
         
         # Generate stable session ID for Open WebUI conversations
         # Open WebUI maintains conversation context via messages array

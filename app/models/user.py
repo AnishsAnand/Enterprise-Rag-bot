@@ -8,3 +8,6 @@ class User(Base):
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     role = Column(String, default='user')
+    # API credentials for Tata Communications API
+    api_auth_email = Column(String, nullable=True)
+    api_auth_password = Column(String, nullable=True)

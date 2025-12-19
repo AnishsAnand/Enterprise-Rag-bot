@@ -99,11 +99,17 @@ class VirtualMachineAgent(BaseResourceAgent):
             vms = result.get("data", [])
             logger.info(f"✅ Found {len(vms)} VMs")
             
-            # Format with LLM - provide better context
-            user_query = context.get("user_query", "")
+            # Simplify VM data for better LLM processing
+            simplified_vms = self._simplify_vm_data(vms)
             
-            # Create a more VM-friendly formatted response
-            formatted_response = await self._format_vm_response(vms, user_query, endpoint_names)
+            # Use common LLM formatter
+            user_query = context.get("user_query", "")
+            formatted_response = await self.format_response_with_llm(
+                operation="list",
+                raw_data=simplified_vms,
+                user_query=user_query,
+                context={"endpoint_names": endpoint_names}
+            )
             
             return {
                 "success": True,
@@ -115,61 +121,21 @@ class VirtualMachineAgent(BaseResourceAgent):
             logger.error(f"❌ Error listing VMs: {str(e)}", exc_info=True)
             raise
     
-    async def _format_vm_response(self, vms: List[Dict[str, Any]], user_query: str, endpoint_names: List[str]) -> str:
-        """Format VM data using LLM with VM-specific context."""
-        try:
-            from app.services.ai_service import ai_service
-            
-            # Simplify VM data for LLM (the nested structure is too complex)
-            simplified_vms = []
-            for vm_item in vms:
-                vm = vm_item.get("virtualMachine", {})
-                simplified_vms.append({
-                    "vmName": vm.get("vmName", "N/A"),
-                    "vmuuid": vm.get("vmuuid", "N/A"),
-                    "endpoint": vm.get("endpoint", {}).get("endpointName", "N/A"),
-                    "engagement": vm.get("engagement", {}).get("engagementName", "N/A"),
-                    "vmId": vm.get("vmId", "N/A"),
-                    "storage": vm.get("storage", 0),
-                    "isPpuMeteringEnabled": vm.get("isPpuMeteringEnabled", "no"),
-                    "isBudgetingEnabled": vm.get("isBudgetingEnabled", "no"),
-                    "tags": vm.get("tags", []),
-                    "vmAttributes": vm.get("vmAttributes", {})
-                })
-            
-            locations_str = ", ".join(endpoint_names) if endpoint_names else "all locations"
-            
-            prompt = f"""You are a cloud infrastructure assistant. Format this VM list for the user.
-
-**User's Query:** {user_query}
-
-**VMs Found:** {len(simplified_vms)} vm(s) in {locations_str}
-
-**VM Data:**
-```json
-{simplified_vms[:50]}
-```
-
-**Instructions:**
-1. Start with a summary: "Found {len(simplified_vms)} vm(s)" with location info
-2. Present VMs in a clean format - you can use tables or lists
-3. Key fields to show: vmName, endpoint, storage, engagement
-4. Use emojis for visual clarity
-5. Keep it concise and readable
-6. If there are many VMs, show the most important ones and mention the total count
-
-Format as markdown with tables or lists. Be helpful and conversational."""
-            
-            response = await ai_service._call_chat_with_retries(
-                prompt=prompt,
-                max_tokens=2000,
-                temperature=0.3,
-                timeout=15
-            )
-            
-            return response if response else f"Found {len(vms)} VM(s) in {locations_str}"
-            
-        except Exception as e:
-            logger.error(f"Error formatting VM response: {str(e)}")
-            return f"Found {len(vms)} VM(s) across {', '.join(endpoint_names) if endpoint_names else 'all endpoints'}"
+    def _simplify_vm_data(self, vms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Simplify nested VM data for LLM processing."""
+        simplified_vms = []
+        for vm_item in vms:
+            vm = vm_item.get("virtualMachine", {})
+            simplified_vms.append({
+                "vmName": vm.get("vmName", "N/A"),
+                "vmuuid": vm.get("vmuuid", "N/A"),
+                "endpoint": vm.get("endpoint", {}).get("endpointName", "N/A"),
+                "engagement": vm.get("engagement", {}).get("engagementName", "N/A"),
+                "vmId": vm.get("vmId", "N/A"),
+                "storage": vm.get("storage", 0),
+                "isPpuMeteringEnabled": vm.get("isPpuMeteringEnabled", "no"),
+                "isBudgetingEnabled": vm.get("isBudgetingEnabled", "no"),
+                "tags": vm.get("tags", [])
+            })
+        return simplified_vms
 

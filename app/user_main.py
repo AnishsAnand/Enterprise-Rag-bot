@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Header
+from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -185,6 +186,18 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # ------------------------ Routers ------------------------
 app.include_router(auth_router)
+
+# Include user credentials router
+from app.api.routes import user_credentials
+app.include_router(user_credentials.router)
+logger.info("✅ Included user_credentials.router for API credential management")
+
+# Include Tata auth router
+from app.api.routes import tata_auth, openwebui_auth
+app.include_router(tata_auth.router)
+app.include_router(openwebui_auth.router)
+logger.info("✅ Included tata_auth.router for Tata Communications authentication")
+logger.info("✅ Included openwebui_auth.router for OpenWebUI login integration")
 
 if hasattr(rag_widget, "router"):
     app.include_router(rag_widget.router)
@@ -624,6 +637,63 @@ if cdn_static_path.exists() and cdn_static_path.is_dir():
     logger.info(f"✅ CDN static mounted at /cdn -> {cdn_static_path}")
 else:
     logger.info(f"⚠️ CDN static not mounted (folder {cdn_static_path} not found)")
+
+# ------------------------ Auth Redirects (OpenWebUI Compatibility) ------------------------
+@app.get("/auth")
+@app.get("/auth/login")
+async def auth_redirect(request: StarletteRequest):
+    """
+    Redirect /auth routes to login page for OpenWebUI compatibility.
+    OpenWebUI may redirect here on logout, so we handle it gracefully.
+    
+    Detects the request origin and redirects back to the same origin's login page.
+    """
+    from fastapi.responses import RedirectResponse, HTMLResponse
+    
+    # Try to detect the origin from Referer header or use default
+    referer = request.headers.get("referer", "")
+    origin = request.headers.get("origin", "")
+    
+    # Extract base URL from referer or origin
+    # OpenWebUI uses root "/" for login, not "/login"
+    if referer:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(referer)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            # Redirect to root - OpenWebUI will show login if not authenticated
+            login_url = f"{base_url}/"
+            logger.info(f"🔀 Redirecting to detected origin root: {login_url}")
+            return RedirectResponse(url=login_url, status_code=302)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to parse referer: {e}")
+    elif origin:
+        # Redirect to root - OpenWebUI will show login if not authenticated
+        login_url = f"{origin}/"
+        logger.info(f"🔀 Redirecting to origin root: {login_url}")
+        return RedirectResponse(url=login_url, status_code=302)
+    
+    # Fallback: Use environment variable or default
+    openwebui_url = os.getenv("OPENWEBUI_LOGIN_URL", "http://localhost:3000")
+    # Redirect to root - OpenWebUI will show login if not authenticated
+    login_url = f"{openwebui_url}/"
+    logger.info(f"🔀 Redirecting to default: {login_url}")
+    
+    # Return HTML with client-side redirect as backup
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta http-equiv="refresh" content="0; url={login_url}">
+        <script>window.location.href = '{login_url}';</script>
+        <title>Redirecting...</title>
+    </head>
+    <body>
+        <p>Redirecting to login page... <a href="{login_url}">Click here if not redirected</a></p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 # ------------------------ Root ------------------------
 @app.get("/")

@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 import logging
 from datetime import datetime
 
-from app.services.ai_service import ai_service
+from app.services.llm_formatter_service import llm_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -204,11 +204,8 @@ class BaseResourceAgent(ABC):
         """
         Use LLM to intelligently format the API response.
         
-        This is where the magic happens - the LLM can:
-        - Filter data based on user's specific criteria
-        - Present data in natural language
-        - Highlight important information
-        - Provide insights and summaries
+        Delegates to the centralized LLMFormatterService for consistent
+        formatting across all resource types.
         
         Args:
             operation: Operation performed (list, create, etc.)
@@ -219,94 +216,13 @@ class BaseResourceAgent(ABC):
         Returns:
             Natural language formatted response
         """
-        try:
-            # Build context-aware prompt
-            prompt = self._build_formatting_prompt(operation, raw_data, user_query, context)
-            
-            # Call LLM
-            response = await ai_service._call_chat_with_retries(
-                prompt=prompt,
-                max_tokens=2000,
-                temperature=0.3,
-                timeout=15
-            )
-            
-            return response if response else self._fallback_format(operation, raw_data)
-            
-        except Exception as e:
-            logger.error(f"Error formatting response with LLM: {str(e)}")
-            return self._fallback_format(operation, raw_data)
-    
-    def _build_formatting_prompt(
-        self,
-        operation: str,
-        raw_data: Any,
-        user_query: str,
-        context: Dict[str, Any] = None
-    ) -> str:
-        """
-        Build a prompt for LLM to format the response.
-        Can be overridden by subclasses for resource-specific formatting.
-        
-        Args:
-            operation: Operation performed
-            raw_data: Raw API response
-            user_query: User's original query
-            context: Additional context
-            
-        Returns:
-            Formatted prompt for LLM
-        """
-        return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
-
-**User's Query:** {user_query}
-
-**Operation:** {operation}
-
-**Resource Type:** {self.resource_type}
-
-**Raw Data:**
-```json
-{raw_data}
-```
-
-**Instructions:**
-1. Present the information in a user-friendly format
-2. Use markdown for better readability (tables, lists, bold text)
-3. Highlight key information (status, versions, locations)
-4. If the user asked for specific filters or criteria, apply them
-5. Add helpful emojis for status indicators (✅ Active, ⚠️ Pending, ❌ Failed)
-6. Include a summary at the top if there are multiple items
-7. Be conversational and helpful
-
-**Format your response as:**
-- Start with a brief summary (e.g., "Found X services across Y locations")
-- Use tables or lists for structured data
-- Highlight important fields
-- End with helpful next steps or insights if relevant
-
-Do NOT include the raw JSON. Present only the formatted, user-friendly response."""
-    
-    def _fallback_format(self, operation: str, raw_data: Any) -> str:
-        """
-        Fallback formatting if LLM fails.
-        
-        Args:
-            operation: Operation performed
-            raw_data: Raw data to format
-            
-        Returns:
-            Simple formatted string
-        """
-        import json
-        
-        try:
-            if isinstance(raw_data, list):
-                return f"Found {len(raw_data)} {self.resource_type}(s):\n\n```json\n{json.dumps(raw_data, indent=2)}\n```"
-            else:
-                return f"Operation '{operation}' completed:\n\n```json\n{json.dumps(raw_data, indent=2)}\n```"
-        except:
-            return f"Operation '{operation}' completed successfully."
+        return await llm_formatter.format_response(
+            resource_type=self.resource_type,
+            operation=operation,
+            raw_data=raw_data,
+            user_query=user_query,
+            context=context
+        )
     
     async def filter_with_llm(
         self,
