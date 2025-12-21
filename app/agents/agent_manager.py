@@ -12,7 +12,6 @@ from app.agents.intent_agent import IntentAgent
 from app.agents.validation_agent import ValidationAgent
 from app.agents.execution_agent import ExecutionAgent
 from app.agents.rag_agent import RAGAgent
-from app.agents.function_calling_agent import function_calling_agent
 from app.agents.state.conversation_state import conversation_state_manager
 
 logger = logging.getLogger(__name__)
@@ -22,6 +21,9 @@ class AgentManager:
     """
     Central manager for the multi-agent system.
     Handles agent initialization, coordination, and lifecycle management.
+    
+    Agent Flow:
+        User → Orchestrator → IntentAgent → ValidationAgent → ExecutionAgent → ResourceAgents → API
     """
     
     def __init__(self):
@@ -36,7 +38,6 @@ class AgentManager:
         self.validation_agent: Optional[ValidationAgent] = None
         self.execution_agent: Optional[ExecutionAgent] = None
         self.rag_agent: Optional[RAGAgent] = None
-        self.function_calling_agent = function_calling_agent  # NEW: Global function calling agent instance
         
         # Manager state
         self.initialized = False
@@ -64,8 +65,7 @@ class AgentManager:
                 intent_agent=self.intent_agent,
                 validation_agent=self.validation_agent,
                 execution_agent=self.execution_agent,
-                rag_agent=self.rag_agent,
-                function_calling_agent=self.function_calling_agent
+                rag_agent=self.rag_agent
             )
             
             self.initialized = True
@@ -77,7 +77,6 @@ class AgentManager:
             logger.info(f"   - ValidationAgent: {self.validation_agent.agent_name}")
             logger.info(f"   - ExecutionAgent: {self.execution_agent.agent_name}")
             logger.info(f"   - RAGAgent: {self.rag_agent.agent_name}")
-            logger.info(f"   - FunctionCallingAgent: {self.function_calling_agent.agent_name} (NEW!)")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize agent manager: {str(e)}")
@@ -227,8 +226,7 @@ class AgentManager:
                 "intent": self.intent_agent.agent_name if self.intent_agent else None,
                 "validation": self.validation_agent.agent_name if self.validation_agent else None,
                 "execution": self.execution_agent.agent_name if self.execution_agent else None,
-                "rag": self.rag_agent.agent_name if self.rag_agent else None,
-                "function_calling": self.function_calling_agent.agent_name if self.function_calling_agent else None
+                "rag": self.rag_agent.agent_name if self.rag_agent else None
             }
         }
     
@@ -274,4 +272,3 @@ def get_agent_manager(vector_service=None, ai_service=None) -> AgentManager:
         agent_manager.initialize()
     
     return agent_manager
-

@@ -8,12 +8,14 @@ from .k8s_cluster_agent import K8sClusterAgent
 from .managed_services_agent import ManagedServicesAgent
 from .virtual_machine_agent import VirtualMachineAgent
 from .network_agent import NetworkAgent
+from .generic_resource_agent import GenericResourceAgent
 
 __all__ = [
     'BaseResourceAgent',
     'K8sClusterAgent',
     'ManagedServicesAgent',
     'VirtualMachineAgent',
-    'NetworkAgent'
+    'NetworkAgent',
+    'GenericResourceAgent'
 ]
 

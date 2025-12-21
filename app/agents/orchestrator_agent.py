@@ -1,6 +1,8 @@
 """
 Orchestrator Agent - The main coordinator that routes tasks to specialized agents.
 This is the entry point for all user requests in the multi-agent system.
+
+Flow: User → Orchestrator → IntentAgent → ValidationAgent → ExecutionAgent → ResourceAgents → API
 """
 
 from typing import Any, Dict, List, Optional
@@ -39,11 +41,6 @@ class OrchestratorAgent(BaseAgent):
         self.validation_agent: Optional[BaseAgent] = None
         self.execution_agent: Optional[BaseAgent] = None
         self.rag_agent: Optional[BaseAgent] = None
-        self.function_calling_agent: Optional[BaseAgent] = None  # OLD: Kept for backwards compatibility
-        
-        # Feature flag for function calling mode
-        # 🆕 DISABLED: Now using multi-agent flow with specialized Resource Agents
-        self.use_function_calling = False  # Set to True to use old FunctionCallingAgent (bypasses multi-agent flow)
         
         # Setup agent with tools
         self.setup_agent()
@@ -53,8 +50,7 @@ class OrchestratorAgent(BaseAgent):
         intent_agent: BaseAgent,
         validation_agent: BaseAgent,
         execution_agent: BaseAgent,
-        rag_agent: BaseAgent,
-        function_calling_agent: Optional[BaseAgent] = None
+        rag_agent: BaseAgent
     ) -> None:
         """
         Set references to specialized agents.
@@ -64,16 +60,12 @@ class OrchestratorAgent(BaseAgent):
             validation_agent: Agent for parameter validation
             execution_agent: Agent for API execution
             rag_agent: Agent for RAG-based responses
-            function_calling_agent: Modern function calling agent (optional)
         """
         self.intent_agent = intent_agent
         self.validation_agent = validation_agent
         self.execution_agent = execution_agent
         self.rag_agent = rag_agent
-        self.function_calling_agent = function_calling_agent
         logger.info("✅ Orchestrator agent configured with specialized agents")
-        if function_calling_agent:
-            logger.info("🎯 Function calling agent enabled - using modern approach")
     
     def get_system_prompt(self) -> str:
         """Return system prompt for orchestrator."""
@@ -158,7 +150,6 @@ Always confirm destructive operations (delete, update) before executing."""
                 return "Intent agent not configured"
             
             logger.info(f"🔀 Routing to IntentAgent: {user_input[:50]}...")
-            # This will be called by the specialized orchestration logic
             return f"Routing to Intent Agent for: {user_input}"
         except Exception as e:
             logger.error(f"❌ Failed to route to intent agent: {str(e)}")
@@ -225,7 +216,6 @@ Always confirm destructive operations (delete, update) before executing."""
             state = conversation_state_manager.get_session(session_id)
             
             # Detect OpenWebUI metadata requests (title, tags, follow-ups generation)
-            # These should NOT trigger session resets
             is_metadata_request = any([
                 user_input.strip().startswith("### Task:"),
                 "Generate a concise" in user_input and "title" in user_input.lower(),
@@ -237,17 +227,14 @@ Always confirm destructive operations (delete, update) before executing."""
             # BUT skip this for metadata requests to preserve context
             if state and state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
                 if is_metadata_request:
-                    # Don't reset session for metadata requests, just continue
                     logger.info(f"📋 Metadata request detected, preserving session state")
                 else:
-                    # Regular completed conversation - start fresh for new user query
                     logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
                     conversation_state_manager.delete_session(session_id)
                     state = None
             
             if not state:
                 state = conversation_state_manager.create_session(session_id, user_id)
-                # Store original query for context (e.g., extracting location from "clusters in delhi")
                 state.user_query = user_input
             
             # Add user message to history
@@ -265,7 +252,7 @@ Always confirm destructive operations (delete, update) before executing."""
                 "success": result.get("success", True)
             })
             
-            # Persist state after each interaction (for scalability across restarts/instances)
+            # Persist state after each interaction
             conversation_state_manager.update_session(state)
             
             return result
@@ -295,8 +282,7 @@ Always confirm destructive operations (delete, update) before executing."""
         Returns:
             Dict with routing decision
         """
-        # OPTION 2: Early detection of OpenWebUI metadata requests - skip LLM routing entirely
-        # These requests are for UI enhancement and should not trigger agent routing
+        # Early detection of OpenWebUI metadata requests - skip LLM routing
         is_metadata_request = any([
             user_input.strip().startswith("### Task:"),
             "Generate a concise" in user_input and ("title" in user_input.lower() or "tag" in user_input.lower()),
@@ -307,14 +293,13 @@ Always confirm destructive operations (delete, update) before executing."""
         ])
         
         if is_metadata_request:
-            logger.info(f"📋 Metadata request detected early, skipping LLM routing: {user_input[:80]}...")
+            logger.info(f"📋 Metadata request detected early, skipping LLM routing")
             return {
                 "route": "skip",
                 "reason": "OpenWebUI metadata request - no agent routing needed"
             }
         
-        # 🆕 CHECK FOR FILTER/REFINEMENT REQUESTS ON PREVIOUS RESULTS
-        # Detect when user wants to filter/refine the last result instead of making a new query
+        # Check for filter/refinement requests on previous results
         filter_keywords = [
             "filter", "show only", "just show", "only show",
             "version below", "version above", "version less than", "version greater than",
@@ -359,79 +344,43 @@ Always confirm destructive operations (delete, update) before executing."""
         routing_prompt = f"""You are a routing specialist for a cloud resource management chatbot. Determine if the user's query is about:
 
 A) **RESOURCE OPERATIONS**: Managing/viewing cloud resources (clusters, firewalls, databases, load balancers, storage, etc.)
-   - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall", "count clusters in bengaluru"
+   - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall"
    
 B) **DOCUMENTATION**: Questions about how to use the platform, concepts, procedures, troubleshooting, or explanations
-   - Examples: "how do I create a cluster?", "what is kubernetes?", "explain load balancing", "why did my deployment fail?", "what are the requirements?"
+   - Examples: "how do I create a cluster?", "what is kubernetes?", "explain load balancing", "why did my deployment fail?"
 
 User Query: "{user_input}"
 
 Instructions:
 1. If the query is asking to VIEW, COUNT, LIST, CREATE, UPDATE, or DELETE actual resources → return "RESOURCE_OPERATIONS"
 2. If the query is asking HOW TO do something, WHY something works, or WHAT a concept means → return "DOCUMENTATION"
-3. "What are the clusters?" = RESOURCE_OPERATIONS (listing actual clusters)
-4. "What is a cluster?" = DOCUMENTATION (explaining the concept)
-5. "How many clusters in delhi?" = RESOURCE_OPERATIONS (counting actual clusters)
-6. "How do I create a cluster?" = DOCUMENTATION (explaining the process)
 
 Respond with ONLY ONE of these:
 - ROUTE: RESOURCE_OPERATIONS
 - ROUTE: DOCUMENTATION"""
 
         try:
-            logger.debug(f"🔍 Routing prompt for query: {user_input}")
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=routing_prompt,
-                max_tokens=250,  # OPTION 1: Increased from 100 to 250 for more reliable responses from LLM
-                temperature=0.1,  # Slightly increased from 0.0 to avoid potential model issues
-                timeout=15  # Add explicit timeout
+                max_tokens=250,
+                temperature=0.1,
+                timeout=15
             )
             
-            logger.info(f"🤖 LLM routing decision (length={len(llm_response)} chars): {llm_response}")
+            logger.info(f"🤖 LLM routing decision: {llm_response}")
             
-            # Check for empty or too short response
+            # Check for empty response
             if not llm_response or len(llm_response.strip()) < 5:
-                logger.error(f"❌ LLM returned empty/very short response ('{llm_response}') for routing")
-                # Use rule-based fallback for common documentation patterns
-                query_lower = user_input.lower()
-                doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
-                               "tutorial", "guide", "documentation", "help me", "tell me about"]
-                if any(pattern in query_lower for pattern in doc_patterns):
-                    logger.info(f"🎯 Rule-based fallback: detected documentation pattern in '{user_input}'")
-                    return {
-                        "route": "rag",
-                        "reason": "Rule-based routing: documentation question detected (LLM response empty)"
-                    }
-                else:
-                    # Default to function_calling if available, otherwise intent
-                    if self.use_function_calling and self.function_calling_agent:
-                        logger.info(f"🎯 Rule-based fallback: assuming resource operation → FunctionCallingAgent")
-                        return {
-                            "route": "function_calling",
-                            "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
-                        }
-                    else:
-                        logger.info(f"🎯 Rule-based fallback: assuming resource operation → IntentAgent")
-                        return {
-                            "route": "intent",
-                            "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
-                        }
+                logger.error(f"❌ LLM returned empty response for routing")
+                return self._rule_based_routing(user_input)
             
             # Parse LLM response
             if "RESOURCE_OPERATIONS" in llm_response.upper():
-                # Route to FunctionCallingAgent if available, otherwise IntentAgent
-                if self.use_function_calling and self.function_calling_agent:
-                    logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → FunctionCallingAgent")
-                    return {
-                        "route": "function_calling",
-                        "reason": "LLM detected resource operation - using modern function calling"
-                    }
-                else:
-                    logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → IntentAgent (fallback)")
-                    return {
-                        "route": "intent",
-                        "reason": "LLM detected resource operation intent (traditional flow)"
-                    }
+                logger.info(f"✅ LLM routing: RESOURCE_OPERATIONS → IntentAgent")
+                return {
+                    "route": "intent",
+                    "reason": "LLM detected resource operation intent"
+                }
             elif "DOCUMENTATION" in llm_response.upper():
                 logger.info(f"✅ LLM routing: DOCUMENTATION → RAGAgent")
                 return {
@@ -439,59 +388,55 @@ Respond with ONLY ONE of these:
                     "reason": "LLM detected documentation question"
                 }
             else:
-                # Fallback to function_calling (if available) or intent
-                if self.use_function_calling and self.function_calling_agent:
-                    logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to function_calling")
-                    return {
-                        "route": "function_calling",
-                        "reason": "Ambiguous routing, defaulting to function calling"
-                    }
-                else:
-                    logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', defaulting to intent")
-                    return {
-                        "route": "intent",
-                        "reason": "Ambiguous routing, defaulting to intent detection"
-                    }
+                logger.warning(f"⚠️ LLM routing unclear: '{llm_response}', using rule-based fallback")
+                return self._rule_based_routing(user_input)
+                
         except Exception as e:
-            logger.error(f"❌ LLM routing failed with exception: {e}, using rule-based fallback")
+            logger.error(f"❌ LLM routing failed: {e}, using rule-based fallback")
+            return self._rule_based_routing(user_input)
+    
+    def _rule_based_routing(self, user_input: str) -> Dict[str, Any]:
+        """
+        Rule-based fallback routing when LLM fails.
+        
+        Args:
+            user_input: User's message
             
-            # Check if this is a metadata request - don't route to RAG or Intent
-            if any([
-                user_input.strip().startswith("### Task:"),
-                "Generate a concise" in user_input and "title" in user_input.lower(),
-                "Suggest 3-5 relevant follow-up" in user_input,
-                "Generate 1-3 broad tags" in user_input
-            ]):
-                logger.info(f"🎯 Metadata request detected with LLM failure - skipping routing")
+        Returns:
+            Dict with routing decision
+        """
+        query_lower = user_input.lower()
+        
+        # Check for documentation patterns
+        doc_patterns = [
+            "how to", "how do", "how can", "what is", "explain", "why", 
+            "tutorial", "guide", "documentation", "help me", "tell me about"
+        ]
+        
+        if any(pattern in query_lower for pattern in doc_patterns):
+            # Exception: "what are the clusters" is a resource operation
+            if "what are the" in query_lower and any(
+                resource in query_lower for resource in 
+                ["cluster", "firewall", "vm", "database", "service", "endpoint"]
+            ):
+                logger.info(f"🎯 Rule-based: 'what are the X' → IntentAgent")
                 return {
-                    "route": "skip",
-                    "reason": "Metadata request should be handled by OpenWebUI, not by agents"
+                    "route": "intent",
+                    "reason": "Rule-based routing: resource listing question"
                 }
             
-            # Use rule-based fallback on exception for regular queries
-            query_lower = user_input.lower()
-            doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
-                           "tutorial", "guide", "documentation", "help me", "tell me about"]
-            if any(pattern in query_lower for pattern in doc_patterns):
-                logger.info(f"🎯 Rule-based fallback (exception): detected documentation pattern")
-                return {
-                    "route": "rag",
-                    "reason": "Rule-based routing: documentation question detected (LLM error)"
-                }
-            else:
-                # Default to function_calling if available, otherwise intent
-                if self.use_function_calling and self.function_calling_agent:
-                    logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation → FunctionCallingAgent")
-                    return {
-                        "route": "function_calling",
-                        "reason": "Rule-based routing: resource operation assumed (LLM error)"
-                    }
-                else:
-                    logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation → IntentAgent")
-                    return {
-                        "route": "intent",
-                        "reason": "Rule-based routing: resource operation assumed (LLM error)"
-                    }
+            logger.info(f"🎯 Rule-based: documentation pattern → RAGAgent")
+            return {
+                "route": "rag",
+                "reason": "Rule-based routing: documentation question detected"
+            }
+        
+        # Default to intent agent for resource operations
+        logger.info(f"🎯 Rule-based: assuming resource operation → IntentAgent")
+        return {
+            "route": "intent",
+            "reason": "Rule-based routing: resource operation assumed"
+        }
     
     async def _execute_routing(
         self,
@@ -516,7 +461,6 @@ Respond with ONLY ONE of these:
         
         try:
             if route == "skip":
-                # Metadata request - return simple acknowledgment
                 logger.info(f"⏭️ Skipping routing for metadata request")
                 return {
                     "success": True,
@@ -525,550 +469,19 @@ Respond with ONLY ONE of these:
                 }
             
             elif route == "filter":
-                # 🆕 FILTER/REFINEMENT REQUEST - Apply filter to previous results
-                logger.info(f"🔍 Processing filter request on previous execution results")
-                
-                # Get previous execution result
-                previous_result = state.execution_result
-                previous_data = previous_result.get("data", [])
-                
-                if not previous_data:
-                    return {
-                        "success": False,
-                        "response": "I don't have any previous results to filter. Could you please make a query first?",
-                        "route": "filter"
-                    }
-                
-                # Determine which resource agent to use based on previous operation
-                resource_type = state.resource_type
-                if not resource_type:
-                    return {
-                        "success": False,
-                        "response": "I couldn't determine what type of data to filter. Could you please specify?",
-                        "route": "filter"
-                    }
-                
-                # Get the appropriate resource agent
-                resource_agent = None
-                if self.execution_agent and hasattr(self.execution_agent, 'resource_agent_map'):
-                    resource_agent = self.execution_agent.resource_agent_map.get(resource_type)
-                
-                if not resource_agent:
-                    # Fallback: Use LLM to filter manually
-                    logger.warning(f"⚠️ No resource agent found for {resource_type}, using direct LLM filtering")
-                    from app.services.ai_service import ai_service
-                    
-                    filter_prompt = f"""Given this user query: "{user_input}"
-And this data from a previous query:
-{json.dumps(previous_data[:5], indent=2)}... ({len(previous_data)} total items)
-
-Identify what filter criteria the user wants to apply.
-Respond with a JSON object containing:
-- filter_field: The field name to filter on (e.g., "k8sVersion", "status", "name")
-- filter_operator: The operator (e.g., "less_than", "equals", "contains", "greater_than")
-- filter_value: The value to compare against
-
-Example: "version below 1.30" → {{"filter_field": "k8sVersion", "filter_operator": "less_than", "filter_value": "1.30"}}
-"""
-                    
-                    try:
-                        filter_criteria_json = await ai_service._call_chat_with_retries(
-                            prompt=filter_prompt,
-                            max_tokens=300,
-                            temperature=0.1
-                        )
-                        filter_criteria = json.loads(filter_criteria_json)
-                        
-                        # Apply filter manually
-                        filtered_data = []
-                        filter_field = filter_criteria.get("filter_field")
-                        filter_operator = filter_criteria.get("filter_operator")
-                        filter_value = filter_criteria.get("filter_value")
-                        
-                        for item in previous_data:
-                            item_value = item.get(filter_field)
-                            if filter_operator == "less_than":
-                                # Handle version comparison
-                                if item_value and str(item_value) < str(filter_value):
-                                    filtered_data.append(item)
-                            elif filter_operator == "equals":
-                                if item_value == filter_value:
-                                    filtered_data.append(item)
-                            elif filter_operator == "contains":
-                                if filter_value.lower() in str(item_value).lower():
-                                    filtered_data.append(item)
-                        
-                        # Format response with LLM
-                        format_prompt = f"""The user asked: "{user_input}"
-
-I filtered {len(previous_data)} items and found {len(filtered_data)} matching items:
-{json.dumps(filtered_data, indent=2)}
-
-Please provide a natural, helpful response to the user showing these filtered results.
-Include relevant details in a formatted way (use tables if appropriate)."""
-                        
-                        formatted_response = await ai_service._call_chat_with_retries(
-                            prompt=format_prompt,
-                            max_tokens=2000,
-                            temperature=0.3
-                        )
-                        
-                        # Update execution result with filtered data
-                        state.execution_result = {
-                            "success": True,
-                            "data": filtered_data,
-                            "resource_type": resource_type,
-                            "operation": "filter",
-                            "filter_applied": filter_criteria
-                        }
-                        state.status = ConversationStatus.COMPLETED
-                        
-                        return {
-                            "success": True,
-                            "response": formatted_response,
-                            "route": "filter",
-                            "execution_result": state.execution_result,
-                            "metadata": {
-                                "original_count": len(previous_data),
-                                "filtered_count": len(filtered_data),
-                                "filter_criteria": filter_criteria
-                            }
-                        }
-                    except Exception as e:
-                        logger.error(f"❌ Filter processing failed: {e}")
-                        return {
-                            "success": False,
-                            "response": f"I had trouble applying that filter: {str(e)}",
-                            "route": "filter"
-                        }
-                else:
-                    # Use resource agent's filter_with_llm method
-                    logger.info(f"🎯 Using {resource_agent.agent_name} to filter data")
-                    
-                    try:
-                        filtered_data = await resource_agent.filter_with_llm(
-                            data=previous_data,
-                            filter_criteria=user_input,
-                            resource_type=resource_type
-                        )
-                        
-                        # Format response
-                        formatted_response = await resource_agent.format_response_with_llm(
-                            operation="list",
-                            raw_data=filtered_data,
-                            user_query=user_input,
-                            context={
-                                "filtered": True,
-                                "original_count": len(previous_data),
-                                "endpoint_names": state.collected_params.get("endpoint_names", [])
-                            }
-                        )
-                        
-                        # Update execution result with filtered data
-                        state.execution_result = {
-                            "success": True,
-                            "data": filtered_data,
-                            "resource_type": resource_type,
-                            "operation": "filter"
-                        }
-                        state.status = ConversationStatus.COMPLETED
-                        
-                        return {
-                            "success": True,
-                            "response": formatted_response,
-                            "route": "filter",
-                            "execution_result": state.execution_result,
-                            "metadata": {
-                                "original_count": len(previous_data),
-                                "filtered_count": len(filtered_data)
-                            }
-                        }
-                    except Exception as e:
-                        logger.error(f"❌ Resource agent filter failed: {e}")
-                        return {
-                            "success": False,
-                            "response": f"I had trouble applying that filter: {str(e)}",
-                            "route": "filter"
-                        }
-            
-            elif route == "function_calling":
-                # NEW: Route to modern function calling agent
-                logger.info(f"🎯 Routing to FunctionCallingAgent (modern approach)")
-                state.handoff_to_agent("OrchestratorAgent", "FunctionCallingAgent", routing_decision["reason"])
-                
-                if self.function_calling_agent:
-                    # Build conversation history for context
-                    conversation_history = []
-                    for msg in state.conversation_history[-10:]:  # Last 10 messages
-                        conversation_history.append({
-                            "role": msg.get("role", "user"),
-                            "content": msg.get("content", "")
-                        })
-                    
-                    result = await self.function_calling_agent.execute(user_input, {
-                        "session_id": state.session_id,
-                        "user_id": state.user_id,
-                        "user_roles": user_roles or [],
-                        "conversation_history": conversation_history,
-                        "conversation_state": state.to_dict()
-                    })
-                    
-                    # Mark conversation as completed
-                    if result.get("success"):
-                        state.status = ConversationStatus.COMPLETED
-                    
-                    return {
-                        "success": result.get("success", True),
-                        "response": result.get("output", ""),
-                        "routing": "function_calling",
-                        "function_calls_made": result.get("function_calls_made", []),
-                        "iterations": result.get("iterations", 1),
-                        "metadata": {
-                            "agent_type": "function_calling",
-                            "modern_approach": True
-                        }
-                    }
-                else:
-                    # Fallback to traditional intent agent if function calling not available
-                    logger.warning("⚠️ Function calling agent not available, falling back to intent agent")
-                    return await self._execute_routing(
-                        {"route": "intent", "reason": "Fallback to traditional flow"},
-                        user_input,
-                        state,
-                        user_roles
-                    )
+                return await self._handle_filter_request(user_input, state)
             
             elif route == "intent":
-                # Route to intent agent
-                state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
-                
-                if self.intent_agent:
-                    result = await self.intent_agent.execute(user_input, {
-                        "session_id": state.session_id,
-                        "user_id": state.user_id,
-                        "conversation_state": state.to_dict()
-                    })
-                    
-                    # Update state based on intent detection
-                    if result.get("success") and result.get("intent_detected"):
-                        intent_data = result.get("intent_data", {})
-                        
-                        # Handle resource_type: convert list to comma-separated string
-                        resource_type = intent_data.get("resource_type")
-                        if isinstance(resource_type, list):
-                            resource_type = ",".join(resource_type)
-                            logger.info(f"🔧 Converted resource_type list to string: {resource_type}")
-                        
-                        state.set_intent(
-                            resource_type=resource_type,
-                            operation=intent_data.get("operation"),
-                            required_params=intent_data.get("required_params", []),
-                            optional_params=intent_data.get("optional_params", [])
-                        )
-                        
-                        # Add extracted parameters
-                        extracted_params = intent_data.get("extracted_params", {})
-                        if extracted_params:
-                            state.add_parameters(extracted_params)
-                        
-                        # 🆕 CHECK FOR CLARIFICATIONS OR AMBIGUITIES FIRST!
-                        clarification_needed = intent_data.get("clarification_needed")
-                        ambiguities = intent_data.get("ambiguities", [])
-                        
-                        logger.info(f"📋 State resource_type: {state.resource_type}, Ambiguities: {ambiguities}")
-                        
-                        # SPECIAL CASE: Multi-resource requests with null resource_type
-                        # Extract resources from ambiguity/clarification text
-                        if not state.resource_type and (ambiguities or clarification_needed):
-                            logger.info(f"🔧 Attempting to extract resources from ambiguity text")
-                            
-                            # Try to extract from ambiguities first
-                            for ambiguity in ambiguities:
-                                # Simple extraction: look for resource names we know about
-                                resources_found = []
-                                known_resources = ["gitlab", "kafka", "jenkins", "postgres", "documentdb", "container_registry", "registry"]
-                                for resource in known_resources:
-                                    if resource in ambiguity.lower():
-                                        resources_found.append(resource)
-                                
-                                if len(resources_found) >= 2:
-                                    resources_str = ",".join(resources_found)
-                                    logger.info(f"✅ Extracted multi-resource: '{resources_str}'")
-                                    state.resource_type = resources_str
-                                    state.intent = f"list_{resources_str}"
-                                    break
-                            
-                            # Also try clarification_needed text
-                            if not state.resource_type and clarification_needed:
-                                resources_found = []
-                                for resource in ["gitlab", "kafka", "jenkins", "postgres", "documentdb", "container_registry", "registry"]:
-                                    if resource in clarification_needed.lower():
-                                        resources_found.append(resource)
-                                
-                                if len(resources_found) >= 2:
-                                    resources_str = ",".join(resources_found)
-                                    logger.info(f"✅ Extracted multi-resource from clarification: '{resources_str}'")
-                                    state.resource_type = resources_str
-                                    state.intent = f"list_{resources_str}"
-                        
-                        # EXCEPTION: If resource_type has comma/and, this is multi-resource
-                        # Don't ask for clarification - proceed with execution
-                        is_multi_resource = state.resource_type and ("," in str(state.resource_type) or " and " in str(state.resource_type).lower())
-                        
-                        if is_multi_resource:
-                            logger.info(f"✅ Multi-resource confirmed: {state.resource_type}, skipping clarification")
-                            # Clear ambiguities about multiple resources
-                            ambiguities = [amb for amb in ambiguities if not any(
-                                keyword in amb.lower() for keyword in ["multiple resource", "two resource", "two different"]
-                            )]
-                            if not ambiguities:
-                                clarification_needed = None
-                        
-                        if clarification_needed or ambiguities:
-                            # IntentAgent needs clarification from user
-                            logger.info(f"🤔 Intent clarification needed or ambiguities detected")
-                            
-                            # Format ambiguities for user
-                            ambiguity_text = ""
-                            if ambiguities:
-                                ambiguity_text = f"\n\n**Ambiguities detected:**\n" + "\n".join(f"- {amb}" for amb in ambiguities)
-                            
-                            response_text = clarification_needed or "I need some clarification to proceed."
-                            response_text += ambiguity_text
-                            
-                            return {
-                                "success": True,
-                                "response": response_text,
-                                "routing": "intent",
-                                "intent_data": intent_data,
-                                "metadata": {
-                                    "clarification_needed": True,
-                                    "ambiguities": ambiguities
-                                }
-                            }
-                        
-                        # 🆕 CHECK IF RESOURCE TYPE IS NULL/NONE
-                        logger.info(f"🔍 Checking resource type: '{state.resource_type}' (type: {type(state.resource_type).__name__})")
-                        if not state.resource_type or state.resource_type == "None":
-                            logger.error(f"❌ IntentAgent failed to determine resource type")
-                            return {
-                                "success": False,
-                                "response": "I couldn't determine what resource you're asking about. Could you please clarify?",
-                                "routing": "intent",
-                                "intent_data": intent_data
-                            }
-                        
-                        # STEP 2: Check if we need more parameters OR if ready to execute
-                        if state.missing_params:
-                            logger.info(f"🔄 Missing params detected: {state.missing_params}, routing to ValidationAgent")
-                            state.status = ConversationStatus.COLLECTING_PARAMS
-                            state.handoff_to_agent("IntentAgent", "ValidationAgent", "Need to collect missing parameters")
-                            
-                            # Immediately route to validation agent
-                            if self.validation_agent:
-                                validation_result = await self.validation_agent.execute(user_input, {
-                                    "session_id": state.session_id,
-                                    "conversation_state": state.to_dict()
-                                })
-                                
-                                # Check if validation made us ready to execute
-                                if validation_result.get("ready_to_execute") and validation_result.get("success"):
-                                    logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
-                                    
-                                    state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
-                                    state.status = ConversationStatus.EXECUTING
-                                    
-                                    if self.execution_agent:
-                                        exec_result = await self.execution_agent.execute("", {
-                                            "session_id": state.session_id,
-                                            "conversation_state": state.to_dict(),
-                                            "user_roles": user_roles or []
-                                        })
-                                        
-                                        if exec_result.get("success"):
-                                            state.set_execution_result(exec_result.get("execution_result", {}))
-                                        
-                                        return {
-                                            "success": True,
-                                            "response": exec_result.get("output", ""),
-                                            "routing": "execution",
-                                            "execution_result": exec_result.get("execution_result"),
-                                            "metadata": {
-                                                "collected_params": state.collected_params,
-                                                "resource_type": state.resource_type,
-                                                "operation": state.operation
-                                            }
-                                        }
-                                
-                                return {
-                                    "success": True,
-                                    "response": validation_result.get("output", ""),
-                                    "routing": "validation",
-                                    "intent_data": intent_data,
-                                    "metadata": {
-                                        "collected_params": state.collected_params,
-                                        "missing_params": list(state.missing_params)
-                                    }
-                                }
-                        else:
-                            # No missing params - proceed directly to execution!
-                            logger.info(f"✅ All params collected for {state.operation} {state.resource_type}, executing immediately")
-                            state.status = ConversationStatus.EXECUTING
-                            state.handoff_to_agent("IntentAgent", "ExecutionAgent", "No parameters needed, executing immediately")
-                            
-                            if self.execution_agent:
-                                exec_result = await self.execution_agent.execute("", {
-                                    "session_id": state.session_id,
-                                    "conversation_state": state.to_dict(),
-                                    "user_roles": user_roles or []
-                                })
-                                
-                                if exec_result.get("success"):
-                                    state.set_execution_result(exec_result.get("execution_result", {}))
-                                
-                                return {
-                                    "success": True,
-                                    "response": exec_result.get("output", ""),
-                                    "routing": "execution",
-                                    "execution_result": exec_result.get("execution_result"),
-                                    "metadata": {
-                                        "collected_params": state.collected_params,
-                                        "resource_type": state.resource_type,
-                                        "operation": state.operation
-                                    }
-                                }
-                    
-                    return {
-                        "success": True,
-                        "response": result.get("output", ""),
-                        "routing": route
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "response": "Intent agent not available",
-                        "routing": route
-                    }
+                return await self._handle_intent_routing(user_input, state, user_roles)
             
             elif route == "validation":
-                # Route to validation agent
-                state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", routing_decision["reason"])
-                
-                if self.validation_agent:
-                    result = await self.validation_agent.execute(user_input, {
-                        "session_id": state.session_id,
-                        "conversation_state": state.to_dict()
-                    })
-                    
-                    # CHECK: If validation says "ready to execute", route to execution NOW!
-                    if result.get("ready_to_execute") and result.get("success"):
-                        logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
-                        
-                        # Update state to executing
-                        state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
-                        state.status = ConversationStatus.EXECUTING
-                        
-                        # Execute immediately
-                        if self.execution_agent:
-                            exec_result = await self.execution_agent.execute("", {
-                                "session_id": state.session_id,
-                                "conversation_state": state.to_dict(),
-                                "user_roles": user_roles or []
-                            })
-                            
-                            # Update state with execution result
-                            if exec_result.get("success"):
-                                state.set_execution_result(exec_result.get("execution_result", {}))
-                            
-                            return {
-                                "success": True,
-                                "response": exec_result.get("output", ""),
-                                "routing": "execution",
-                                "execution_result": exec_result.get("execution_result"),
-                                "metadata": {
-                                    "collected_params": state.collected_params,
-                                    "resource_type": state.resource_type,
-                                    "operation": state.operation
-                                }
-                            }
-                        else:
-                            return {
-                                "success": False,
-                                "response": "Execution agent not available",
-                                "routing": "execution"
-                            }
-                    
-                    # Otherwise, return validation response (asking for more info)
-                    return {
-                        "success": True,
-                        "response": result.get("output", ""),
-                        "routing": route,
-                        "metadata": {
-                            "missing_params": result.get("missing_params", []),
-                            "ready_to_execute": result.get("ready_to_execute", False)
-                        }
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "response": "Validation agent not available",
-                        "routing": route
-                    }
+                return await self._handle_validation_routing(user_input, state, user_roles)
             
             elif route == "execution":
-                # Route to execution agent
-                state.handoff_to_agent("OrchestratorAgent", "ExecutionAgent", routing_decision["reason"])
-                state.status = ConversationStatus.EXECUTING
-                
-                if self.execution_agent:
-                    result = await self.execution_agent.execute("", {
-                        "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
-                        "user_roles": user_roles or []
-                    })
-                    
-                    # Update state with execution result
-                    if result.get("success"):
-                        state.set_execution_result(result.get("execution_result", {}))
-                    else:
-                        state.set_execution_result({
-                            "success": False,
-                            "error": result.get("error", "Execution failed")
-                        })
-                    
-                    return {
-                        "success": True,
-                        "response": result.get("output", ""),
-                        "routing": route,
-                        "execution_result": result.get("execution_result")
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "response": "Execution agent not available",
-                        "routing": route
-                    }
+                return await self._handle_execution_routing(state, user_roles)
             
             elif route == "rag":
-                # Route to RAG agent
-                state.handoff_to_agent("OrchestratorAgent", "RAGAgent", routing_decision["reason"])
-                
-                if self.rag_agent:
-                    result = await self.rag_agent.execute(user_input, {
-                        "session_id": state.session_id
-                    })
-                    
-                    return {
-                        "success": True,
-                        "response": result.get("output", ""),
-                        "routing": route
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "response": "RAG agent not available",
-                        "routing": route
-                    }
+                return await self._handle_rag_routing(user_input, state)
             
             else:
                 return {
@@ -1085,4 +498,371 @@ Include relevant details in a formatted way (use tables if appropriate)."""
                 "response": f"Error executing routing: {str(e)}",
                 "routing": route
             }
+    
+    async def _handle_filter_request(
+        self,
+        user_input: str,
+        state: ConversationState
+    ) -> Dict[str, Any]:
+        """Handle filter/refinement request on previous results."""
+        logger.info(f"🔍 Processing filter request on previous execution results")
+        
+        previous_result = state.execution_result
+        previous_data = previous_result.get("data", [])
+        
+        if not previous_data:
+            return {
+                "success": False,
+                "response": "I don't have any previous results to filter. Could you please make a query first?",
+                "route": "filter"
+            }
+        
+        resource_type = state.resource_type
+        if not resource_type:
+            return {
+                "success": False,
+                "response": "I couldn't determine what type of data to filter. Could you please specify?",
+                "route": "filter"
+            }
+        
+        # Get the appropriate resource agent
+        resource_agent = None
+        if self.execution_agent and hasattr(self.execution_agent, 'resource_agent_map'):
+            resource_agent = self.execution_agent.resource_agent_map.get(resource_type)
+        
+        if resource_agent:
+            try:
+                filtered_data = await resource_agent.filter_with_llm(
+                    data=previous_data,
+                    filter_criteria=user_input,
+                    resource_type=resource_type
+                )
+                
+                formatted_response = await resource_agent.format_response_with_llm(
+                    operation="list",
+                    raw_data=filtered_data,
+                    user_query=user_input,
+                    context={
+                        "filtered": True,
+                        "original_count": len(previous_data),
+                        "endpoint_names": state.collected_params.get("endpoint_names", [])
+                    }
+                )
+                
+                state.execution_result = {
+                    "success": True,
+                    "data": filtered_data,
+                    "resource_type": resource_type,
+                    "operation": "filter"
+                }
+                state.status = ConversationStatus.COMPLETED
+                
+                return {
+                    "success": True,
+                    "response": formatted_response,
+                    "route": "filter",
+                    "execution_result": state.execution_result,
+                    "metadata": {
+                        "original_count": len(previous_data),
+                        "filtered_count": len(filtered_data)
+                    }
+                }
+            except Exception as e:
+                logger.error(f"❌ Resource agent filter failed: {e}")
+                return {
+                    "success": False,
+                    "response": f"I had trouble applying that filter: {str(e)}",
+                    "route": "filter"
+                }
+        else:
+            # Fallback: Use LLM to filter manually
+            return await self._filter_with_llm_fallback(user_input, previous_data, resource_type, state)
+    
+    async def _filter_with_llm_fallback(
+        self,
+        user_input: str,
+        previous_data: list,
+        resource_type: str,
+        state: ConversationState
+    ) -> Dict[str, Any]:
+        """Fallback LLM-based filtering when no resource agent is available."""
+        from app.services.ai_service import ai_service
+        
+        filter_prompt = f"""Given this user query: "{user_input}"
+And this data from a previous query:
+{json.dumps(previous_data[:5], indent=2)}... ({len(previous_data)} total items)
 
+Identify what filter criteria the user wants to apply.
+Respond with a JSON object containing:
+- filter_field: The field name to filter on
+- filter_operator: The operator (less_than, equals, contains, greater_than)
+- filter_value: The value to compare against"""
+        
+        try:
+            filter_criteria_json = await ai_service._call_chat_with_retries(
+                prompt=filter_prompt,
+                max_tokens=300,
+                temperature=0.1
+            )
+            filter_criteria = json.loads(filter_criteria_json)
+            
+            # Apply filter
+            filtered_data = []
+            filter_field = filter_criteria.get("filter_field")
+            filter_operator = filter_criteria.get("filter_operator")
+            filter_value = filter_criteria.get("filter_value")
+            
+            for item in previous_data:
+                item_value = item.get(filter_field)
+                if filter_operator == "less_than":
+                    if item_value and str(item_value) < str(filter_value):
+                        filtered_data.append(item)
+                elif filter_operator == "equals":
+                    if item_value == filter_value:
+                        filtered_data.append(item)
+                elif filter_operator == "contains":
+                    if filter_value.lower() in str(item_value).lower():
+                        filtered_data.append(item)
+            
+            # Format response
+            format_prompt = f"""The user asked: "{user_input}"
+I filtered {len(previous_data)} items and found {len(filtered_data)} matching items:
+{json.dumps(filtered_data, indent=2)}
+
+Please provide a natural, helpful response showing these filtered results."""
+            
+            formatted_response = await ai_service._call_chat_with_retries(
+                prompt=format_prompt,
+                max_tokens=2000,
+                temperature=0.3
+            )
+            
+            state.execution_result = {
+                "success": True,
+                "data": filtered_data,
+                "resource_type": resource_type,
+                "operation": "filter",
+                "filter_applied": filter_criteria
+            }
+            state.status = ConversationStatus.COMPLETED
+            
+            return {
+                "success": True,
+                "response": formatted_response,
+                "route": "filter",
+                "execution_result": state.execution_result
+            }
+        except Exception as e:
+            logger.error(f"❌ Filter processing failed: {e}")
+            return {
+                "success": False,
+                "response": f"I had trouble applying that filter: {str(e)}",
+                "route": "filter"
+            }
+    
+    async def _handle_intent_routing(
+        self,
+        user_input: str,
+        state: ConversationState,
+        user_roles: List[str]
+    ) -> Dict[str, Any]:
+        """Handle routing to intent agent."""
+        state.handoff_to_agent("OrchestratorAgent", "IntentAgent", "Intent detection")
+        
+        if not self.intent_agent:
+            return {
+                "success": False,
+                "response": "Intent agent not available",
+                "routing": "intent"
+            }
+        
+        result = await self.intent_agent.execute(user_input, {
+            "session_id": state.session_id,
+            "user_id": state.user_id,
+            "conversation_state": state.to_dict()
+        })
+        
+        if not (result.get("success") and result.get("intent_detected")):
+            return {
+                "success": True,
+                "response": result.get("output", ""),
+                "routing": "intent"
+            }
+        
+        intent_data = result.get("intent_data", {})
+        
+        # Handle resource_type: convert list to comma-separated string
+        resource_type = intent_data.get("resource_type")
+        if isinstance(resource_type, list):
+            resource_type = ",".join(resource_type)
+            logger.info(f"🔧 Converted resource_type list to string: {resource_type}")
+        
+        state.set_intent(
+            resource_type=resource_type,
+            operation=intent_data.get("operation"),
+            required_params=intent_data.get("required_params", []),
+            optional_params=intent_data.get("optional_params", [])
+        )
+        
+        # Add extracted parameters
+        extracted_params = intent_data.get("extracted_params", {})
+        if extracted_params:
+            state.add_parameters(extracted_params)
+        
+        # Check for clarifications or ambiguities
+        clarification_needed = intent_data.get("clarification_needed")
+        ambiguities = intent_data.get("ambiguities", [])
+        
+        # Handle multi-resource requests
+        is_multi_resource = state.resource_type and (
+            "," in str(state.resource_type) or " and " in str(state.resource_type).lower()
+        )
+        
+        if is_multi_resource:
+            logger.info(f"✅ Multi-resource confirmed: {state.resource_type}")
+            ambiguities = [amb for amb in ambiguities if not any(
+                keyword in amb.lower() for keyword in ["multiple resource", "two resource", "two different"]
+            )]
+            if not ambiguities:
+                clarification_needed = None
+        
+        if clarification_needed or ambiguities:
+            ambiguity_text = ""
+            if ambiguities:
+                ambiguity_text = f"\n\n**Ambiguities detected:**\n" + "\n".join(f"- {amb}" for amb in ambiguities)
+            
+            response_text = clarification_needed or "I need some clarification to proceed."
+            response_text += ambiguity_text
+            
+            return {
+                "success": True,
+                "response": response_text,
+                "routing": "intent",
+                "intent_data": intent_data,
+                "metadata": {"clarification_needed": True, "ambiguities": ambiguities}
+            }
+        
+        # Check if resource type is valid
+        if not state.resource_type or state.resource_type == "None":
+            logger.error(f"❌ IntentAgent failed to determine resource type")
+            return {
+                "success": False,
+                "response": "I couldn't determine what resource you're asking about. Could you please clarify?",
+                "routing": "intent",
+                "intent_data": intent_data
+            }
+        
+        # Check if we need more parameters OR if ready to execute
+        if state.missing_params:
+            logger.info(f"🔄 Missing params: {state.missing_params}, routing to ValidationAgent")
+            state.status = ConversationStatus.COLLECTING_PARAMS
+            return await self._handle_validation_routing(user_input, state, user_roles)
+        else:
+            # No missing params - proceed directly to execution
+            logger.info(f"✅ All params collected, executing immediately")
+            state.status = ConversationStatus.EXECUTING
+            return await self._handle_execution_routing(state, user_roles)
+    
+    async def _handle_validation_routing(
+        self,
+        user_input: str,
+        state: ConversationState,
+        user_roles: List[str]
+    ) -> Dict[str, Any]:
+        """Handle routing to validation agent."""
+        state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", "Parameter validation")
+        
+        if not self.validation_agent:
+            return {
+                "success": False,
+                "response": "Validation agent not available",
+                "routing": "validation"
+            }
+        
+        result = await self.validation_agent.execute(user_input, {
+            "session_id": state.session_id,
+            "conversation_state": state.to_dict()
+        })
+        
+        # Check if validation made us ready to execute
+        if result.get("ready_to_execute") and result.get("success"):
+            logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
+            state.status = ConversationStatus.EXECUTING
+            return await self._handle_execution_routing(state, user_roles)
+        
+        return {
+            "success": True,
+            "response": result.get("output", ""),
+            "routing": "validation",
+            "metadata": {
+                "missing_params": result.get("missing_params", []),
+                "ready_to_execute": result.get("ready_to_execute", False)
+            }
+        }
+    
+    async def _handle_execution_routing(
+        self,
+        state: ConversationState,
+        user_roles: List[str]
+    ) -> Dict[str, Any]:
+        """Handle routing to execution agent."""
+        state.handoff_to_agent("OrchestratorAgent", "ExecutionAgent", "Executing operation")
+        state.status = ConversationStatus.EXECUTING
+        
+        if not self.execution_agent:
+            return {
+                "success": False,
+                "response": "Execution agent not available",
+                "routing": "execution"
+            }
+        
+        result = await self.execution_agent.execute("", {
+            "session_id": state.session_id,
+            "conversation_state": state.to_dict(),
+            "user_roles": user_roles or []
+        })
+        
+        if result.get("success"):
+            state.set_execution_result(result.get("execution_result", {}))
+        else:
+            state.set_execution_result({
+                "success": False,
+                "error": result.get("error", "Execution failed")
+            })
+        
+        return {
+            "success": True,
+            "response": result.get("output", ""),
+            "routing": "execution",
+            "execution_result": result.get("execution_result"),
+            "metadata": {
+                "collected_params": state.collected_params,
+                "resource_type": state.resource_type,
+                "operation": state.operation
+            }
+        }
+    
+    async def _handle_rag_routing(
+        self,
+        user_input: str,
+        state: ConversationState
+    ) -> Dict[str, Any]:
+        """Handle routing to RAG agent."""
+        state.handoff_to_agent("OrchestratorAgent", "RAGAgent", "Documentation query")
+        
+        if not self.rag_agent:
+            return {
+                "success": False,
+                "response": "RAG agent not available",
+                "routing": "rag"
+            }
+        
+        result = await self.rag_agent.execute(user_input, {
+            "session_id": state.session_id
+        })
+        
+        return {
+            "success": True,
+            "response": result.get("output", ""),
+            "routing": "rag"
+        }
