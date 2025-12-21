@@ -91,13 +91,31 @@ class LLMFormatterService:
         Returns:
             Prompt string for LLM
         """
+        # Calculate ACTUAL count BEFORE truncation
+        actual_count = 0
+        if isinstance(raw_data, list):
+            actual_count = len(raw_data)
+        elif isinstance(raw_data, dict):
+            # Try common keys for nested data
+            for key in ["data", "clusters", "vms", "services", "department", "environments"]:
+                if key in raw_data and isinstance(raw_data[key], list):
+                    actual_count = len(raw_data[key])
+                    break
+        
         # Truncate data if too large
         data_str = json.dumps(raw_data, indent=2, default=str)
+        is_truncated = False
         if len(data_str) > 8000:
             data_str = data_str[:8000] + "\n... (truncated)"
+            is_truncated = True
         
         # Get resource-specific instructions
         resource_instructions = self._get_resource_instructions(resource_type, context)
+        
+        # Add count notice if truncated
+        count_notice = ""
+        if is_truncated and actual_count > 0:
+            count_notice = f"\n\n**IMPORTANT: The data below is truncated for processing. The ACTUAL total count is {actual_count} items. Always report this exact count in your summary.**"
         
         return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
 
@@ -106,6 +124,7 @@ class LLMFormatterService:
 **Operation:** {operation}
 
 **Resource Type:** {resource_type}
+{count_notice}
 
 **Raw Data:**
 ```json
@@ -160,6 +179,16 @@ Do NOT include raw JSON. Present only the formatted, user-friendly response."""
 - Show total environment count
 - Key fields: name, ID, department, zone info
 - Group by department or zone if available""",
+            
+            "zone": """**Zone/Network Segment Specific:**
+- Show zone name, CIDR, and status (DRAFT/DEPLOYED)
+- Key fields: zoneName, cidr, status, departmentName, environmentName, endpointName
+- Highlight hypervisors (VCD_ESXI, ESXI, etc.)
+- Show network type (Direct, VLAN, etc.)
+- Group by department or endpoint for clarity
+- Add 🟢 for DEPLOYED, 🟡 for DRAFT status
+- Show usable IPs count if available
+- Note if zone is AI-enabled (isAiZone) or NAS-enabled (isNasZone)""",
             
             "k8s_cluster": """**Kubernetes Cluster Specific:**
 - Show cluster name, status, K8s version, location

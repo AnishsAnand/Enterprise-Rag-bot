@@ -2434,6 +2434,112 @@ class APIExecutorService:
                 "data": None
             }
     
+    async def get_zones_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get zones (network segments/VLANs) listing for engagement.
+        Uses per-user session storage to avoid repeated API calls.
+        
+        Args:
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
+            
+        Returns:
+            Dict with zones data including CIDR, hypervisors, status, and associated environments
+        """
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+            
+            # Check user session cache first
+            if not force_refresh:
+                session = await self._get_user_session(user_id)
+                if session and "zones_list" in session:
+                    zones = session["zones_list"]
+                    logger.debug(f"✅ Using cached zones from session ({len(zones)} zones)")
+                    return {
+                        "success": True,
+                        "data": zones,
+                        "zones": zones,
+                        "ipc_engagement_id": session.get("ipc_engagement_id")
+                    }
+            
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "data": None
+                    }
+                
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            url = f"https://ipcloud.tatacommunications.com/portalservice/api/v1/{ipc_engagement_id}/zonelist"
+            logger.info(f"🌐 Fetching zones from: {url}")
+            
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {
+                    "success": False,
+                    "error": "Failed to get authentication token",
+                    "data": None
+                }
+            
+            # Make API call
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get("status") == "success":
+                    zones = data.get("data", [])
+                    
+                    # Update user session with zones data
+                    await self._update_user_session(
+                        user_id=user_id,
+                        zones_list=zones
+                    )
+                    
+                    logger.info(f"✅ Cached {len(zones)} zones")
+                    
+                    return {
+                        "success": True,
+                        "data": zones,
+                        "zones": zones,
+                        "ipc_engagement_id": ipc_engagement_id
+                    }
+                else:
+                    logger.error(f"❌ API returned error: {data}")
+                    return {
+                        "success": False,
+                        "error": data.get("message", "Unknown error"),
+                        "data": None
+                    }
+                    
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching zones: {e}")
+            return {
+                "success": False,
+                "error": f"HTTP {e.response.status_code}: {str(e)}",
+                "data": None
+            }
+        except Exception as e:
+            logger.error(f"❌ Error fetching zones: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": None
+            }
+    
     def __repr__(self) -> str:
         resource_count = len(self.resource_schema.get("resources", {}))
         return f"<APIExecutorService(resources={resource_count})>"

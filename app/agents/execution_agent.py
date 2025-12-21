@@ -964,6 +964,33 @@ Be professional, helpful, and always provide actionable information."""
                         "execution_result": execution_result
                     }
             
+            # Special handling for Zone listing with LLM formatting
+            elif state.resource_type == "zone" and state.operation == "list":
+                logger.info("🌐 Using get_zones_list method with LLM formatting")
+                execution_result = await api_executor_service.get_zones_list(
+                    ipc_engagement_id=None,  # Will be fetched automatically
+                    user_id=user_id
+                )
+                
+                # Apply LLM formatting if successful
+                if execution_result.get("success"):
+                    raw_data = execution_result.get("data", execution_result.get("zones", []))
+                    user_query = context.get("user_query", "list zones") if context else "list zones"
+                    formatted_response = await llm_formatter.format_response(
+                        resource_type="zone",
+                        operation="list",
+                        raw_data=raw_data,
+                        user_query=user_query
+                    )
+                    # Return early with formatted response
+                    state.status = ConversationStatus.COMPLETED
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": formatted_response,
+                        "execution_result": execution_result
+                    }
+            
             # Special handling for VM listing
             elif state.resource_type == "vm" and state.operation == "list":
                 logger.info("📋 Using list_vms method")

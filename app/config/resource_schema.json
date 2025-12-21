@@ -192,6 +192,67 @@
           }
         }
       },
+      "zone": {
+        "operations": ["list"],
+        "aliases": ["zone", "zones", "network zone", "network zones", "vlan", "vlans", "subnet", "subnets"],
+        "api_endpoints": {
+          "list": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/api/v1/{ipc_engagement_id}/zonelist",
+            "description": "List all zones (network segments) for the engagement with CIDR, hypervisors, and status"
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": ["ipc_engagement_id"],
+            "optional": []
+          }
+        },
+        "response_mapping": {
+          "zones": "data",
+          "zone_ids": "data[*].zoneId",
+          "zone_names": "data[*].zoneName",
+          "departments": "data[*].departmentName",
+          "environments": "data[*].environmentName"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        },
+        "workflow": {
+          "list_zones": {
+            "description": "List zones for the engagement with CIDR and status info",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "convert_to_ipc_engagement",
+                "resource": "k8s_cluster",
+                "operation": "get_ipc_engagement",
+                "depends_on": ["engagement_id"],
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 3,
+                "action": "list_zones",
+                "resource": "zone",
+                "operation": "list",
+                "depends_on": ["ipc_engagement_id"],
+                "display_result": true,
+                "display_format": "table",
+                "display_columns": ["zoneName", "departmentName", "environmentName", "cidr", "status", "endpointName", "hypervisors"]
+              }
+            ]
+          }
+        }
+      },
       "k8s_cluster": {
         "operations": ["create", "update", "delete", "list"],
         "api_endpoints": {
