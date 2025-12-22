@@ -267,28 +267,70 @@ async def chat_completions(
         logger.info(f"👤 User: {user_id} | Using stored credentials for API auth")
         
         # Generate stable session ID for Open WebUI conversations
-        # Open WebUI maintains conversation context via messages array
-        # We create a stable session ID based on the conversation
+        # 
+        # KEY INSIGHT: Open WebUI sends ALL messages in the conversation with each request.
+        # - Single message (len=1): This is a NEW CHAT
+        # - Multiple messages (len>1): This is a CONTINUING chat
+        #
+        # Session ID uses ONLY the first message for consistency across all requests.
+        # For NEW chats, we detect and clear stale state from previous chats.
         import hashlib
+        from datetime import datetime
         
-        # Extract conversation ID from Open WebUI metadata if available
-        # Open WebUI passes chat_id in some contexts, but primarily uses message history
-        conversation_signature = ""
+        is_new_chat = len(request.messages) == 1
         
-        # Try to get a stable identifier from the conversation
-        if len(conversation_history) > 0:
-            # Use first message as conversation anchor
-            first_msg = conversation_history[0].get("content", "")[:100]
+        if len(request.messages) > 0:
+            # Use ONLY first message for session ID - this is stable across entire conversation
+            first_msg = request.messages[0].content[:100] if request.messages[0].content else ""
             conversation_signature = hashlib.md5(f"{user_id}:{first_msg}".encode()).hexdigest()[:16]
             session_id = f"openwebui_{conversation_signature}"
-            logger.info(f"📋 Using stable session ID from conversation: {session_id}")
+            
+            if is_new_chat:
+                logger.info(f"📋 NEW CHAT - Session: {session_id}")
+            else:
+                logger.info(f"📋 CONTINUING CHAT ({len(request.messages)} msgs) - Session: {session_id}")
         else:
-            # New conversation - create a time-bucketed session (10-minute windows)
-            from datetime import datetime
+            # Edge case: no messages at all (shouldn't happen)
             time_bucket = str(datetime.utcnow().hour) + str(datetime.utcnow().minute // 10)
             conversation_signature = hashlib.md5(f"{user_id}:{time_bucket}".encode()).hexdigest()[:16]
             session_id = f"openwebui_new_{conversation_signature}"
-            logger.info(f"📋 New conversation session: {session_id}")
+            logger.info(f"📋 New conversation session (no messages): {session_id}")
+        
+        # CRITICAL: For new chats (single message), detect and clear stale state
+        # This prevents the bug where "create a cluster" loads old state from a DIFFERENT chat
+        # that happened to start with the same message.
+        #
+        # How we detect stale state:
+        # - It's a new chat (single message)
+        # - Existing session has last_asked_param set (was waiting for user input)
+        # - The message looks like a command/intent, not an answer to a question
+        if is_new_chat:
+            from app.agents.state.conversation_state import conversation_state_manager
+            existing_state = conversation_state_manager.get_session(session_id)
+            if existing_state:
+                is_stale = False
+                
+                # Check if session has pending state (was waiting for input)
+                if hasattr(existing_state, 'last_asked_param') and existing_state.last_asked_param:
+                    # Check if the current message looks like a new intent vs an answer
+                    # Intent patterns: questions, commands, "create/list/show/delete" etc.
+                    intent_patterns = ['create', 'list', 'show', 'delete', 'update', 'what', 'how', 'can you', 'please', 'help']
+                    msg_lower = user_message.lower()
+                    looks_like_intent = any(pattern in msg_lower for pattern in intent_patterns)
+                    
+                    if looks_like_intent:
+                        is_stale = True
+                        logger.info(f"🧹 Detected stale session (last_asked: {existing_state.last_asked_param}, new intent detected)")
+                
+                # Also check if session was from a previous completed/failed conversation
+                from app.agents.state.conversation_state import ConversationStatus
+                if existing_state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
+                    is_stale = True
+                    logger.info(f"🧹 Detected stale session (status: {existing_state.status.value})")
+                
+                if is_stale:
+                    logger.info(f"🗑️ Clearing stale session to start fresh")
+                    conversation_state_manager.delete_session(session_id)
         
         # Handle streaming vs non-streaming
         if request.stream:

@@ -41,35 +41,37 @@ class ParameterExtractor:
         try:
             logger.info(f"🔍 Matching user input: '{user_input}' against {len(available_options)} options")
             
-            # Format options for LLM
+            # Format options for LLM - INCLUDE IDs so LLM knows the correct ID to return
             formatted_options = "\n".join([
-                f"- {opt.get('name', opt.get('itemName', str(opt)))}" 
+                f"- ID: {opt.get('id')}, Name: {opt.get('name', opt.get('itemName', str(opt)))}" 
                 for opt in available_options
             ])
             
-            prompt = f"""The user was shown these options:
+            prompt = f"""The user was shown these options (each with its ID):
 {formatted_options}
 
 The user responded with: "{user_input}"
 
 Match the user's response to the available options. Handle:
 - Exact matches (case-insensitive)
-- Partial matches (e.g., "delhi" matches "Delhi")
+- Partial matches (e.g., "delhi" matches "Delhi", "bengaluru" matches "India South(Bengaluru)")
 - Multiple selections (e.g., "delhi, bengaluru" or "delhi and mumbai")
 - "all" means select all options
 - Typos and aliases
 
+IMPORTANT: Use the EXACT ID from the options list above, not an index number!
+
 Respond with ONLY valid JSON in this format:
-{{"matched": true, "matched_item": {{"id": ..., "name": "..."}}, "matched_ids": [...], "matched_names": [...]}}
+{{"matched": true, "matched_item": {{"id": <exact_id_from_list>, "name": "<name>"}}, "matched_ids": [<ids>], "matched_names": [<names>]}}
 
 OR if no match:
 {{"matched": false, "no_match": true}}
 
 If "all" was requested:
-{{"matched": true, "all": true, "matched_ids": [...all ids...], "matched_names": [...all names...]}}
+{{"matched": true, "all": true, "matched_ids": [<all_ids_from_list>], "matched_names": [<all_names>]}}
 
 If multiple matches:
-{{"matched": true, "multiple": true, "matched_ids": [...], "matched_names": [...]}}
+{{"matched": true, "multiple": true, "matched_ids": [<ids>], "matched_names": [<names>]}}
 """
             
             llm_response = await ai_service._call_chat_with_retries(

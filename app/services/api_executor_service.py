@@ -1784,6 +1784,10 @@ class APIExecutorService:
         """
         Check if cluster name is available using resource_schema.json configuration.
         
+        API Response format:
+        - Name TAKEN: {"status": "success", "data": {"clusterName": "xyz", "clusterId": 123}, ...}
+        - Name AVAILABLE: {"status": "success", "data": {}, ...}
+        
         Args:
             cluster_name: Name to check
             
@@ -1801,25 +1805,38 @@ class APIExecutorService:
         )
         
         if result.get("success"):
-            # Empty response or specific success status means available
-            data = result.get("data", {})
+            # The API response is wrapped: result["data"] contains the full API response
+            # API response format: {"status": "success", "data": {...}, "message": "OK", "responseCode": 200}
+            api_response = result.get("data", {})
             
-            # If response is empty dict or has no data, name is available
-            is_available = not data or data == {} or data.get("status") == "available"
+            # Get the nested "data" field from the API response
+            # - If data is empty {} → name is AVAILABLE
+            # - If data has clusterName/clusterId → name is TAKEN
+            inner_data = api_response.get("data", {})
             
-            logger.info(f"✅ Cluster name '{cluster_name}' availability: {is_available}")
+            # Name is available if inner_data is empty
+            is_available = not inner_data or inner_data == {}
+            
+            if is_available:
+                logger.info(f"✅ Cluster name '{cluster_name}' is AVAILABLE")
+            else:
+                existing_cluster = inner_data.get("clusterName", cluster_name)
+                existing_id = inner_data.get("clusterId", "unknown")
+                logger.info(f"❌ Cluster name '{cluster_name}' is TAKEN (existing: {existing_cluster}, ID: {existing_id})")
+            
             return {
                 "success": True,
                 "available": is_available,
-                "message": f"Cluster name '{cluster_name}' is {'available' if is_available else 'already taken'}"
+                "message": f"Cluster name '{cluster_name}' is {'available' if is_available else 'already taken'}",
+                "existing_cluster": inner_data if not is_available else None
             }
         
         # API call failed
-        logger.error(f"❌ Failed to check cluster name availability")
+        logger.error(f"❌ Failed to check cluster name availability: {result.get('error')}")
         return {
             "success": False,
             "available": False,
-            "error": "Failed to verify cluster name availability",
+            "error": result.get("error", "Failed to verify cluster name availability"),
             "message": "Unable to check cluster name availability at this time"
         }
     
@@ -2239,14 +2256,17 @@ class APIExecutorService:
                 session = await self._get_user_session(user_id)
                 if session and "business_units" in session:
                     bu_data = session["business_units"]
-                    logger.debug(f"✅ Using cached business units from session ({len(bu_data.get('departments', []))} BUs)")
+                    cached_depts = bu_data.get("department", []) if bu_data else []
+                    logger.info(f"📋 Using cached business units from session ({len(cached_depts)} BUs)")
                     return {
                         "success": True,
                         "data": bu_data,
                         "engagement": bu_data.get("engagement"),
-                        "departments": bu_data.get("departments", []),
+                        "departments": cached_depts,
                         "ipc_engagement_id": session.get("ipc_engagement_id")
                     }
+            else:
+                logger.info(f"🔄 Force refresh requested, bypassing cache")
             
             # Get IPC engagement ID if not provided
             if not ipc_engagement_id:
@@ -2261,7 +2281,7 @@ class APIExecutorService:
                 logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
             
             url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}"
-            logger.info(f"🏢 Fetching business units from: {url}")
+            logger.info(f"🏢 Fetching business units from: {url} (IPC engagement ID: {ipc_engagement_id})")
             
             # Get auth token
             token = await self._get_or_refresh_token()
@@ -2283,11 +2303,19 @@ class APIExecutorService:
                 response.raise_for_status()
                 
                 data = response.json()
+                logger.info(f"🏢 Raw API response status: {data.get('status')}")
                 
                 if data.get("status") == "success":
                     departments = data.get("data", {}).get("department", [])
                     engagement_info = data.get("data", {}).get("engagement", {})
                     bu_data = data.get("data")
+                    
+                    logger.info(f"🏢 API returned {len(departments)} departments for engagement: {engagement_info}")
+                    
+                    # Log first few departments for debugging
+                    if departments:
+                        for dept in departments[:3]:
+                            logger.info(f"🏢 Sample dept: {dept.get('name')} (ID: {dept.get('id')}, endpoint: {dept.get('endpoint')})")
                     
                     # Update user session with business units data
                     await self._update_user_session(

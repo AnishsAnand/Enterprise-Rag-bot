@@ -395,6 +395,70 @@ Respond with ONLY ONE of these:
             logger.error(f"❌ LLM routing failed: {e}, using rule-based fallback")
             return self._rule_based_routing(user_input)
     
+    def _normalize_param_names(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize parameter names from LLM extraction to expected formats.
+        
+        Converts snake_case (from LLM) to camelCase (expected by handlers).
+        Also handles common aliases.
+        
+        Args:
+            params: Dictionary of extracted parameters
+            
+        Returns:
+            Normalized parameter dictionary
+        """
+        # Mapping from LLM-extracted names to expected handler names
+        name_mapping = {
+            # Cluster parameters
+            "cluster_name": "clusterName",
+            "clustername": "clusterName",
+            "name": "clusterName",  # When context is cluster creation
+            "cluster": "clusterName",
+            
+            # Datacenter/location parameters  
+            "datacenter": "datacenter",
+            "data_center": "datacenter",
+            "location": "_detected_location",
+            "endpoint": "_detected_location",
+            
+            # Version parameters
+            "k8s_version": "k8sVersion",
+            "kubernetes_version": "k8sVersion",
+            "version": "k8sVersion",
+            
+            # Worker pool parameters
+            "worker_pool_name": "workerPoolName",
+            "pool_name": "workerPoolName",
+            
+            # Node parameters
+            "node_type": "nodeType",
+            "replica_count": "replicaCount",
+            "node_count": "replicaCount",
+            "replicas": "replicaCount",
+            
+            # Other parameters
+            "cni_driver": "cniDriver",
+            "cni": "cniDriver",
+            "business_unit": "businessUnit",
+            "operating_system": "operatingSystem",
+            "os": "operatingSystem",
+            "enable_autoscaling": "enableAutoscaling",
+            "autoscaling": "enableAutoscaling",
+            "max_replicas": "maxReplicas",
+        }
+        
+        normalized = {}
+        for key, value in params.items():
+            # Check if we have a mapping for this key
+            normalized_key = name_mapping.get(key.lower(), key)
+            normalized[normalized_key] = value
+            
+            if normalized_key != key:
+                logger.info(f"🔄 Normalized param: {key} → {normalized_key}")
+        
+        return normalized
+    
     def _rule_based_routing(self, user_input: str) -> Dict[str, Any]:
         """
         Rule-based fallback routing when LLM fails.
@@ -704,14 +768,24 @@ Please provide a natural, helpful response showing these filtered results."""
             optional_params=intent_data.get("optional_params", [])
         )
         
-        # Add extracted parameters
+        # Add extracted parameters (normalize naming conventions)
         extracted_params = intent_data.get("extracted_params", {})
         if extracted_params:
-            state.add_parameters(extracted_params)
+            normalized_params = self._normalize_param_names(extracted_params)
+            state.add_parameters(normalized_params)
         
         # Check for clarifications or ambiguities
         clarification_needed = intent_data.get("clarification_needed")
         ambiguities = intent_data.get("ambiguities", [])
+        
+        # SPECIAL CASE: For CREATE operations on k8s_cluster, skip ambiguities
+        # The ClusterCreationHandler has its own step-by-step workflow that guides users
+        # through all required parameters. We don't want IntentAgent's ambiguities
+        # to interfere with that workflow.
+        if state.operation == "create" and state.resource_type == "k8s_cluster":
+            logger.info(f"🎯 Create cluster detected - skipping IntentAgent ambiguities, using step-by-step workflow")
+            clarification_needed = None
+            ambiguities = []
         
         # Handle multi-resource requests
         is_multi_resource = state.resource_type and (
