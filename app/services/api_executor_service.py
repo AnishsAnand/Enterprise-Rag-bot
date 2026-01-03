@@ -2082,141 +2082,229 @@ class APIExecutorService:
     
     async def get_os_images(self, zone_id: int, circuit_id: str, k8s_version: str) -> Dict[str, Any]:
         """
-        Get OS images for zone, filtered by k8s version using resource_schema.json configuration.
+        Get OS images (templates) for zone, filtered by k8s version.
+        
+        Uses the templates API: /uat-portalservice/configservice/templates/{zoneId}?type=Container
+        Filters by k8s version in the label/ImageName field.
+        Returns distinct options grouped by osMake + osVersion.
         
         Args:
             zone_id: Zone ID
-            circuit_id: Circuit ID
-            k8s_version: Kubernetes version to filter by
+            circuit_id: Circuit ID (not used by new API, kept for compatibility)
+            k8s_version: Kubernetes version to filter by (e.g., "v1.30.9")
             
         Returns:
             Dict with OS options
         """
-        logger.info(f"💿 Fetching OS images for zone {zone_id}, k8s {k8s_version}")
+        logger.info(f"💿 Fetching OS templates for zone {zone_id}, k8s {k8s_version}")
         
-        # Use the schema-based execute_operation method
-        result = await self.execute_operation(
-            resource_type="k8s_cluster",
-            operation="get_os_images",
-            params={
-                "zoneId": zone_id,
-                "circuitId": circuit_id
-            },
-            user_roles=None
-        )
-        
-        if result.get("success") and result.get("data"):
-            api_data = result["data"]
+        try:
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {"success": False, "error": "Failed to get auth token", "os_options": []}
+            
+            # Call the templates API directly
+            url = f"https://ipcloud.tatacommunications.com/uat-portalservice/configservice/templates/{zone_id}?type=Container"
+            logger.info(f"🌐 API Call: GET {url}")
+            
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                api_data = response.json()
             
             # Parse response
             if api_data.get("status") == "success" and api_data.get("data"):
                 images = api_data["data"].get("image", {}).get("options", [])
+                logger.info(f"📦 Found {len(images)} total OS images from API")
                 
-                # Filter by k8s version
-                filtered = [img for img in images if k8s_version in img.get("label", "")]
+                # Filter by k8s version - check both label and ImageName fields
+                # k8s_version might be "v1.30.9" - also try without the 'v' prefix
+                version_patterns = [k8s_version]
+                if k8s_version.startswith("v"):
+                    version_patterns.append(k8s_version[1:])  # Also try "1.30.9"
                 
-                # Group by osMake + osVersion
+                filtered = []
+                for img in images:
+                    label = img.get("label", "") or ""
+                    image_name = img.get("ImageName", "") or ""
+                    # Check if any version pattern matches
+                    if any(pattern in label or pattern in image_name for pattern in version_patterns):
+                        filtered.append(img)
+                
+                logger.info(f"🎯 Filtered to {len(filtered)} images matching k8s version {k8s_version}")
+                
+                # Group by osMake + osVersion (distinct display names)
                 grouped = {}
                 for img in filtered:
-                    key = f"{img.get('osMake', '')} {img.get('osVersion', '')}"
+                    os_make = img.get('osMake', 'Unknown')
+                    os_version = img.get('osVersion', '')
+                    key = f"{os_make} {os_version}".strip()
+                    
                     if key not in grouped:
                         grouped[key] = {
                             "display_name": key,
                             "os_id": img.get("id"),
-                            "os_make": img.get("osMake"),
+                            "os_make": os_make,
                             "os_model": img.get("osModel"),
-                            "os_version": img.get("osVersion"),
+                            "os_version": os_version,
                             "hypervisor": img.get("hypervisor"),
-                            "images": []
+                            "image_id": img.get("IMAGEID"),
+                            "image_name": img.get("ImageName"),
+                            "images": []  # Store all matching images
                         }
                     grouped[key]["images"].append(img)
                 
-                logger.info(f"✅ Found {len(grouped)} OS options from API")
+                logger.info(f"✅ Found {len(grouped)} distinct OS options: {list(grouped.keys())}")
                 return {
                     "success": True,
                     "os_options": list(grouped.values())
                 }
-        
-        # API failed
-        logger.error("❌ Failed to fetch OS images from API")
-        return {
-            "success": False,
-            "error": "Failed to fetch OS image data from API",
-            "os_options": []
-        }
+            else:
+                logger.error(f"❌ API returned error: {api_data}")
+                return {"success": False, "error": "API returned error", "os_options": []}
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching OS images: {e}")
+            return {"success": False, "error": f"HTTP {e.response.status_code}", "os_options": []}
+        except Exception as e:
+            logger.error(f"❌ Error fetching OS images: {str(e)}")
+            return {"success": False, "error": str(e), "os_options": []}
     
-    async def get_flavors(self, zone_id: int, circuit_id: str, os_model: str, node_type: str = None) -> Dict[str, Any]:
+    async def get_flavors(self, zone_id: int, os_model: str = None, node_type: str = None, k8s_version: str = None) -> Dict[str, Any]:
         """
-        Get compute flavors for zone, filtered by OS and optionally node type using resource_schema.json configuration.
+        Get compute flavors for zone using the flavordetails API.
+        
+        API: GET /uat-portalservice/configservice/flavordetails/{zoneId}
         
         Args:
             zone_id: Zone ID
-            circuit_id: Circuit ID
-            os_model: OS model (e.g., "ubuntu")
-            node_type: Node type to filter (generalPurpose, computeOptimized, memoryOptimized)
+            os_model: OS model to filter (e.g., "ubuntu") - optional
+            node_type: Node type to filter (generalPurpose, computeOptimized, memoryOptimized) - optional
+            k8s_version: Kubernetes version to filter (e.g., "v1.30.9") - optional
             
         Returns:
-            Dict with flavor options
+            Dict with node_types (unique flavorCategory values) and formatted flavors
         """
-        logger.info(f"💻 Fetching flavors for zone {zone_id}, OS {os_model}, node type {node_type}")
+        logger.info(f"💻 Fetching flavors for zone {zone_id}, OS filter: {os_model}, node type filter: {node_type}, k8s version: {k8s_version}")
         
-        # Use the schema-based execute_operation method
-        result = await self.execute_operation(
-            resource_type="k8s_cluster",
-            operation="get_flavors",
-            params={
-                "zoneId": zone_id,
-                "circuitId": circuit_id
-            },
-            user_roles=None
-        )
-        
-        if result.get("success") and result.get("data"):
-            api_data = result["data"]
+        try:
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {"success": False, "error": "Failed to get auth token", "node_types": [], "flavors": []}
+            
+            # Call the flavordetails API directly
+            url = f"https://ipcloud.tatacommunications.com/uat-portalservice/configservice/flavordetails/{zone_id}"
+            logger.info(f"🌐 API Call: GET {url}")
+            
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                api_data = response.json()
             
             # Parse response
             if api_data.get("status") == "success" and api_data.get("data"):
-                flavors = api_data["data"].get("flavor", [])
+                all_flavors = api_data["data"].get("flavor", [])
+                logger.info(f"📦 Found {len(all_flavors)} total flavors from API")
                 
-                # Filter by OS model and application type
-                filtered = [f for f in flavors if f.get("osModel") == os_model and f.get("applicationType") == "Container"]
+                # Debug: Log sample flavor to see structure
+                if all_flavors:
+                    sample = all_flavors[0]
+                    logger.info(f"🔍 Sample flavor: applicationType={sample.get('applicationType')}, osModel={sample.get('osModel')}, flavorCategory={sample.get('flavorCategory')}")
+                    # Log all unique applicationTypes and flavorCategories for debugging
+                    app_types = set(f.get("applicationType", "N/A") for f in all_flavors)
+                    flavor_cats = set(f.get("flavorCategory", "N/A") for f in all_flavors)
+                    logger.info(f"🔍 All applicationType values: {app_types}")
+                    logger.info(f"🔍 All flavorCategory values: {flavor_cats}")
+                
+                # STRICT Filter by applicationType = "Container" (exact match)
+                container_flavors = [f for f in all_flavors if f.get("applicationType") == "Container"]
+                logger.info(f"🎯 Found {len(container_flavors)} container flavors (applicationType=Container)")
+                
+                # No k8s version filtering for flavors - flavors are compute configs, not tied to k8s version
+                
+                # Filter by OS model if provided (case-insensitive partial match)
+                if os_model and container_flavors:
+                    os_model_lower = os_model.lower()
+                    # Try partial match (e.g., "ubuntu" matches "ubuntu" in osModel)
+                    filtered_by_os = [f for f in container_flavors 
+                                      if os_model_lower in f.get("osModel", "").lower() 
+                                      or f.get("osModel", "").lower() in os_model_lower]
+                    if filtered_by_os:
+                        container_flavors = filtered_by_os
+                        logger.info(f"🎯 Filtered to {len(container_flavors)} flavors matching OS '{os_model}'")
+                    else:
+                        logger.info(f"⚠️ No OS match for '{os_model}', keeping all {len(container_flavors)} container flavors")
+                
+                logger.info(f"🎯 Total flavors after filtering: {len(container_flavors)}")
+                
+                # Extract unique node types (flavorCategory) - use raw values
+                node_types_set = set()
+                for f in container_flavors:
+                    cat = f.get("flavorCategory")
+                    if cat:
+                        node_types_set.add(cat)
+                
+                node_types = list(node_types_set)
+                logger.info(f"📋 Found {len(node_types)} unique node types: {node_types}")
                 
                 # Further filter by node type if provided
                 if node_type:
-                    filtered = [f for f in filtered if f.get("flavorCategory") == node_type]
+                    container_flavors = [f for f in container_flavors if f.get("flavorCategory") == node_type]
+                    logger.info(f"🎯 Filtered to {len(container_flavors)} flavors for node type '{node_type}'")
                 
-                # Extract unique node types for the first query
-                node_types = list(set([f.get("flavorCategory") for f in filtered if f.get("flavorCategory")]))
-                
-                # Format flavors
+                # Format flavors with display name like "8 vCPU / 32 GB RAM / 100 GB Storage"
                 formatted_flavors = []
-                for flavor in filtered:
+                for flavor in container_flavors:
+                    vcpu = flavor.get("vCpu", 0)
+                    vram_mb = flavor.get("vRam", 0)
+                    vram_gb = vram_mb // 1024 if vram_mb else 0
+                    vdisk = flavor.get("vDisk", 0)
+                    
                     formatted_flavors.append({
                         "id": flavor.get("artifactId"),
-                        "name": f"{flavor.get('vCpu')} vCPU / {flavor.get('vRam', 0) // 1024} GB RAM / {flavor.get('vDisk')} GB Storage",
+                        "name": f"{vcpu} vCPU / {vram_gb} GB RAM / {vdisk} GB Storage",
+                        "display_name": flavor.get("display_name", flavor.get("FlavorName")),
                         "flavor_name": flavor.get("FlavorName"),
                         "sku_code": flavor.get("skuCode"),
-                        "vcpu": flavor.get("vCpu"),
-                        "vram_gb": flavor.get("vRam", 0) // 1024,
-                        "disk_gb": flavor.get("vDisk"),
-                        "node_type": flavor.get("flavorCategory")
+                        "circuit_id": flavor.get("circuitId"),
+                        "vcpu": vcpu,
+                        "vram_gb": vram_gb,
+                        "vram_mb": vram_mb,
+                        "disk_gb": vdisk,
+                        "node_type": flavor.get("flavorCategory"),
+                        "storage_type": flavor.get("storageType"),
+                        "os_model": flavor.get("osModel")
                     })
                 
-                logger.info(f"✅ Found {len(node_types)} node types, {len(formatted_flavors)} flavors from API")
+                logger.info(f"✅ Returning {len(node_types)} node types, {len(formatted_flavors)} formatted flavors")
                 return {
                     "success": True,
                     "node_types": node_types,
-                    "flavors": formatted_flavors
+                    "flavors": formatted_flavors,
+                    "all_flavors": container_flavors  # Keep raw data for reference
                 }
-        
-        # API failed
-        logger.error("❌ Failed to fetch flavors from API")
-        return {
-            "success": False,
-            "error": "Failed to fetch flavor data from API",
-            "node_types": [],
-            "flavors": []
-        }
+            else:
+                logger.error(f"❌ API returned error: {api_data}")
+                return {"success": False, "error": "API returned error", "node_types": [], "flavors": []}
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching flavors: {e}")
+            return {"success": False, "error": f"HTTP {e.response.status_code}", "node_types": [], "flavors": []}
+        except Exception as e:
+            logger.error(f"❌ Error fetching flavors: {str(e)}")
+            return {"success": False, "error": str(e), "node_types": [], "flavors": []}
     
     async def get_circuit_id(self, engagement_id: int) -> Optional[str]:
         """
@@ -2349,6 +2437,116 @@ class APIExecutorService:
             }
         except Exception as e:
             logger.error(f"❌ Error fetching business units: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": None
+            }
+    
+    async def get_department_details(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Get full department details including nested environments and zones.
+        
+        This API returns hierarchical data:
+        - departmentList (Business Units)
+            - environmentList (for each BU)
+                - zoneList (for each Environment)
+        
+        Args:
+            ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            user_id: User ID (email) for session lookup
+            force_refresh: Force fetch even if cached
+            
+        Returns:
+            Dict with full department hierarchy including environments and zones
+        """
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+            
+            # Check user session cache first
+            if not force_refresh:
+                session = await self._get_user_session(user_id)
+                if session and "department_details" in session:
+                    dept_data = session["department_details"]
+                    dept_list = dept_data.get("departmentList", [])
+                    logger.info(f"📋 Using cached department details ({len(dept_list)} departments)")
+                    return {
+                        "success": True,
+                        "data": dept_data,
+                        "departmentList": dept_list,
+                        "ipc_engagement_id": session.get("ipc_engagement_id")
+                    }
+            
+            # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "data": None
+                    }
+            
+            url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{ipc_engagement_id}"
+            logger.info(f"🏢 Fetching department details from: {url}")
+            
+            # Get auth token
+            token = await self._get_or_refresh_token()
+            if not token:
+                return {
+                    "success": False,
+                    "error": "Failed to get authentication token",
+                    "data": None
+                }
+            
+            # Make API call
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with httpx.AsyncClient(timeout=self.api_timeout) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get("status") == "success":
+                    dept_data = data.get("data", {})
+                    dept_list = dept_data.get("departmentList", [])
+                    
+                    # Update user session with department details
+                    await self._update_user_session(
+                        user_id=user_id,
+                        department_details=dept_data
+                    )
+                    
+                    logger.info(f"✅ Cached {len(dept_list)} departments with nested environments/zones")
+                    
+                    return {
+                        "success": True,
+                        "data": dept_data,
+                        "departmentList": dept_list,
+                        "ipc_engagement_id": ipc_engagement_id
+                    }
+                else:
+                    logger.error(f"❌ API returned error: {data}")
+                    return {
+                        "success": False,
+                        "error": data.get("message", "Unknown error"),
+                        "data": None
+                    }
+                    
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ HTTP error fetching department details: {e}")
+            return {
+                "success": False,
+                "error": f"HTTP {e.response.status_code}: {str(e)}",
+                "data": None
+            }
+        except Exception as e:
+            logger.error(f"❌ Error fetching department details: {str(e)}")
             return {
                 "success": False,
                 "error": str(e),

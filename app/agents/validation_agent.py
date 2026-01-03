@@ -625,6 +625,14 @@ If no match:
                 }
 
             # STEP 3: USE INTELLIGENT TOOLS for parameter collection
+            
+            # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
+            # This must be checked BEFORE missing_params check because cluster creation
+            # has its own internal workflow that doesn't rely on schema-defined required params
+            if state.operation == "create" and state.resource_type == "k8s_cluster":
+                logger.info("🎯 Routing to customer cluster creation workflow")
+                return await self._handle_cluster_creation(input_text, state)
+            
             if state.missing_params:
                 # SPECIAL HANDLING FOR ENDPOINT LISTING (no user input needed - just fetch and display)
                 if state.operation == "list" and state.resource_type == "endpoint":
@@ -643,11 +651,6 @@ If no match:
                         "output": "Fetching available endpoints...",
                         "ready_to_execute": True
                     }
-                
-                # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
-                if state.operation == "create" and state.resource_type == "k8s_cluster":
-                    logger.info("🎯 Routing to customer cluster creation workflow")
-                    return await self._handle_cluster_creation(input_text, state)
                 
                 # SPECIAL HANDLING FOR OTHER CREATE OPERATIONS
                 # For create, we need to collect params in order: name → endpoint → other params

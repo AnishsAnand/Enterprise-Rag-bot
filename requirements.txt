@@ -52,3 +52,8 @@ setuptools<81
 # Note: memorisdk is optional - we use a custom SQL-based session manager
 # that provides similar functionality without external dependencies
 sentence-transformers==2.2.2
+
+# Agentic Metrics (optional - for Azure AI Evaluation integration)
+# Our custom implementation doesn't require this, but you can install for
+# additional Azure AI Foundry integration:
+# azure-ai-evaluation>=1.0.0

@@ -197,11 +197,15 @@ class K8sClusterAgent(BaseResourceAgent):
         try:
             logger.info(f"🚀 Creating cluster with params: {list(params.keys())}")
             
+            # Transform collected params into API payload format
+            api_payload = self._build_cluster_payload(params)
+            logger.info(f"📦 Transformed payload keys: {list(api_payload.keys())}")
+            
             # Call API
             result = await api_executor_service.execute_operation(
                 resource_type="k8s_cluster",
                 operation="create",
-                params=params,
+                params=api_payload,
                 user_roles=context.get("user_roles", [])
             )
             
@@ -230,6 +234,97 @@ class K8sClusterAgent(BaseResourceAgent):
         except Exception as e:
             logger.error(f"❌ Error creating cluster: {str(e)}", exc_info=True)
             raise
+    
+    def _build_cluster_payload(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Transform collected parameters into API payload format for customer login.
+        
+        For customer login, the payload structure is:
+        - vmPurpose: "" (empty)
+        - clusterMode: "High availability" (hardcoded)
+        - dedicatedDeployment: false (hardcoded)
+        - Master node: hardcoded D8 flavor
+        - Worker nodes: from collected params
+        
+        Args:
+            params: Collected parameters from handler
+            
+        Returns:
+            API payload dict
+        """
+        # Extract OS details
+        os_info = params.get("operatingSystem", {})
+        flavor_info = params.get("flavor", {})
+        
+        # Build master node (hardcoded for customer)
+        master_node = {
+            "vmHostName": "",
+            "vmFlavor": "D8",
+            "skuCode": "D8.UBN",
+            "nodeType": "Master",
+            "replicaCount": 3,
+            "maxReplicaCount": None,
+            "additionalDisk": {},
+            "labelsNTaints": "no"
+        }
+        
+        # Build worker node
+        worker_node = {
+            "vmHostName": params.get("workerPoolName", ""),
+            "vmFlavor": flavor_info.get("flavor_name", "B4"),
+            "skuCode": flavor_info.get("sku_code", "B4.UBN"),
+            "nodeType": "Worker",
+            "replicaCount": params.get("replicaCount", 1),
+            "maxReplicaCount": params.get("maxReplicas") if params.get("enableAutoscaling") else None,
+            "additionalDisk": {},
+            "labelsNTaints": "no"
+        }
+        
+        # Build vmSpecificInput
+        vm_specific_input = [master_node, worker_node]
+        
+        # Build imageDetails
+        image_details = {
+            "valueOSModel": os_info.get("os_model"),
+            "valueOSMake": os_info.get("os_make"),
+            "valueOSVersion": os_info.get("os_version"),
+            "valueOSServicePack": None
+        }
+        
+        # Build CNI driver
+        cni_driver_payload = None
+        if params.get("cniDriver"):
+            cni_driver_payload = [{"name": params.get("cniDriver")}]
+        
+        # Build final payload
+        payload = {
+            "name": "",
+            "hypervisor": os_info.get("hypervisor"),
+            "purpose": "ipc",
+            "vmPurpose": "",
+            "imageId": os_info.get("os_id"),
+            "zoneId": params.get("_zone_id"),  # Hidden param from zone selection
+            "alertSuppression": True,
+            "iops": 1,
+            "isKdumpOrPageEnabled": "No",
+            "applicationType": "Container",
+            "application": "Containers",
+            "vmSpecificInput": vm_specific_input,
+            "clusterMode": "High availability",
+            "dedicatedDeployment": False,
+            "clusterName": params.get("clusterName"),
+            "k8sVersion": params.get("k8sVersion"),
+            "circuitId": flavor_info.get("circuit_id", "E-IPCTEAM-1602"),
+            "vApp": "",
+            "imageDetails": image_details
+        }
+        
+        # Add optional networkingDriver if present
+        if cni_driver_payload:
+            payload["networkingDriver"] = cni_driver_payload
+        
+        logger.info(f"✅ Built cluster payload: {payload.get('clusterName')}")
+        return payload
     
     async def _scale_cluster(
         self,

@@ -323,8 +323,22 @@ Always confirm destructive operations (delete, update) before executing."""
                 "filter_query": user_input
             }
         
+        # Check if we're awaiting confirmation (review step)
+        if state.status == "AWAITING_CONFIRMATION":
+            return {
+                "route": "validation",
+                "reason": "Awaiting user confirmation after review"
+            }
+        
         # Check if we're in the middle of parameter collection
         if state.status == ConversationStatus.COLLECTING_PARAMS:
+            # SPECIAL CASE: For k8s_cluster create, always route to validation
+            # (even if missing_params is empty, since it has its own workflow)
+            if state.operation == "create" and state.resource_type == "k8s_cluster":
+                return {
+                    "route": "validation",
+                    "reason": "Continuing cluster creation workflow"
+                }
             if state.missing_params:
                 return {
                     "route": "validation",
@@ -768,6 +782,13 @@ Please provide a natural, helpful response showing these filtered results."""
             optional_params=intent_data.get("optional_params", [])
         )
         
+        # Record intent for agentic metrics evaluation
+        self.record_intent(
+            intent=f"{intent_data.get('operation', 'unknown')}_{resource_type}",
+            resource_type=resource_type,
+            operation=intent_data.get("operation")
+        )
+        
         # Add extracted parameters (normalize naming conventions)
         extracted_params = intent_data.get("extracted_params", {})
         if extracted_params:
@@ -827,7 +848,13 @@ Please provide a natural, helpful response showing these filtered results."""
             }
         
         # Check if we need more parameters OR if ready to execute
-        if state.missing_params:
+        # SPECIAL CASE: For k8s_cluster create, always start with ValidationAgent
+        # to initiate the step-by-step workflow (even if missing_params is empty)
+        if state.operation == "create" and state.resource_type == "k8s_cluster":
+            logger.info(f"🎯 Starting cluster creation workflow - routing to ValidationAgent")
+            state.status = ConversationStatus.COLLECTING_PARAMS
+            return await self._handle_validation_routing(user_input, state, user_roles)
+        elif state.missing_params:
             logger.info(f"🔄 Missing params: {state.missing_params}, routing to ValidationAgent")
             state.status = ConversationStatus.COLLECTING_PARAMS
             return await self._handle_validation_routing(user_input, state, user_roles)

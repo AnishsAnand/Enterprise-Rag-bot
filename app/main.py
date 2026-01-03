@@ -14,7 +14,7 @@ import uvicorn
 
 from app.core.config import settings
 from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat
-from app.routers import openai_compatible
+from app.routers import openai_compatible, agentic_metrics
 from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
@@ -153,6 +153,9 @@ app.include_router(openai_compatible.router)
 
 app.include_router(auth_router)
 app.include_router(user_credentials.router)
+
+# Agentic Metrics API for agent evaluation
+app.include_router(agentic_metrics.router)
 
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent

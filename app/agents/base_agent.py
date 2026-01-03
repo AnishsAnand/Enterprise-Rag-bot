@@ -1,6 +1,13 @@
 """
 Base Agent class for the multi-agent system using LangChain.
 All specialized agents inherit from this base class.
+
+Enhanced with Agentic Metrics for evaluation:
+- Task Adherence: How well does the response satisfy the request?
+- Tool Call Accuracy: Were tools used correctly?
+- Intent Resolution: Was the user's goal understood?
+
+Reference: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/evaluating-agentic-ai-systems-a-deep-dive-into-agentic-metrics/4403923
 """
 
 from typing import Any, Dict, List, Optional, Callable
@@ -15,6 +22,21 @@ from langchain.memory import ConversationBufferMemory
 import os
 
 logger = logging.getLogger(__name__)
+
+# Lazy import for agentic metrics to avoid circular imports
+_metrics_evaluator = None
+
+def get_metrics_evaluator():
+    """Get the singleton agentic metrics evaluator."""
+    global _metrics_evaluator
+    if _metrics_evaluator is None:
+        try:
+            from app.services.agentic_metrics_service import agentic_metrics_evaluator
+            _metrics_evaluator = agentic_metrics_evaluator
+        except ImportError:
+            logger.warning("⚠️ Agentic metrics service not available")
+            _metrics_evaluator = None
+    return _metrics_evaluator
 
 
 class BaseAgent(ABC):
@@ -81,7 +103,13 @@ class BaseAgent(ABC):
         self.tools: List[Tool] = []
         self.agent_executor: Optional[AgentExecutor] = None
         
+        # Agentic metrics configuration
+        self.metrics_enabled: bool = os.getenv("ENABLE_AGENTIC_METRICS", "true").lower() == "true"
+        self._current_session_id: Optional[str] = None
+        
         logger.info(f"✅ Initialized {agent_name} with model {self.model_name}")
+        if self.metrics_enabled:
+            logger.info(f"📊 Agentic metrics enabled for {agent_name}")
     
     @abstractmethod
     def get_system_prompt(self) -> str:
@@ -160,6 +188,14 @@ class BaseAgent(ABC):
         Returns:
             Dict containing agent output and metadata
         """
+        # Extract session_id from context for metrics tracking
+        session_id = context.get("session_id") if context else None
+        self._current_session_id = session_id
+        
+        # Start metrics trace if enabled
+        if self.metrics_enabled and session_id:
+            self._start_metrics_trace(session_id, input_text)
+        
         try:
             self.state["execution_count"] += 1
             self.state["last_execution"] = datetime.utcnow().isoformat()
@@ -181,15 +217,24 @@ class BaseAgent(ABC):
                 # Fallback to direct LLM call if no executor
                 result = {"output": await self._direct_llm_call(full_input)}
             
+            # Record intermediate steps for metrics
+            intermediate_steps = result.get("intermediate_steps", [])
+            if self.metrics_enabled and session_id:
+                self._record_intermediate_steps(session_id, intermediate_steps)
+            
             # Format response
             response = {
                 "agent_name": self.agent_name,
                 "success": True,
                 "output": result.get("output", ""),
-                "intermediate_steps": result.get("intermediate_steps", []),
+                "intermediate_steps": intermediate_steps,
                 "timestamp": datetime.utcnow().isoformat(),
                 "execution_count": self.state["execution_count"]
             }
+            
+            # Complete metrics trace on success
+            if self.metrics_enabled and session_id:
+                self._complete_metrics_trace(session_id, result.get("output", ""), success=True)
             
             logger.info(f"✅ {self.agent_name} completed execution")
             return response
@@ -201,6 +246,15 @@ class BaseAgent(ABC):
                 "error": str(e),
                 "input": input_text[:200]
             })
+            
+            # Complete metrics trace on failure
+            if self.metrics_enabled and session_id:
+                self._complete_metrics_trace(
+                    session_id, 
+                    f"Agent {self.agent_name} encountered an error: {str(e)}",
+                    success=False,
+                    error=str(e)
+                )
             
             return {
                 "agent_name": self.agent_name,
@@ -220,6 +274,187 @@ class BaseAgent(ABC):
         ]
         response = await self.llm.ainvoke(messages)
         return response.content
+    
+    # =========================================================================
+    # AGENTIC METRICS METHODS
+    # Reference: Azure AI Evaluation Agentic Metrics
+    # =========================================================================
+    
+    def _start_metrics_trace(self, session_id: str, user_query: str) -> None:
+        """
+        Start a metrics trace for this execution.
+        
+        Args:
+            session_id: Unique session identifier
+            user_query: The user's original query
+        """
+        evaluator = get_metrics_evaluator()
+        if evaluator:
+            evaluator.start_trace(
+                session_id=session_id,
+                user_query=user_query,
+                agent_name=self.agent_name
+            )
+            logger.debug(f"📊 Started metrics trace for {session_id}")
+    
+    def _record_intermediate_steps(
+        self, 
+        session_id: str, 
+        intermediate_steps: List[Any]
+    ) -> None:
+        """
+        Record intermediate steps (including tool calls) from agent execution.
+        
+        Args:
+            session_id: Session identifier
+            intermediate_steps: List of (action, observation) tuples from LangChain
+        """
+        evaluator = get_metrics_evaluator()
+        if not evaluator:
+            return
+        
+        for step in intermediate_steps:
+            try:
+                # LangChain intermediate steps are (AgentAction, observation) tuples
+                if isinstance(step, tuple) and len(step) >= 2:
+                    action, observation = step[0], step[1]
+                    
+                    # Extract tool call information
+                    tool_name = getattr(action, 'tool', 'unknown')
+                    tool_input = getattr(action, 'tool_input', {})
+                    
+                    # Record the tool call
+                    evaluator.record_tool_call(
+                        session_id=session_id,
+                        tool_name=tool_name,
+                        tool_args=tool_input if isinstance(tool_input, dict) else {"input": tool_input},
+                        tool_result=observation,
+                        success=True
+                    )
+                    
+                    # Also record as intermediate step
+                    evaluator.record_intermediate_step(
+                        session_id=session_id,
+                        step_name=f"tool_call:{tool_name}",
+                        step_data={
+                            "tool_input": str(tool_input)[:500],
+                            "tool_output": str(observation)[:500]
+                        }
+                    )
+            except Exception as e:
+                logger.debug(f"Could not record intermediate step: {e}")
+    
+    def _complete_metrics_trace(
+        self,
+        session_id: str,
+        final_response: str,
+        success: bool = True,
+        error: Optional[str] = None
+    ) -> None:
+        """
+        Complete the metrics trace for this execution.
+        
+        Args:
+            session_id: Session identifier
+            final_response: The agent's final response
+            success: Whether execution succeeded
+            error: Error message if failed
+        """
+        evaluator = get_metrics_evaluator()
+        if evaluator:
+            evaluator.complete_trace(
+                session_id=session_id,
+                final_response=final_response,
+                success=success,
+                error=error
+            )
+            logger.debug(f"📊 Completed metrics trace for {session_id}")
+    
+    def record_tool_call(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        tool_result: Any,
+        success: bool = True,
+        error: Optional[str] = None
+    ) -> None:
+        """
+        Manually record a tool call for metrics tracking.
+        Use this for custom tool calls not handled by LangChain executor.
+        
+        Args:
+            tool_name: Name of the tool
+            tool_args: Arguments passed to the tool
+            tool_result: Result from the tool
+            success: Whether the call succeeded
+            error: Error message if failed
+        """
+        if not self.metrics_enabled or not self._current_session_id:
+            return
+        
+        evaluator = get_metrics_evaluator()
+        if evaluator:
+            evaluator.record_tool_call(
+                session_id=self._current_session_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                tool_result=tool_result,
+                success=success,
+                error=error
+            )
+    
+    def record_intent(
+        self,
+        intent: str,
+        resource_type: Optional[str] = None,
+        operation: Optional[str] = None
+    ) -> None:
+        """
+        Record the detected intent for metrics tracking.
+        
+        Args:
+            intent: The detected intent
+            resource_type: Type of resource being operated on
+            operation: Operation type (create, read, update, delete, list)
+        """
+        if not self.metrics_enabled or not self._current_session_id:
+            return
+        
+        evaluator = get_metrics_evaluator()
+        if evaluator:
+            evaluator.record_intent(
+                session_id=self._current_session_id,
+                intent=intent,
+                resource_type=resource_type,
+                operation=operation
+            )
+    
+    async def evaluate_execution(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Evaluate the current or specified execution using agentic metrics.
+        
+        Args:
+            session_id: Optional session ID (uses current if not specified)
+            
+        Returns:
+            EvaluationResult as dict or None if not available
+        """
+        if not self.metrics_enabled:
+            return None
+        
+        evaluator = get_metrics_evaluator()
+        if not evaluator:
+            return None
+        
+        target_session = session_id or self._current_session_id
+        if not target_session:
+            logger.warning("No session ID available for evaluation")
+            return None
+        
+        result = await evaluator.evaluate_session(target_session)
+        if result:
+            return result.to_dict()
+        return None
     
     def communicate_with_agent(
         self,
