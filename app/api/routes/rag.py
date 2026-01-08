@@ -6,7 +6,7 @@ import difflib
 import inspect
 import logging
 
-from app.services.chroma_service import chroma_service
+from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
 import re
 router = APIRouter()
@@ -73,12 +73,12 @@ async def widget_query(request: WidgetQueryRequest):
         
         try:
             search_results = await call_maybe_async(
-                getattr(chroma_service, "search_documents", chroma_service),
+                getattr(milvus_service, "search_documents", milvus_service),
                 query,
                 n_results=search_config["max_results"]
             )
         except Exception as e:
-            logger.warning(f"Chroma search failed: {e}")
+            logger.warning(f"Milvus search failed: {e}")
             search_results = []
 
         base_context = [r.get("content", "")[:1500] for r in search_results[:3]] if search_results else []

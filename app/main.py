@@ -1,3 +1,8 @@
+"""
+Enterprise RAG Bot - Admin API Server (Port 8000)
+Provides scraping, RAG, admin tools, and OpenAI-compatible endpoints.
+"""
+
 import os
 import logging
 import time
@@ -11,7 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-
 import uvicorn
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
@@ -31,187 +35,121 @@ logger = logging.getLogger("enterprise_rag_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-# ===================== Prometheus Metrics Middleware =====================
+# ── Prometheus Middleware ───────────────────────────────────────────────────
 class PrometheusMiddleware(BaseHTTPMiddleware):
-    """
-    Middleware to track HTTP request metrics for Prometheus.
-    
-    Tracks:
-    - Request count by method, endpoint, status
-    - Request duration
-    - Request/response sizes
-    """
+    """Tracks HTTP request metrics (count, duration, sizes) for Prometheus."""
     
     async def dispatch(self, request: Request, call_next):
-        # Skip metrics endpoint to avoid recursion
         if request.url.path == "/metrics":
             return await call_next(request)
         
-        # Normalize endpoint path (remove IDs for grouping)
-        path = request.url.path
-        # Simplify paths with IDs for better metric grouping
-        path_parts = path.split('/')
-        normalized_parts = []
+        # Normalize path (replace IDs with placeholders)
+        path_parts = request.url.path.split('/')
+        normalized = []
         for part in path_parts:
-            # Replace UUIDs, numeric IDs, and long hashes with placeholder
-            if part and (
-                len(part) > 20 or  # Long strings (likely IDs)
-                part.isdigit() or  # Pure numbers
-                (len(part) == 36 and part.count('-') == 4)  # UUID pattern
-            ):
-                normalized_parts.append('{id}')
+            if part and (len(part) > 20 or part.isdigit() or (len(part) == 36 and part.count('-') == 4)):
+                normalized.append('{id}')
             else:
-                normalized_parts.append(part)
-        endpoint = '/'.join(normalized_parts) or '/'
-        
+                normalized.append(part)
+        endpoint = '/'.join(normalized) or '/'
         method = request.method
         start_time = time.time()
         
-        # Track request size
-        content_length = request.headers.get('content-length')
-        if content_length:
-            metrics.http_request_size.labels(
-                method=method, endpoint=endpoint
-            ).observe(int(content_length))
+        if content_length := request.headers.get('content-length'):
+            metrics.http_request_size.labels(method=method, endpoint=endpoint).observe(int(content_length))
         
-        # Process request
         response = await call_next(request)
-        
-        # Calculate duration
         duration = time.time() - start_time
-        status_code = response.status_code
         
-        # Track metrics
-        metrics.http_requests_total.labels(
-            method=method, endpoint=endpoint, status_code=str(status_code)
-        ).inc()
+        metrics.http_requests_total.labels(method=method, endpoint=endpoint, status_code=str(response.status_code)).inc()
+        metrics.http_request_duration.labels(method=method, endpoint=endpoint).observe(duration)
         
-        metrics.http_request_duration.labels(
-            method=method, endpoint=endpoint
-        ).observe(duration)
-        
-        # Track response size
-        response_size = response.headers.get('content-length')
-        if response_size:
-            metrics.http_response_size.labels(
-                method=method, endpoint=endpoint
-            ).observe(int(response_size))
+        if response_size := response.headers.get('content-length'):
+            metrics.http_response_size.labels(method=method, endpoint=endpoint).observe(int(response_size))
         
         return response
 
-# ===================== Lifespan Management =====================
+
+# ── Lifespan Management ─────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Production-grade lifespan management for FastAPI.
-    Handles startup and shutdown of all services.
-    """
-    # ===== Startup =====
+    """Handles startup (DB, Milvus, AI services) and shutdown."""
     logger.info("Starting Enterprise RAG Bot...")
-    logger.info("=" * 70)
+    logger.info("=" * 60)
 
     # Initialize database
     try:
         await init_db()
-        logger.info("✅ Database initialized successfully")
+        logger.info("✅ Database initialized")
     except Exception as e:
-        logger.exception("❌ Database initialization failed (continuing): %s", e)
+        logger.exception("❌ Database init failed: %s", e)
 
-    # Initialize Milvus Service
+    # Initialize Milvus
     try:
         await milvus_service.initialize()
-        logger.info("✅ Milvus vector database initialized successfully")
+        logger.info("✅ Milvus initialized")
     except Exception as e:
-        logger.exception("❌ Milvus initialization failed (continuing without vector search): %s", e)
+        logger.exception("❌ Milvus init failed: %s", e)
 
-    # Test AI Services
-    logger.info("Testing AI Services...")
-    ai_health = {"embedding": False, "generation": False}
+    # Test AI services
+    try:
+        embeddings = await ai_service.generate_embeddings(["test"])
+        if embeddings and len(embeddings[0]) > 0:
+            logger.info("✅ Embedding service OK (dim=%d)", len(embeddings[0]))
+    except Exception as e:
+        logger.warning("❌ Embedding test failed: %s", e)
 
     try:
-        test_embeddings = await ai_service.generate_embeddings(["test embedding"])
-        if test_embeddings and len(test_embeddings) > 0 and len(test_embeddings[0]) > 0:
-            logger.info("✅ Embedding service working (dimension: %d)", len(test_embeddings[0]))
-            ai_health["embedding"] = True
-        else:
-            logger.warning("⚠️ Embedding service returned empty results")
+        resp = await ai_service.generate_enhanced_response("Hello", ["Test"])
+        if resp and resp.get("text"):
+            logger.info("✅ Generation service OK")
     except Exception as e:
-        logger.exception("❌ Embedding service test failed: %s", e)
+        logger.warning("❌ Generation test failed: %s", e)
 
-    try:
-        test_response = await ai_service.generate_enhanced_response(
-            "Hello",
-            ["Test context for validation"]
-        )
-        if test_response and isinstance(test_response, dict):
-            response_text = test_response.get("text", "")
-            if response_text and len(response_text.strip()) > 0:
-                logger.info("✅ Text generation service working")
-                ai_health["generation"] = True
-            else:
-                logger.warning("⚠️ Text generation service returned empty text")
-        else:
-            logger.warning("⚠️ Text generation service returned invalid response")
-    except Exception as e:
-        logger.exception("❌ Text generation service test failed: %s", e)
-
-    # Get Milvus stats
+    # Log Milvus stats
     try:
         stats = await milvus_service.get_collection_stats()
         doc_count = stats.get("document_count", 0) if isinstance(stats, dict) else 0
-        logger.info("✅ Milvus Collection Stats - Documents: %d", doc_count)
-    except Exception as e:
-        logger.exception("⚠️ Could not retrieve Milvus stats: %s", e)
+        logger.info("✅ Milvus docs: %d", doc_count)
+    except Exception:
+        pass
 
-    logger.info("=" * 70)
-    logger.info("✅ Enterprise RAG Bot startup sequence complete")
-    logger.info("📚 API documentation: http://localhost:8000/docs")
-    logger.info("🏥 Health check: http://localhost:8000/health")
+    logger.info("=" * 60)
+    logger.info("✅ Startup complete | Docs: /docs | Health: /health")
 
     yield
 
-    # ===== Shutdown =====
-    logger.info("=" * 70)
-    logger.info("Shutting down Enterprise RAG Bot...")
-
+    # Shutdown
+    logger.info("Shutting down...")
     try:
         await milvus_service.close()
-        logger.info("✅ Milvus connection closed gracefully")
+        logger.info("✅ Milvus closed")
     except Exception as e:
-        logger.warning("⚠️ Error closing Milvus connection: %s", e)
+        logger.warning("⚠️ Milvus close error: %s", e)
 
-    logger.info("✅ Enterprise RAG Bot shutdown complete")
-    logger.info("=" * 70)
 
-# ===================== FastAPI App Initialization =====================
+# ── FastAPI App ─────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Enterprise RAG Bot",
-    description="Advanced RAG system with Milvus vector database, web scraping, and AI-powered knowledge retrieval",
+    description="RAG system with Milvus, web scraping, and AI-powered retrieval",
     version="2.0.0",
     lifespan=lifespan,
 )
 
-# ===================== CORS Configuration =====================
+# ── CORS Configuration ──────────────────────────────────────────────────────
 allowed_origins: List[str] = [
-    "http://localhost:4200",      # Angular frontend (default port)
-    "http://127.0.0.1:4200",      # Angular frontend (alternative)
-    "http://localhost:4201",      # Angular frontend (user-frontend)
-    "http://127.0.0.1:4201",      # Angular frontend (alternative)
-    "http://localhost:3000",      # Open WebUI
-    "http://127.0.0.1:3000",      # Open WebUI (alternative)
-    "http://localhost:8000",      # Same origin
-    "http://127.0.0.1:8000",      # Same origin (alternative)
+    "http://localhost:4200", "http://127.0.0.1:4200",  # Angular admin
+    "http://localhost:4201", "http://127.0.0.1:4201",  # Angular user
+    "http://localhost:3000", "http://127.0.0.1:3000",  # Open WebUI
+    "http://localhost:8000", "http://127.0.0.1:8000",  # Same origin
 ]
 
-# For development with Cursor port forwarding - allow common forwarded port ranges
+# Dev port forwarding range
 for port in range(57000, 58000):
     allowed_origins.append(f"http://localhost:{port}")
 
-extra_origins = os.getenv("ALLOWED_ORIGINS", "")
-if extra_origins:
-    allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
-
-logger.info("✅ CORS allowed origins: %s", allowed_origins)
+if extra := os.getenv("ALLOWED_ORIGINS", ""):
+    allowed_origins.extend([o.strip() for o in extra.split(",") if o.strip()])
 
 app.add_middleware(
     CORSMiddleware,
@@ -221,50 +159,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Add Prometheus metrics middleware
+# Prometheus metrics middleware
 if os.getenv("ENABLE_PROMETHEUS_METRICS", "true").lower() in ("1", "true", "yes"):
     app.add_middleware(PrometheusMiddleware)
-    logger.info("✅ Prometheus metrics middleware enabled")
 
-# ===================== API Routes =====================
+# ── Routes ──────────────────────────────────────────────────────────────────
 app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
-
-# OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
-
 app.include_router(auth_router)
 app.include_router(user_credentials.router)
-
-# Agentic Metrics API for agent evaluation
 app.include_router(agentic_metrics.router)
 
 
-# ===================== Prometheus Metrics Endpoint =====================
-@app.get("/metrics", include_in_schema=False)
-async def prometheus_metrics():
-    """
-    Prometheus metrics endpoint.
-    
-    Exposes all application metrics in Prometheus format:
-    - LLM tokens, calls, latency, costs
-    - RAG retrieval metrics
-    - Agent execution metrics
-    - Agentic evaluation scores
-    - HTTP request metrics
-    
-    Scraped by Prometheus at http://rag-app:8000/metrics
-    """
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST
-    )
-
-# ===================== Static Files & Frontend =====================
+# ── Static Files & Frontend ─────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 frontend_path = BASE_DIR / "dist" / "enterprise-rag-frontend"
 embedded_static_mounted = False
@@ -272,189 +184,119 @@ embedded_static_mounted = False
 if frontend_path.exists() and frontend_path.is_dir():
     app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="static")
     embedded_static_mounted = True
-    logger.info("✅ Embedded frontend mounted at: %s", frontend_path)
-else:
-    logger.warning("⚠️ Static frontend directory not found at %s. API will continue to run without embedded frontend.", frontend_path)
+    logger.info("✅ Frontend mounted: %s", frontend_path)
 
-# ===================== Widget Embed Script =====================
+
+# ── Endpoints ───────────────────────────────────────────────────────────────
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Prometheus metrics endpoint."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.get("/widget/embed.js")
 def serve_embed_script():
-    """
-    Deliver the embeddable JS widget script.
-    Namespaced under /widget to avoid collisions with frontend routes.
-    
-    Production-ready with multiple fallback locations for robustness.
-    """
-    candidate_paths = [
+    """Serve the embeddable widget script."""
+    candidates = [
         BASE_DIR / "app" / "static" / "embed.js",
         frontend_path / "embed.js",
         frontend_path / "assets" / "embed.js",
     ]
-    
-    for p in candidate_paths:
+    for p in candidates:
         if p and p.exists():
-            logger.info("✅ Serving embed.js from: %s", p)
             return FileResponse(p, media_type="application/javascript")
-    
-    logger.warning("❌ embed.js not found in candidate locations: %s", candidate_paths)
     raise HTTPException(status_code=404, detail="embed.js not found")
 
-# ===================== Auth Redirects (OpenWebUI Compatibility) =====================
+
 @app.get("/auth")
 @app.get("/auth/login")
 async def auth_redirect():
-    """
-    Redirect /auth routes to login page for OpenWebUI compatibility.
-    OpenWebUI may redirect here on logout, so we handle it gracefully.
-    """
+    """Redirect /auth routes to login page (OpenWebUI compatibility)."""
     from fastapi.responses import RedirectResponse
-    # Redirect to OpenWebUI login (port 3000) or backend login (port 8000)
     login_url = os.getenv("OPENWEBUI_LOGIN_URL", "http://localhost:3000")
     return RedirectResponse(url=f"{login_url}/login", status_code=302)
 
-# ===================== SPA Fallback =====================
+
 if embedded_static_mounted:
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
-        """
-        Fallback route for SPA: serve index.html for all non-API routes.
-        Allows frontend routing to work properly.
-        """
-        # Exclude API routes from SPA fallback
+        """SPA fallback: serve index.html for non-API routes."""
         if full_path.startswith("api/") or full_path.startswith("widget/"):
             raise HTTPException(status_code=404, detail="Route not found")
-        
         index_file = frontend_path / "index.html"
         if index_file.exists():
             return FileResponse(index_file)
-        
-        logger.error("❌ index.html missing from frontend at %s", index_file)
         return JSONResponse({"detail": "index.html not found"}, status_code=500)
 
-# ===================== Health Check Endpoints =====================
+
 @app.get("/health/liveness")
 async def liveness_check():
-    """
-    Lightweight liveness probe endpoint.
-    Returns 200 if the application process is running.
-    
-    Use this for container/orchestration liveness probes.
-    Endpoint response time: <10ms
-    """
-    return {
-        "status": "alive",
-        "service": "enterprise-rag-bot"
-    }
+    """Lightweight liveness probe."""
+    return {"status": "alive", "service": "enterprise-rag-bot"}
+
 
 @app.get("/health")
 async def readiness_check():
-    """
-    Comprehensive readiness check endpoint.
-    Verifies all critical services (Milvus, AI services, Database).
+    """Readiness check - verifies Milvus and AI services."""
+    from datetime import datetime
     
-    Use this for k8s/ECS readiness probes.
-    Only returns 200 when all services are operational.
-    """
-    # Check Milvus connection and collection
-    milvus_status = "unavailable"
-    milvus_docs = 0
-    milvus_error = None
-
+    milvus_status, milvus_docs, milvus_error = "unavailable", 0, None
     try:
         stats = await milvus_service.get_collection_stats()
         if isinstance(stats, dict):
             milvus_status = stats.get("status", "unknown")
             milvus_docs = int(stats.get("document_count", 0))
-        else:
-            milvus_status = "error"
-            milvus_error = "Invalid response format"
     except Exception as e:
-        milvus_status = "unavailable"
         milvus_error = str(e)
-        logger.exception("❌ Milvus stats fetch failed: %s", e)
 
-    # Check AI services
-    ai_services_status = {
-        "embedding": False,
-        "generation": False,
-    }
-
+    ai_status = {"embedding": False, "generation": False}
     try:
-        test_emb = await ai_service.generate_embeddings(["health"])
-        if test_emb and len(test_emb) > 0:
-            ai_services_status["embedding"] = True
-    except Exception as e:
-        logger.debug("AI embedding service check failed: %s", e)
-
+        if await ai_service.generate_embeddings(["health"]):
+            ai_status["embedding"] = True
+    except Exception:
+        pass
     try:
-        test_gen = await ai_service.generate_response("health", [])
-        if test_gen:
-            ai_services_status["generation"] = True
-    except Exception as e:
-        logger.debug("AI generation service check failed: %s", e)
+        if await ai_service.generate_response("health", []):
+            ai_status["generation"] = True
+    except Exception:
+        pass
 
-    # Determine overall health
-    overall_status = "healthy"
+    overall = "healthy"
     if milvus_status not in ("active", "healthy"):
-        overall_status = "degraded"
-    if not ai_services_status["embedding"] or not ai_services_status["generation"]:
-        overall_status = "degraded" if overall_status == "healthy" else "unhealthy"
+        overall = "degraded"
+    if not ai_status["embedding"] or not ai_status["generation"]:
+        overall = "degraded" if overall == "healthy" else "unhealthy"
 
-    response = {
-        "status": overall_status,
-        "timestamp": str(__import__("datetime").datetime.utcnow().isoformat()),
+    return JSONResponse({
+        "status": overall,
+        "timestamp": datetime.utcnow().isoformat(),
         "services": {
-            "milvus": {
-                "status": milvus_status,
-                "documents_stored": milvus_docs,
-                "error": milvus_error,
-            },
-            "ai_services": {
-                "embedding": "operational" if ai_services_status["embedding"] else "unavailable",
-                "generation": "operational" if ai_services_status["generation"] else "unavailable",
-            },
-            "database": "operational",  # Assume operational if no exception in init_db
+            "milvus": {"status": milvus_status, "documents": milvus_docs, "error": milvus_error},
+            "ai_services": {k: "operational" if v else "unavailable" for k, v in ai_status.items()},
+            "database": "operational",
         },
         "version": app.version,
-    }
+    }, status_code=200 if overall == "healthy" else 503)
 
-    # Return appropriate status code
-    status_code = 200 if overall_status == "healthy" else 503
-    return JSONResponse(response, status_code=status_code)
 
-# ===================== Root Endpoint =====================
 @app.get("/")
 async def api_root():
-    """
-    Root endpoint: serves embedded frontend or API info.
-    """
+    """Root endpoint: serves frontend or API info."""
     if embedded_static_mounted:
         index_file = frontend_path / "index.html"
         if index_file.exists():
             return FileResponse(index_file)
-
     return {
         "message": "Enterprise RAG Bot API",
         "version": app.version,
-        "features": [
-            "Advanced web scraping with anti-blocking",
-            "Milvus vector database for semantic search",
-            "AI-powered knowledge retrieval (Grok, OpenRouter)",
-            "Multi-source ingestion (web, files, bulk scraping)",
-            "Popup widget interface for easy integration",
-            "Production-grade reliability and scalability",
-        ],
         "documentation": "/docs",
         "health_check": "/health",
     }
 
-# ===================== Application Info Endpoint =====================
+
 @app.get("/api/info")
 async def app_info():
-    """
-    Detailed application information and status.
-    Useful for debugging and monitoring.
-    """
+    """Application information and status."""
     try:
         stats = await milvus_service.get_collection_stats()
         milvus_info = stats if isinstance(stats, dict) else {}
@@ -462,77 +304,35 @@ async def app_info():
         milvus_info = {"error": str(e)}
 
     return {
-        "application": {
-            "name": "Enterprise RAG Bot",
-            "version": app.version,
-            "environment": os.getenv("ENV", "development"),
-        },
-        "infrastructure": {
-            "milvus": milvus_info,
-            "ai_service": {
-                "embedding_model": os.getenv("EMBEDDING_MODEL", "unknown"),
-                "chat_model": os.getenv("CHAT_MODEL", "unknown"),
-            },
-        },
-        "features": {
-            "web_scraping": True,
-            "file_uploads": True,
-            "bulk_scraping": True,
-            "widget_interface": True,
-        },
+        "application": {"name": "Enterprise RAG Bot", "version": app.version},
+        "infrastructure": {"milvus": milvus_info},
         "endpoints": {
-            "scraper": "/api/scraper",
-            "rag": "/api/rag",
-            "widget": "/api/rag-widget",
-            "admin": "/api/admin",
-            "support": "/api/support",
+            "scraper": "/api/scraper", "rag": "/api/rag",
+            "widget": "/api/rag-widget", "admin": "/api/admin",
         },
     }
 
-# ===================== Error Handlers =====================
+
+# ── Exception Handlers ──────────────────────────────────────────────────────
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    """
-    Custom HTTP exception handler for better error messages.
-    """
     logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": exc.detail, "status_code": exc.status_code}
-    )
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
-    """
-    Catch-all exception handler for unhandled errors.
-    Logs exception and returns generic error message.
-    """
     logger.exception(f"Unhandled exception: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "status_code": 500,
-            "detail": "An unexpected error occurred. Please check server logs."
-        }
-    )
+    return JSONResponse(status_code=500, content={"error": "Internal server error"})
 
-# ===================== Main Entry Point =====================
+
+# ── Main Entry Point ────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    dev_reload = os.getenv("DEV_RELOAD", "false").lower() in ("1", "true", "yes")
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    workers = int(os.getenv("UVICORN_WORKERS", "1"))
-    log_level = os.getenv("UVICORN_LOG_LEVEL", "info")
-
-    logger.info(f"Starting server on {host}:{port}")
-    logger.info(f"Workers: {workers}, Log Level: {log_level}, Dev Reload: {dev_reload}")
-
     uvicorn.run(
         "app.main:app",
-        host=host,
-        port=port,
-        reload=dev_reload,
-        workers=workers,
-        log_level=log_level,
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=os.getenv("DEV_RELOAD", "false").lower() in ("1", "true", "yes"),
+        workers=int(os.getenv("UVICORN_WORKERS", "1")),
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "info"),
     )
