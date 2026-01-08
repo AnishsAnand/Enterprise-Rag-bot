@@ -10,18 +10,115 @@ Enhanced with Agentic Metrics for evaluation:
 Reference: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/evaluating-agentic-ai-systems-a-deep-dive-into-agentic-metrics/4403923
 """
 
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Callable, Union
 from abc import ABC, abstractmethod
 import logging
+import time
 from datetime import datetime
 from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
 from langchain.memory import ConversationBufferMemory
+from langchain.callbacks.base import BaseCallbackHandler
+from langchain.schema import LLMResult
 import os
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LangChain Callback Handler for Prometheus Metrics
+# =============================================================================
+class PrometheusCallbackHandler(BaseCallbackHandler):
+    """
+    LangChain callback handler that tracks LLM calls to Prometheus metrics.
+    
+    This ensures LangChain agent LLM calls are properly tracked alongside
+    direct ai_service calls.
+    """
+    
+    def __init__(self, agent_name: str = "unknown"):
+        self.agent_name = agent_name
+        self._call_start_times: Dict[str, float] = {}
+        self._prom_metrics = None
+    
+    def _get_metrics(self):
+        """Lazy load prometheus metrics to avoid circular imports."""
+        if self._prom_metrics is None:
+            try:
+                from app.services.prometheus_metrics import metrics
+                self._prom_metrics = metrics
+            except ImportError:
+                logger.warning("⚠️ Prometheus metrics not available for LangChain callback")
+        return self._prom_metrics
+    
+    def on_llm_start(
+        self, serialized: Dict[str, Any], prompts: List[str], **kwargs: Any
+    ) -> None:
+        """Called when LLM starts running."""
+        run_id = str(kwargs.get("run_id", "unknown"))
+        self._call_start_times[run_id] = time.time()
+        
+        # Get model name from serialized data
+        model = serialized.get("kwargs", {}).get("model", "unknown")
+        logger.info(f"🔄 LangChain LLM START: agent={self.agent_name}, model={model}, run_id={run_id[:8]}")
+    
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        """Called when LLM finishes running."""
+        run_id = str(kwargs.get("run_id", "unknown"))
+        start_time = self._call_start_times.pop(run_id, time.time())
+        duration = time.time() - start_time
+        
+        # Extract token usage from response
+        input_tokens = 0
+        output_tokens = 0
+        model = "langchain-agent"
+        
+        if response.llm_output:
+            usage = response.llm_output.get("token_usage", {})
+            input_tokens = usage.get("prompt_tokens", 0) or 0
+            output_tokens = usage.get("completion_tokens", 0) or 0
+            model = response.llm_output.get("model_name", model)
+        
+        # Track metrics
+        metrics = self._get_metrics()
+        if metrics:
+            metrics.track_llm_call(
+                model=model,
+                operation=f"langchain-{self.agent_name}",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration=duration,
+                success=True
+            )
+        
+        logger.info(f"✅ LangChain LLM END: agent={self.agent_name}, model={model}, "
+                   f"tokens={input_tokens}/{output_tokens}, duration={duration:.2f}s")
+    
+    def on_llm_error(
+        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+    ) -> None:
+        """Called when LLM encounters an error."""
+        run_id = str(kwargs.get("run_id", "unknown"))
+        start_time = self._call_start_times.pop(run_id, time.time())
+        duration = time.time() - start_time
+        
+        # Track error metrics
+        metrics = self._get_metrics()
+        if metrics:
+            metrics.track_llm_call(
+                model="langchain-agent",
+                operation=f"langchain-{self.agent_name}",
+                input_tokens=0,
+                output_tokens=0,
+                duration=duration,
+                success=False,
+                error_type=type(error).__name__
+            )
+        
+        logger.error(f"❌ LangChain LLM ERROR: agent={self.agent_name}, error={error}, "
+                    f"duration={duration:.2f}s")
 
 # Lazy import for agentic metrics to avoid circular imports
 _metrics_evaluator = None
@@ -69,18 +166,22 @@ class BaseAgent(ABC):
         self.max_tokens = max_tokens
         
         # Get model configuration from environment
-        grok_base_url = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
+        grok_base_url = os.getenv("GROK_BASE_URL")
         grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
         self.model_name = model_name or os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
         
-        # Initialize LangChain LLM with OpenAI-compatible endpoint
+        # Create callback handler for Prometheus metrics tracking
+        self.metrics_callback = PrometheusCallbackHandler(agent_name=agent_name)
+        
+        # Initialize LangChain LLM with OpenAI-compatible endpoint and metrics callback
         self.llm = ChatOpenAI(
             model=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             openai_api_base=grok_base_url,
             openai_api_key=grok_api_key,
-            model_kwargs={"top_p": 0.9}
+            model_kwargs={"top_p": 0.9},
+            callbacks=[self.metrics_callback]
         )
         
         # Agent state
@@ -196,7 +297,16 @@ class BaseAgent(ABC):
         if self.metrics_enabled and session_id:
             self._start_metrics_trace(session_id, input_text)
         
+        # Get Prometheus metrics for agent execution tracking
+        prom_metrics = self._get_prometheus_metrics()
+        start_time = time.time()
+        execution_success = False
+        
         try:
+            # Track active sessions
+            if prom_metrics:
+                prom_metrics.agent_active_sessions.labels(agent_name=self.agent_name).inc()
+            
             self.state["execution_count"] += 1
             self.state["last_execution"] = datetime.utcnow().isoformat()
             
@@ -222,6 +332,12 @@ class BaseAgent(ABC):
             if self.metrics_enabled and session_id:
                 self._record_intermediate_steps(session_id, intermediate_steps)
             
+            # Track intermediate steps count
+            if prom_metrics and intermediate_steps:
+                prom_metrics.agent_steps_per_execution.labels(
+                    agent_name=self.agent_name
+                ).observe(len(intermediate_steps))
+            
             # Format response
             response = {
                 "agent_name": self.agent_name,
@@ -236,6 +352,7 @@ class BaseAgent(ABC):
             if self.metrics_enabled and session_id:
                 self._complete_metrics_trace(session_id, result.get("output", ""), success=True)
             
+            execution_success = True
             logger.info(f"✅ {self.agent_name} completed execution")
             return response
             
@@ -263,6 +380,18 @@ class BaseAgent(ABC):
                 "output": f"Agent {self.agent_name} encountered an error: {str(e)}",
                 "timestamp": datetime.utcnow().isoformat()
             }
+        finally:
+            # Track agent session completion and duration
+            if prom_metrics:
+                duration = time.time() - start_time
+                status = 'success' if execution_success else 'error'
+                prom_metrics.agent_sessions_total.labels(
+                    agent_name=self.agent_name, status=status
+                ).inc()
+                prom_metrics.agent_execution_duration.labels(
+                    agent_name=self.agent_name, operation='execute'
+                ).observe(duration)
+                prom_metrics.agent_active_sessions.labels(agent_name=self.agent_name).dec()
     
     async def _direct_llm_call(self, input_text: str) -> str:
         """
@@ -274,6 +403,14 @@ class BaseAgent(ABC):
         ]
         response = await self.llm.ainvoke(messages)
         return response.content
+    
+    def _get_prometheus_metrics(self):
+        """Get Prometheus metrics instance for tracking."""
+        try:
+            from app.services.prometheus_metrics import metrics
+            return metrics
+        except ImportError:
+            return None
     
     # =========================================================================
     # AGENTIC METRICS METHODS

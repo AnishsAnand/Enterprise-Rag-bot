@@ -14,23 +14,38 @@ from httpx import TimeoutException, ConnectError
 import difflib
 import hashlib
 
+# Prometheus metrics - lazy import to avoid circular dependencies
+_metrics = None
+def get_metrics():
+    """Lazy load Prometheus metrics to avoid circular imports."""
+    global _metrics
+    if _metrics is None:
+        try:
+            from app.services.prometheus_metrics import metrics as prom_metrics
+            _metrics = prom_metrics
+        except ImportError:
+            _metrics = None
+    return _metrics
+
 load_dotenv()
 
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "25"))
 MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "2"))  # Reduced from 3 to 2 for faster failure
 RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "voyage-3").strip()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B").strip()
 # Removed HOSTED_EMBEDDING_MODEL fallback - causes delays and errors
 
-REQUIRED_EMBEDDING_DIM = 4096
+# Embedding dimension is read from .env
+# Tata Cloud Services models: Qwen/Qwen3-Embedding-8B (4096), avsolatorio/GIST-Embedding-v0 (768)
+REQUIRED_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "4096"))
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
 PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
-# Fallback models disabled - they all return 500 errors
-# Only use PRIMARY_CHAT_MODEL (openai/gpt-oss-120b) which is fast (0.2-0.3s) and reliable
-FALLBACK_CHAT_MODELS = []
-# Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
+# Fallback models re-enabled - primary model is unstable (intermittent 500 errors)
+# Try these alternatives when primary fails
+FALLBACK_CHAT_MODELS = os.getenv("FALLBACK_CHAT_MODELS", "openai/gpt-oss-20b,meta/llama-3.1-70b-instruct").split(",")
+FALLBACK_CHAT_MODELS = [m.strip() for m in FALLBACK_CHAT_MODELS if m.strip()]
 
-GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
+GROK_BASE_URL = os.getenv("GROK_BASE_URL")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,18 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.ERROR)
 
-_env_embedding_dim = os.getenv("EMBEDDING_DIMENSION")
-if _env_embedding_dim and int(_env_embedding_dim) != REQUIRED_EMBEDDING_DIM:
-    logger.critical(
-        f"❌ CRITICAL: EMBEDDING_DIMENSION mismatch! "
-        f"Code requires {REQUIRED_EMBEDDING_DIM} but .env has {_env_embedding_dim}. "
-        f"This WILL cause vector database errors!"
-    )
-    raise RuntimeError(
-        f"Embedding dimension mismatch: code={REQUIRED_EMBEDDING_DIM}, env={_env_embedding_dim}"
-    )
-
-logger.info(f"✅ Embedding dimension validated: {REQUIRED_EMBEDDING_DIM}")
+logger.info(f"✅ Embedding dimension configured: {REQUIRED_EMBEDDING_DIM}")
 
 
 class AIServiceError(Exception):
@@ -362,7 +366,7 @@ class AIService:
                 prompt,
                 max_tokens=200,
                 temperature=0.1,
-                timeout=15
+                timeout=HTTP_TIMEOUT_SECONDS  # Use configured timeout instead of hardcoded 15s
             )
             
             # Try to extract JSON
@@ -505,13 +509,24 @@ class AIService:
         try:
             message_obj = getattr(choice_entry, "message", None)
             if message_obj is not None:
+                # Try standard 'content' field first
                 content = getattr(message_obj, "content", None)
                 if content:
                     return content
+                
+                # Try 'reasoning_content' (Tata CloudServices API format)
+                reasoning_content = getattr(message_obj, "reasoning_content", None)
+                if reasoning_content:
+                    return reasoning_content
+                
                 if isinstance(message_obj, dict):
                     content = message_obj.get("content")
                     if content:
                         return content
+                    # Try dict version of reasoning_content
+                    reasoning_content = message_obj.get("reasoning_content")
+                    if reasoning_content:
+                        return reasoning_content
             
             text_attr = getattr(choice_entry, "text", None)
             if text_attr:
@@ -614,7 +629,7 @@ class AIService:
         return embeddings
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings with automatic service connection"""
+        """Generate embeddings with automatic service connection and Prometheus metrics"""
         if not texts:
             logger.warning("Empty texts provided for embedding generation")
             return []
@@ -634,6 +649,9 @@ class AIService:
                 if not s:
                     s = " "
                 cleaned_texts.append(s[:8000])
+        
+        prom_metrics = get_metrics()
+        start_time = time.time()
 
         # Try SDK path first
         if self.grok_client and self.connected_services["embedding"]:
@@ -667,6 +685,27 @@ class AIService:
                                     embeddings.append(emb)
                                 else:
                                     embeddings.append([0.0] * EMBEDDING_SIZE_FALLBACK)
+                            
+                            # Track embedding metrics
+                            duration = time.time() - start_time
+                            if prom_metrics:
+                                prom_metrics.embedding_duration.labels(
+                                    model=EMBEDDING_MODEL,
+                                    batch_size=str(len(cleaned_texts))
+                                ).observe(duration)
+                                prom_metrics.llm_calls_total.labels(
+                                    model=EMBEDDING_MODEL,
+                                    operation='embedding',
+                                    status='success'
+                                ).inc()
+                                # Estimate token usage for embeddings (rough: ~1 token per 4 chars)
+                                total_chars = sum(len(t) for t in cleaned_texts)
+                                est_tokens = total_chars // 4
+                                prom_metrics.llm_tokens_total.labels(
+                                    model=EMBEDDING_MODEL,
+                                    type='input',
+                                    operation='embedding'
+                                ).inc(est_tokens)
                             
                             logger.info(f"✅ Generated {len(embeddings)} embeddings via SDK (attempt {attempt})")
                             return embeddings
@@ -741,7 +780,7 @@ class AIService:
 
     def _llm_chat(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, 
                   system_message: str = None, model: str = None) -> str:
-        """Synchronous LLM chat call with model fallback"""
+        """Synchronous LLM chat call with model fallback and Prometheus metrics"""
         if not prompt:
             logger.warning("Empty prompt provided to _llm_chat")
             return ""
@@ -764,8 +803,18 @@ class AIService:
         models_to_try = [model_to_use] + [m for m in FALLBACK_CHAT_MODELS if m != model_to_use]
 
         last_error = None
+        prom_metrics = get_metrics()
+        
         for attempt_model in models_to_try:
+            start_time = time.time()
+            input_tokens = 0
+            output_tokens = 0
+            
             try:
+                # Track active requests
+                if prom_metrics:
+                    prom_metrics.llm_active_requests.labels(model=attempt_model).inc()
+                
                 logger.debug(f"Attempting chat with model: {attempt_model}")
                 resp = self.grok_client.chat.completions.create(
                     model=attempt_model,
@@ -777,12 +826,33 @@ class AIService:
                     frequency_penalty=0.1
                 )
                 
+                # Extract token usage from response
+                if hasattr(resp, 'usage') and resp.usage:
+                    input_tokens = getattr(resp.usage, 'prompt_tokens', 0) or 0
+                    output_tokens = getattr(resp.usage, 'completion_tokens', 0) or 0
+                elif isinstance(resp, dict) and 'usage' in resp:
+                    usage = resp.get('usage', {})
+                    input_tokens = usage.get('prompt_tokens', 0) or 0
+                    output_tokens = usage.get('completion_tokens', 0) or 0
+                
                 if hasattr(resp, "choices") and resp.choices:
                     content = self._extract_message_content(resp.choices[0])
                     if content:
                         if attempt_model != self.current_chat_model:
                             logger.info(f"✅ Switched to working model: {attempt_model}")
                             self.current_chat_model = attempt_model
+                        
+                        # Track success metrics
+                        duration = time.time() - start_time
+                        if prom_metrics:
+                            prom_metrics.track_llm_call(
+                                model=attempt_model,
+                                operation='chat',
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                duration=duration,
+                                success=True
+                            )
                         return content
                     else:
                         logger.warning(f"⚠️ Model {attempt_model} returned empty content in response.choices[0]")
@@ -791,18 +861,45 @@ class AIService:
                     first = resp["choices"][0]
                     if isinstance(first, dict):
                         if "message" in first and isinstance(first["message"], dict):
+                            # Try standard 'content' field
                             content = first["message"].get("content") or ""
+                            if not content:
+                                # Try 'reasoning_content' (Tata CloudServices API format)
+                                content = first["message"].get("reasoning_content") or ""
+                            
                             if content and attempt_model != self.current_chat_model:
                                 self.current_chat_model = attempt_model
                             if content:
+                                # Track success metrics
+                                duration = time.time() - start_time
+                                if prom_metrics:
+                                    prom_metrics.track_llm_call(
+                                        model=attempt_model,
+                                        operation='chat',
+                                        input_tokens=input_tokens,
+                                        output_tokens=output_tokens,
+                                        duration=duration,
+                                        success=True
+                                    )
                                 return content
                             else:
-                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'content' field")
+                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'content' and 'reasoning_content' fields")
                         if "text" in first:
                             content = first.get("text") or ""
                             if content and attempt_model != self.current_chat_model:
                                 self.current_chat_model = attempt_model
                             if content:
+                                # Track success metrics
+                                duration = time.time() - start_time
+                                if prom_metrics:
+                                    prom_metrics.track_llm_call(
+                                        model=attempt_model,
+                                        operation='chat',
+                                        input_tokens=input_tokens,
+                                        output_tokens=output_tokens,
+                                        duration=duration,
+                                        success=True
+                                    )
                                 return content
                             else:
                                 logger.warning(f"⚠️ Model {attempt_model} returned empty 'text' field")
@@ -815,10 +912,37 @@ class AIService:
                 err_str = str(e)
                 logger.warning(f"⚠️ Model {attempt_model} failed: {err_str[:200]}")
                 
+                # Track error metrics
+                duration = time.time() - start_time
+                if prom_metrics:
+                    error_type = 'api_error'
+                    if 'timeout' in err_str.lower():
+                        error_type = 'timeout'
+                    elif '429' in err_str or 'rate' in err_str.lower():
+                        error_type = 'rate_limit'
+                    elif '500' in err_str or '502' in err_str or '503' in err_str:
+                        error_type = 'server_error'
+                    elif '401' in err_str or '403' in err_str:
+                        error_type = 'auth_error'
+                    
+                    prom_metrics.track_llm_call(
+                        model=attempt_model,
+                        operation='chat',
+                        input_tokens=0,
+                        output_tokens=0,
+                        duration=duration,
+                        success=False,
+                        error_type=error_type
+                    )
+                
                 if "500" in err_str or "Connection error" in err_str or "InternalServerError" in err_str:
                     continue
                 else:
                     raise
+            finally:
+                # Decrement active requests
+                if prom_metrics:
+                    prom_metrics.llm_active_requests.labels(model=attempt_model).dec()
         
         if last_error:
             logger.error(f"❌ All models failed. Last error: {last_error}")

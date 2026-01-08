@@ -653,13 +653,10 @@ Examples:
                         prompt=intent_prompt,
                         max_tokens=200,
                         temperature=0.1,
-                        timeout=15
+                        timeout=30  # Increased from 15s - allow time for LLM to respond
                     )
                     
-                    # Parse LLM response
-                    import json
-                    import re
-                    
+                    # Parse LLM response (json and re already imported at module level)
                     # Extract JSON from response
                     json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', llm_response)
                     if json_match:

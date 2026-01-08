@@ -495,7 +495,7 @@ class MilvusService:
                 max_tokens=60,
                 temperature=0.3,
                 system_message="You are a search query expansion expert. Provide only relevant terms.",
-                timeout=15
+                timeout=30  # Increased from 15s to allow for slower API responses
             )
             if expanded_terms:
                 additional_terms = [t.strip() for t in expanded_terms.strip().split(',') if t.strip()]

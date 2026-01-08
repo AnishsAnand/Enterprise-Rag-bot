@@ -57,3 +57,6 @@ sentence-transformers==2.2.2
 # Our custom implementation doesn't require this, but you can install for
 # additional Azure AI Foundry integration:
 # azure-ai-evaluation>=1.0.0
+
+# Prometheus metrics for monitoring
+prometheus-client>=0.19.0

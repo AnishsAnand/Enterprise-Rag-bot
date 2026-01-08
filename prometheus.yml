@@ -1,0 +1,58 @@
+# Prometheus Configuration for Vayu Maya RAG Bot
+# Backend runs locally, infrastructure in Docker
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # =========================================================================
+  # Prometheus self-monitoring
+  # =========================================================================
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # =========================================================================
+  # RAG Application Metrics (Local Backend)
+  # Uses host.docker.internal to reach host machine
+  # =========================================================================
+  - job_name: 'rag-app-admin'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  - job_name: 'rag-app-user'
+    static_configs:
+      - targets: ['host.docker.internal:8001']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # =========================================================================
+  # Milvus Vector Database Metrics
+  # =========================================================================
+  - job_name: 'milvus'
+    static_configs:
+      - targets: ['milvus:9091']
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # =========================================================================
+  # MinIO Object Storage Metrics
+  # =========================================================================
+  - job_name: 'minio'
+    static_configs:
+      - targets: ['minio:9000']
+    metrics_path: /minio/v2/metrics/cluster
+    scrape_interval: 30s
+
+  # =========================================================================
+  # etcd Metrics
+  # =========================================================================
+  - job_name: 'etcd'
+    static_configs:
+      - targets: ['etcd:2379']
+    metrics_path: /metrics
+    scrape_interval: 30s

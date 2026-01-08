@@ -1,0 +1,184 @@
+# docker-compose.yml (fixed / production-ready)
+services:
+  # PostgreSQL Database for session persistence (Memori)
+  postgres:
+    image: postgres:16-alpine
+    container_name: ragbot-postgres
+    environment:
+      POSTGRES_USER: ragbot
+      POSTGRES_PASSWORD: ragbot_secret_2024
+      POSTGRES_DB: ragbot_sessions
+      TZ: "Asia/Kolkata"
+    ports:
+      - "5435:5432"   # Using 5435 externally (5432-5434 are already in use)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragbot -d ragbot_sessions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  rag-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: enterprise-rag:latest
+    container_name: enterprise-rag
+    env_file:
+      - .env
+    ports:
+      - "4200:4200"   # Admin frontend
+      - "4201:4201"   # User frontend
+      - "8000:8000"   # Admin backend
+      - "8001:8001"   # User backend
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+      - ./backups:/app/backups
+    depends_on:
+      - postgres
+      - milvus
+      - etcd
+      - minio
+    healthcheck:
+      # lightweight TCP check: succeeds when either backend port responds
+      test: ["CMD-SHELL", "timeout 5 bash -c 'nc -z localhost 8000 || nc -z localhost 8001'"]
+      interval: 40s
+      timeout: 10s
+      retries: 8
+      start_period: 90s
+    restart: unless-stopped
+    environment:
+      # NOTE: if rag-app is running as a container, use the internal service name 'milvus'
+      # If your backend runs on the host (outside Docker), set MILVUS_HOST=127.0.0.1 in the host environment or .env instead.
+      MILVUS_HOST: "milvus"
+      MILVUS_PORT: "19530"
+      MILVUS_ALIAS: "default"
+      MILVUS_CONNECT_RETRIES: "3"
+      MILVUS_CONNECT_BACKOFF: "2"
+      EMBEDDING_DIMENSION: "4096"
+      MILVUS_NPROBE: "64"
+      MILVUS_MIN_RELEVANCE: "0.12"
+      MILVUS_MAX_INITIAL_RESULTS: "120"
+      MILVUS_ENABLE_QUERY_EXPANSION: "false"
+      MILVUS_ENABLE_SEMANTIC_RERANK: "true"
+      MILVUS_ENABLE_CONTEXT_ENRICHMENT: "true"
+      VECTOR_DB: "milvus"
+      USER_APP_HOST: "0.0.0.0"
+      USER_APP_PORT: "8001"
+      # PostgreSQL for session persistence (Memori)
+      DATABASE_URL: "postgresql://ragbot:ragbot_secret_2024@postgres:5432/ragbot_sessions"
+      # other environment vars from your .env will also be loaded
+
+  milvus:
+    image: milvusdb/milvus:v2.4.10
+    container_name: milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: "http://etcd:2379"
+      MINIO_ADDRESS: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      TZ: "Asia/Kolkata"
+      LOG_LEVEL: "warn"
+      # optional Milvus tuning flags (service-specific; check Milvus docs for exact env names if needed)
+      # QUERY_NQ_MAX: "256"
+      # GPU_ENABLED: "false"
+      # CACHE_INSERT_DATA: "true"
+    ports:
+      - "19530:19530"   # gRPC for pymilvus
+      - "9091:9091"     # metrics / health endpoints
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    volumes:
+      - ./milvus_data:/var/lib/milvus
+    restart: unless-stopped
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.15
+    container_name: etcd
+    command:
+      - etcd
+      - --name
+      - default
+      - --data-dir
+      - /etcd
+      - --advertise-client-urls
+      - http://etcd:2379
+      - --listen-client-urls
+      - http://0.0.0.0:2379
+      - --initial-advertise-peer-urls
+      - http://etcd:2380
+      - --listen-peer-urls
+      - http://0.0.0.0:2380
+      - --initial-cluster
+      - default=http://etcd:2380
+      - --initial-cluster-state
+      - new
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - ./etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      TZ: "Asia/Kolkata"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        echo '⏳ Waiting for MinIO to be healthy...';
+        i=0; while [ $i -lt 12 ]; do curl -fs http://minio:9000/minio/health/live && break || sleep 5; i=$((i+1)); done;
+        mc alias set myminio http://minio:9000 minioadmin minioadmin &&
+        mc mb -p myminio/milvus-bucket || true &&
+        echo '✅ MinIO bucket initialized successfully';
+      "
+    restart: "no"
+
+volumes:
+  postgres_data:
+  milvus_data:
+  etcd_data:
+  minio_data:
+  uploads:
+  outputs:
+  backups:

@@ -1,16 +1,19 @@
 import os
 import logging
+import time
 from pathlib import Path
 from typing import List
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import uvicorn
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.core.config import settings
 from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat
@@ -20,11 +23,81 @@ from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
 from app.api.routes import user_credentials
 from app.core.database import init_db
+from app.services.prometheus_metrics import metrics
 
 load_dotenv()
 
 logger = logging.getLogger("enterprise_rag_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+# ===================== Prometheus Metrics Middleware =====================
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to track HTTP request metrics for Prometheus.
+    
+    Tracks:
+    - Request count by method, endpoint, status
+    - Request duration
+    - Request/response sizes
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        # Skip metrics endpoint to avoid recursion
+        if request.url.path == "/metrics":
+            return await call_next(request)
+        
+        # Normalize endpoint path (remove IDs for grouping)
+        path = request.url.path
+        # Simplify paths with IDs for better metric grouping
+        path_parts = path.split('/')
+        normalized_parts = []
+        for part in path_parts:
+            # Replace UUIDs, numeric IDs, and long hashes with placeholder
+            if part and (
+                len(part) > 20 or  # Long strings (likely IDs)
+                part.isdigit() or  # Pure numbers
+                (len(part) == 36 and part.count('-') == 4)  # UUID pattern
+            ):
+                normalized_parts.append('{id}')
+            else:
+                normalized_parts.append(part)
+        endpoint = '/'.join(normalized_parts) or '/'
+        
+        method = request.method
+        start_time = time.time()
+        
+        # Track request size
+        content_length = request.headers.get('content-length')
+        if content_length:
+            metrics.http_request_size.labels(
+                method=method, endpoint=endpoint
+            ).observe(int(content_length))
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Calculate duration
+        duration = time.time() - start_time
+        status_code = response.status_code
+        
+        # Track metrics
+        metrics.http_requests_total.labels(
+            method=method, endpoint=endpoint, status_code=str(status_code)
+        ).inc()
+        
+        metrics.http_request_duration.labels(
+            method=method, endpoint=endpoint
+        ).observe(duration)
+        
+        # Track response size
+        response_size = response.headers.get('content-length')
+        if response_size:
+            metrics.http_response_size.labels(
+                method=method, endpoint=endpoint
+            ).observe(int(response_size))
+        
+        return response
 
 # ===================== Lifespan Management =====================
 @asynccontextmanager
@@ -120,11 +193,19 @@ app = FastAPI(
 
 # ===================== CORS Configuration =====================
 allowed_origins: List[str] = [
+    "http://localhost:4200",      # Angular frontend (default port)
+    "http://127.0.0.1:4200",      # Angular frontend (alternative)
     "http://localhost:4201",      # Angular frontend (user-frontend)
     "http://127.0.0.1:4201",      # Angular frontend (alternative)
     "http://localhost:3000",      # Open WebUI
     "http://127.0.0.1:3000",      # Open WebUI (alternative)
+    "http://localhost:8000",      # Same origin
+    "http://127.0.0.1:8000",      # Same origin (alternative)
 ]
+
+# For development with Cursor port forwarding - allow common forwarded port ranges
+for port in range(57000, 58000):
+    allowed_origins.append(f"http://localhost:{port}")
 
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
 if extra_origins:
@@ -139,6 +220,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add Prometheus metrics middleware
+if os.getenv("ENABLE_PROMETHEUS_METRICS", "true").lower() in ("1", "true", "yes"):
+    app.add_middleware(PrometheusMiddleware)
+    logger.info("✅ Prometheus metrics middleware enabled")
 
 # ===================== API Routes =====================
 app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
@@ -156,6 +242,27 @@ app.include_router(user_credentials.router)
 
 # Agentic Metrics API for agent evaluation
 app.include_router(agentic_metrics.router)
+
+
+# ===================== Prometheus Metrics Endpoint =====================
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """
+    Prometheus metrics endpoint.
+    
+    Exposes all application metrics in Prometheus format:
+    - LLM tokens, calls, latency, costs
+    - RAG retrieval metrics
+    - Agent execution metrics
+    - Agentic evaluation scores
+    - HTTP request metrics
+    
+    Scraped by Prometheus at http://rag-app:8000/metrics
+    """
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent

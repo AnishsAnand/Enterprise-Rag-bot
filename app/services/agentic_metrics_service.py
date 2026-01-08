@@ -17,6 +17,19 @@ from datetime import datetime
 from enum import Enum
 import asyncio
 
+# Prometheus metrics - lazy import to avoid circular dependencies
+_prom_metrics = None
+def _get_prometheus_metrics():
+    """Lazy load Prometheus metrics to avoid circular imports."""
+    global _prom_metrics
+    if _prom_metrics is None:
+        try:
+            from app.services.prometheus_metrics import metrics
+            _prom_metrics = metrics
+        except ImportError:
+            _prom_metrics = None
+    return _prom_metrics
+
 logger = logging.getLogger(__name__)
 
 
@@ -651,6 +664,17 @@ Respond in this exact JSON format:
                 self._persistence.save_evaluation(result.to_dict())
             except Exception as e:
                 logger.error(f"❌ Failed to persist evaluation: {e}")
+        
+        # Track in Prometheus
+        prom = _get_prometheus_metrics()
+        if prom:
+            prom.track_agentic_evaluation(
+                agent_name=trace.agent_name,
+                task_adherence=task_score,
+                tool_accuracy=tool_score,
+                intent_resolution=intent_score,
+                overall_score=overall_score
+            )
         
         logger.info(f"✅ Evaluation complete - Overall Score: {overall_score:.2f}")
         logger.info(f"   Task Adherence: {task_score:.2f}")

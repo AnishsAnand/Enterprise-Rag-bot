@@ -1,6 +1,7 @@
 # user_main.py (Milvus migration - production-ready)
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
@@ -11,11 +12,12 @@ from fastapi import FastAPI, HTTPException, Request, Header
 from starlette.requests import Request as StarletteRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 import jwt
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from urllib.parse import urljoin
 from app.api.routes import rag_widget, agent_chat
@@ -24,6 +26,7 @@ from app.routers import openai_compatible
 from app.core.database import init_db
 from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
+from app.services.prometheus_metrics import metrics
 
 load_dotenv()
 
@@ -184,6 +187,56 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+# ------------------------ Prometheus Metrics Middleware ------------------------
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    """Middleware to track HTTP request metrics for Prometheus."""
+    
+    async def dispatch(self, request: Request, call_next):
+        # Skip metrics endpoint to avoid recursion
+        if request.url.path == "/metrics":
+            return await call_next(request)
+        
+        # Normalize endpoint path
+        path = request.url.path
+        path_parts = path.split('/')
+        normalized_parts = []
+        for part in path_parts:
+            if part and (len(part) > 20 or part.isdigit() or (len(part) == 36 and part.count('-') == 4)):
+                normalized_parts.append('{id}')
+            else:
+                normalized_parts.append(part)
+        endpoint = '/'.join(normalized_parts) or '/'
+        
+        method = request.method
+        start_time = time.time()
+        
+        # Track request size
+        content_length = request.headers.get('content-length')
+        if content_length:
+            metrics.http_request_size.labels(method=method, endpoint=endpoint).observe(int(content_length))
+        
+        # Process request
+        response = await call_next(request)
+        
+        # Calculate duration
+        duration = time.time() - start_time
+        status_code = response.status_code
+        
+        # Track metrics
+        metrics.http_requests_total.labels(method=method, endpoint=endpoint, status_code=str(status_code)).inc()
+        metrics.http_request_duration.labels(method=method, endpoint=endpoint).observe(duration)
+        
+        # Track response size
+        response_size = response.headers.get('content-length')
+        if response_size:
+            metrics.http_response_size.labels(method=method, endpoint=endpoint).observe(int(response_size))
+        
+        return response
+
+if os.getenv("ENABLE_PROMETHEUS_METRICS", "true").lower() in ("1", "true", "yes"):
+    app.add_middleware(PrometheusMiddleware)
+    logger.info("✅ Prometheus metrics middleware enabled")
+
 # ------------------------ Routers ------------------------
 app.include_router(auth_router)
 
@@ -215,6 +268,11 @@ else:
 # Include OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
 logger.info("✅ Included openai_compatible.router for Open WebUI integration")
+
+# Include Agentic Metrics API for agent evaluation
+from app.routers import agentic_metrics
+app.include_router(agentic_metrics.router)
+logger.info("✅ Included agentic_metrics.router for agent evaluation metrics")
 
 # ------------------------ Request Models ------------------------
 class UserQueryRequest(BaseModel):
@@ -554,6 +612,60 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
     except Exception as e:
         logger.exception(f"User query error: {e}")
         raise HTTPException(status_code=500, detail="An error occurred processing your request")
+
+
+# ------------------------ Prometheus Metrics Endpoint ------------------------
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """
+    Prometheus metrics endpoint for the user API (port 8001).
+    
+    Exposes all application metrics in Prometheus format.
+    Scraped by Prometheus at http://rag-app:8001/metrics
+    """
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
+
+
+# ------------------------ Debug: LLM Call Tracking ------------------------
+@app.get("/debug/llm-calls", tags=["debug"])
+async def debug_llm_calls():
+    """
+    Debug endpoint to see where LLM calls are coming from.
+    
+    Returns:
+        - recent_calls: Last 100 LLM calls with full stack traces
+        - call_sources: Summary of call sources with counts
+        - total_calls: Total number of calls tracked
+    """
+    return {
+        "total_calls": len(metrics.get_llm_call_log()),
+        "call_sources": metrics.get_llm_call_sources(),
+        "recent_calls": metrics.get_llm_call_log()[-20:],  # Last 20 calls
+    }
+
+
+@app.get("/debug/llm-calls/full", tags=["debug"])
+async def debug_llm_calls_full():
+    """
+    Debug endpoint to get ALL tracked LLM calls (last 100).
+    """
+    return {
+        "total_calls": len(metrics.get_llm_call_log()),
+        "call_sources": metrics.get_llm_call_sources(),
+        "all_calls": metrics.get_llm_call_log(),
+    }
+
+
+@app.post("/debug/llm-calls/clear", tags=["debug"])
+async def debug_llm_calls_clear():
+    """
+    Clear the LLM call tracking log.
+    """
+    metrics.clear_llm_call_log()
+    return {"status": "cleared", "message": "LLM call log has been cleared"}
 
 
 # ------------------------ Health Check ------------------------

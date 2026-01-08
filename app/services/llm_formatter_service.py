@@ -5,6 +5,7 @@ All agents should use this service to format API responses.
 
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from app.services.ai_service import ai_service
@@ -25,8 +26,8 @@ class LLMFormatterService:
     def __init__(self):
         self.temperature = 0.3
         self.max_tokens = 2000
-        self.timeout = 15
-        logger.info("✅ LLMFormatterService initialized")
+        self.timeout = float(os.getenv("HTTP_TIMEOUT_SECONDS", "30"))  # Use env var, default 30s
+        logger.info(f"✅ LLMFormatterService initialized (timeout={self.timeout}s)")
     
     async def format_response(
         self,

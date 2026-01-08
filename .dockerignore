@@ -1,0 +1,50 @@
+# Exclude data directories from Docker build context
+milvus_data/
+etcd_data/
+minio_data/
+uploads/
+outputs/
+backups/
+logs/
+
+# Exclude backup directories
+backup_*/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+dist/
+.angular/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Environment
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+
+
+

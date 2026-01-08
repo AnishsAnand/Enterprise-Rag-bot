@@ -174,9 +174,12 @@ Always confirm destructive operations (delete, update) before executing."""
             if not state:
                 return "No active conversation state found"
             
+            # Handle status - it might be enum or string
+            status_value = state.status.value if hasattr(state.status, 'value') else str(state.status)
+            
             return json.dumps({
                 "intent": state.intent,
-                "status": state.status.value,
+                "status": status_value,
                 "collected_params": state.collected_params,
                 "missing_params": list(state.missing_params),
                 "invalid_params": state.invalid_params
@@ -324,7 +327,10 @@ Always confirm destructive operations (delete, update) before executing."""
             }
         
         # Check if we're awaiting confirmation (review step)
-        if state.status == "AWAITING_CONFIRMATION":
+        # This is tracked via last_asked_param = "_confirmation" in cluster creation handler
+        if (hasattr(state, 'last_asked_param') and 
+            state.last_asked_param == "_confirmation" and
+            state.status == ConversationStatus.COLLECTING_PARAMS):
             return {
                 "route": "validation",
                 "reason": "Awaiting user confirmation after review"
@@ -378,7 +384,7 @@ Respond with ONLY ONE of these:
                 prompt=routing_prompt,
                 max_tokens=250,
                 temperature=0.1,
-                timeout=15
+                timeout=30  # Increased from 15s - allow time for LLM to respond
             )
             
             logger.info(f"🤖 LLM routing decision: {llm_response}")

@@ -18,7 +18,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
+# Use environment variable for output directory - allows Docker volume mapping
+OUTPUT_DIR = os.path.abspath(os.getenv("OUTPUT_DIRECTORY", "/tmp/rag_outputs"))
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)

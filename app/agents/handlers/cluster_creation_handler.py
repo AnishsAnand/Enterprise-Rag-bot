@@ -7,12 +7,12 @@ making it easier to maintain and test independently.
 
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 import json
 
 from app.services.api_executor_service import api_executor_service
 from app.agents.tools.parameter_extraction import ParameterExtractor
-from app.agents.state.conversation_state import conversation_state_manager
+from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -362,8 +362,9 @@ class ClusterCreationHandler:
         # Log final payload
         self._log_cluster_payload(state, "COMPLETE")
         
-        # Set status to AWAITING_CONFIRMATION (not READY_TO_EXECUTE yet)
-        state.status = "AWAITING_CONFIRMATION"
+        # Set status to COLLECTING_PARAMS (we're awaiting confirmation)
+        # Use last_asked_param = "_confirmation" to track that we're in confirmation step
+        state.status = ConversationStatus.COLLECTING_PARAMS
         state.last_asked_param = "_confirmation"  # Special marker for confirmation step
         state.missing_params = []
         conversation_state_manager.update_session(state)
@@ -407,7 +408,7 @@ class ClusterCreationHandler:
 
 ---
 
-⏱️ **Estimated creation time**: 15-30 minutes
+⏱️ **Estimated creation time**: 5-10 minutes
 
 **Please review the configuration above.**
 
@@ -458,16 +459,8 @@ Reply with:
                 param_lower = param.lower()
                 # Check for parameter name mentions
                 if param_lower in text_lower or self._get_param_display_name(param).lower() in text_lower:
-                    # Clear this parameter and all subsequent ones (workflow order matters)
-                    param_index = self.workflow.index(param)
-                    params_to_clear = self.workflow[param_index:]
-                    for p in params_to_clear:
-                        if p in state.collected_params:
-                            del state.collected_params[p]
-                        # Also clear internal params
-                        internal_key = f"_{p}_id"
-                        if internal_key in state.collected_params:
-                            del state.collected_params[internal_key]
+                    # Clear this parameter and all its dependents (cascading)
+                    self._clear_parameter_and_dependents(param, state)
                     
                     state.last_asked_param = None
                     conversation_state_manager.update_session(state)
@@ -475,7 +468,7 @@ Reply with:
                     return {
                         "agent_name": "ValidationAgent",
                         "success": True,
-                        "output": f"✅ Cleared '{self._get_param_display_name(param)}' and all subsequent parameters. Let's start from there again."
+                        "output": f"✅ Cleared '{self._get_param_display_name(param)}' and all dependent parameters. Let's start from there again."
                     }
             
             # Generic "go back" without specific parameter
@@ -500,6 +493,153 @@ Reply with:
                     }
         
         return None
+    
+    def _clear_parameter_and_dependents(self, param_name: str, state: Any) -> None:
+        """
+        Clear a parameter and all its dependent parameters based on dependency chain.
+        
+        Dependency chain:
+        - datacenter → businessUnit → environment → zone → operatingSystem, nodeType, flavor
+        - businessUnit → environment → zone → operatingSystem, nodeType, flavor
+        - environment → zone → operatingSystem, nodeType, flavor
+        - zone → operatingSystem, nodeType, flavor
+        - nodeType → flavor
+        - k8sVersion → cniDriver (and potentially OS/flavors if they depend on version)
+        
+        Args:
+            param_name: Name of parameter to clear
+            state: Conversation state (modified in place)
+        """
+        logger.info(f"🧹 Clearing parameter '{param_name}' and its dependents")
+        
+        # Define dependency mapping: param -> list of dependent params to clear
+        dependencies = {
+            "datacenter": [
+                "businessUnit", "environment", "zone", 
+                "operatingSystem", "nodeType", "flavor", "additionalStorage"
+            ],
+            "businessUnit": [
+                "environment", "zone", 
+                "operatingSystem", "nodeType", "flavor", "additionalStorage"
+            ],
+            "environment": [
+                "zone", "operatingSystem", "nodeType", "flavor", "additionalStorage"
+            ],
+            "zone": [
+                "operatingSystem", "nodeType", "flavor", "additionalStorage"
+            ],
+            "k8sVersion": [
+                "cniDriver"  # CNI driver depends on k8s version
+            ],
+            "nodeType": [
+                "flavor", "additionalStorage"  # Flavor depends on node type
+            ],
+            "operatingSystem": [
+                "nodeType", "flavor", "additionalStorage"  # Node type/flavor depend on OS
+            ]
+        }
+        
+        # Get list of params to clear (including the param itself)
+        params_to_clear = [param_name]
+        if param_name in dependencies:
+            params_to_clear.extend(dependencies[param_name])
+        
+        # Clear each parameter and its internal tracking params
+        for param in params_to_clear:
+            if param in state.collected_params:
+                del state.collected_params[param]
+                logger.info(f"  ✓ Cleared: {param}")
+            
+            # Clear internal tracking params
+            internal_keys = [
+                f"_{param}_id",
+                f"_{param}_name",
+                f"_{param}_validated"
+            ]
+            for key in internal_keys:
+                if key in state.collected_params:
+                    del state.collected_params[key]
+        
+        # Clear cached options that depend on the cleared params
+        if param_name == "datacenter":
+            if hasattr(state, '_business_units'):
+                delattr(state, '_business_units')
+            if hasattr(state, '_department_details'):
+                delattr(state, '_department_details')
+        elif param_name == "businessUnit":
+            if hasattr(state, '_business_units'):
+                delattr(state, '_business_units')
+        elif param_name == "environment":
+            # No specific cache to clear
+            pass
+        elif param_name == "zone":
+            if hasattr(state, '_os_options'):
+                delattr(state, '_os_options')
+            if hasattr(state, '_node_types'):
+                delattr(state, '_node_types')
+            if hasattr(state, '_all_flavors'):
+                delattr(state, '_all_flavors')
+        elif param_name == "k8sVersion":
+            if hasattr(state, '_k8s_versions'):
+                delattr(state, '_k8s_versions')
+            if hasattr(state, '_cni_drivers'):
+                delattr(state, '_cni_drivers')
+        elif param_name == "nodeType":
+            if hasattr(state, '_node_types'):
+                delattr(state, '_node_types')
+            if hasattr(state, '_all_flavors'):
+                delattr(state, '_all_flavors')
+        
+        logger.info(f"✅ Cleared {param_name} and {len(params_to_clear) - 1} dependent parameter(s)")
+    
+    async def _safe_match_selection(
+        self,
+        input_text: str,
+        available_options: List[Dict[str, Any]],
+        param_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Safely match user selection with proper error handling.
+        
+        Args:
+            input_text: User's input
+            available_options: List of available options to match against
+            param_name: Name of parameter being matched (for error messages)
+            
+        Returns:
+            Dict with matched_item if successful, None if no match or error
+        """
+        try:
+            if not available_options:
+                logger.error(f"❌ No {param_name} options available")
+                return None
+            
+            matched = await self.param_extractor.match_user_selection(input_text, available_options)
+            matched_data = json.loads(matched)
+            
+            if not matched_data or not matched_data.get("matched"):
+                logger.info(f"❌ No match found for {param_name}: '{input_text}'")
+                return None
+            
+            matched_item = matched_data.get("matched_item")
+            if not matched_item:
+                logger.error(f"❌ LLM returned matched=true but matched_item is None for {param_name}")
+                return None
+            
+            if not isinstance(matched_item, dict) or "id" not in matched_item:
+                logger.error(f"❌ matched_item missing 'id' field for {param_name}: {matched_item}")
+                return None
+            
+            logger.info(f"✅ Matched {param_name}: {matched_item.get('name')} (ID: {matched_item['id']})")
+            return matched_item
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Failed to parse LLM matching response for {param_name}: {e}")
+            logger.error(f"   Raw response: {matched[:200] if 'matched' in locals() and matched else 'None'}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error matching {param_name}: {e}", exc_info=True)
+            return None
     
     def _get_param_display_name(self, param_name: str) -> str:
         """Get user-friendly display name for parameter."""
@@ -694,12 +834,19 @@ Reply with:
             state._datacenter_options = dc_result.get("datacenters", [])
             state._all_images = dc_result.get("images", [])
         
-        # Match user selection
-        matched = await self.param_extractor.match_user_selection(input_text, state._datacenter_options)
-        matched_data = json.loads(matched)
+        # Check if we have datacenter options
+        if not state._datacenter_options:
+            logger.error("❌ No datacenter options available")
+            return {
+                "agent_name": "ValidationAgent",
+                "success": True,
+                "output": "❌ No datacenters are currently available. Please contact your administrator."
+            }
         
-        if matched_data.get("matched"):
-            dc_info = matched_data.get("matched_item")
+        # Match user selection using LLM (with safe error handling)
+        dc_info = await self._safe_match_selection(input_text, state._datacenter_options, "datacenter")
+        
+        if dc_info:
             state.collected_params["datacenter"] = dc_info
             state.collected_params["_datacenter_id"] = dc_info["id"]
             conversation_state_manager.update_session(state)
@@ -864,11 +1011,10 @@ Reply with:
             logger.info(f"🏢 Found {len(filtered_bus)} business units for endpoint {selected_endpoint_id}")
             state._business_units = filtered_bus
         
-        matched = await self.param_extractor.match_user_selection(input_text, state._business_units)
-        matched_data = json.loads(matched)
+        # Match user selection using LLM (with safe error handling)
+        bu_info = await self._safe_match_selection(input_text, state._business_units, "businessUnit")
         
-        if matched_data.get("matched"):
-            bu_info = matched_data.get("matched_item")
+        if bu_info:
             # Find the full BU data with environmentList
             full_bu = next((bu for bu in state._business_units if bu["id"] == bu_info["id"]), bu_info)
             state.collected_params["businessUnit"] = full_bu
@@ -1360,7 +1506,7 @@ Reply with:
         # Check for confirmation
         if any(word in user_response for word in ["yes", "proceed", "confirm", "create", "go ahead"]):
             logger.info("✅ User confirmed cluster creation")
-            state.status = "READY_TO_EXECUTE"
+            state.status = ConversationStatus.READY_TO_EXECUTE
             state.last_asked_param = None
             conversation_state_manager.update_session(state)
             
@@ -1374,7 +1520,7 @@ Reply with:
         # Check for cancellation
         elif any(word in user_response for word in ["cancel", "abort", "stop", "no"]):
             logger.info("❌ User cancelled cluster creation")
-            state.status = "CANCELLED"
+            state.status = ConversationStatus.CANCELLED
             state.last_asked_param = None
             conversation_state_manager.update_session(state)
             
@@ -1425,12 +1571,12 @@ Reply with:
             
             if param_to_change:
                 logger.info(f"🔄 User wants to change: {param_to_change}")
-                # Remove the parameter so it will be asked again
-                if param_to_change in state.collected_params:
-                    del state.collected_params[param_to_change]
+                
+                # Clear the parameter and all dependent parameters
+                self._clear_parameter_and_dependents(param_to_change, state)
                 
                 # Reset status to collecting
-                state.status = "COLLECTING_PARAMS"
+                state.status = ConversationStatus.COLLECTING_PARAMS
                 state.last_asked_param = None
                 conversation_state_manager.update_session(state)
                 
