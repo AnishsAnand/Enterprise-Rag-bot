@@ -14,7 +14,10 @@ services:
       - "3000:8080"
     environment:
       # Connection to Enterprise RAG Bot backend
-      - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8001/api/v1
+      # - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8001/api/v1
+
+      # Connection to locally run backend
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8001/api/v1
       - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-change-this-secure-key}
       
       # Feature flags
