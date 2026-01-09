@@ -40,3 +40,16 @@ minio_data/
 test_connection.py
 test_real_images.py
 test_postgres.py 
+
+query
+temp/
+nginx/
+etcd_data/
+backups/
+logs/
+ragbot.db 
+uploads/
+public/
+ssl/
+styles/
+backend/
