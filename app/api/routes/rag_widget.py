@@ -19,14 +19,16 @@ import inspect
 import json
 
 from app.services.scraper_service import scraper_service
-from app.services.milvus_service import milvus_service  
+from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.agents import get_agent_manager  # Add agent manager
+from app.services.openwebui_formatter import format_agent_response_for_openwebui
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
+MIN_RELEVANCE_THRESHOLD = float(os.getenv("MIN_RELEVANCE_THRESHOLD", "0.25"))
+MAX_CHUNKS_RETURN = int(os.getenv("MAX_CHUNKS_RETURN", "12"))
 # ===================== Request Models =====================
 
 class WidgetQueryRequest(BaseModel):
@@ -148,23 +150,23 @@ class OrchestrationService:
         Check availability of all integrated services.
         """
         services = {
-            "milvus": {"available": False, "status": "unknown", "error": None},
+            "postgres": {"available": False, "status": "unknown", "error": None},
             "ai_service": {"available": False, "status": "unknown", "error": None},
             "scraper": {"available": False, "status": "unknown", "error": None},
         }
         
-        # Check Milvus
+        # Check postgres
         try:
-            stats = await call_maybe_async(milvus_service.get_collection_stats)
+            stats = await call_maybe_async(postgres_service.get_collection_stats)
             if isinstance(stats, dict) and stats.get("status") in ("active", "healthy"):
-                services["milvus"]["available"] = True
-                services["milvus"]["status"] = "healthy"
-                services["milvus"]["documents"] = stats.get("document_count", 0)
+                services["postgres"]["available"] = True
+                services["postgres"]["status"] = "healthy"
+                services["postgres"]["documents"] = stats.get("document_count", 0)
             else:
-                services["milvus"]["status"] = "degraded"
+                services["postgres"]["status"] = "degraded"
         except Exception as e:
-            services["milvus"]["error"] = str(e)
-            logger.warning(f"Milvus availability check failed: {e}")
+            services["postgres"]["error"] = str(e)
+            logger.warning(f"postgres availability check failed: {e}")
         
         # Check AI Service
         try:
@@ -284,7 +286,7 @@ class OrchestrationService:
         
         result = await call_maybe_async(scraper_service.scrape_url, url, scrape_params)
         
-        if result and result.get("status") == "success" and services["milvus"]["available"]:
+        if result and result.get("status") == "success" and services["postgres"]["available"]:
             # Store in knowledge base
             content = result.get("content", {})
             page_text = content.get("text", "")
@@ -310,7 +312,7 @@ class OrchestrationService:
         original_query: str
     ) -> Dict[str, Any]:
         """Handle search/retrieval task."""
-        if not services["milvus"]["available"]:
+        if not services["postgres"]["available"]:
             return {
                 "error": "Vector database unavailable",
                 "fallback": "Using AI-only response",
@@ -321,7 +323,7 @@ class OrchestrationService:
         
         # Perform vector search
         search_results = await call_maybe_async(
-            milvus_service.search_documents,
+            postgres_service.search_documents,
             search_query,
             n_results=50
         )
@@ -366,9 +368,9 @@ class OrchestrationService:
         
         # Get context from knowledge base if available
         context = []
-        if services["milvus"]["available"]:
+        if services["postgres"]["available"]:
             search_results = await call_maybe_async(
-                milvus_service.search_documents,
+                postgres_service.search_documents,
                 subject,
                 n_results=10
             )
@@ -421,7 +423,7 @@ class OrchestrationService:
             background_tasks.add_task(
                 enhanced_bulk_scrape_task,
                 discovered_urls,
-                auto_store=services["milvus"]["available"],
+                auto_store=services["postgres"]["available"],
                 max_depth=2
             )
         
@@ -552,8 +554,7 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
     """
     Enhanced query processing with automatic orchestration.
     Detects user intent and automatically executes appropriate tasks.
-    NOW ROUTES TO AGENT MANAGER FOR RESOURCE OPERATIONS!
-    Supports multi-turn conversations with session tracking.
+    Routes to Agent Manager for resource operations with multi-turn conversation support.
     """
     try:
         query = request.query.strip()
@@ -562,673 +563,116 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
 
         logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute}, force_rag_only: {request.force_rag_only})")
         
-        # STEP 1: Get or create session ID for conversation continuity
-        # Use a consistent session per user (can be enhanced with user auth later)
-        import hashlib
-        from datetime import datetime
-        
-        # For now, use a time-based session that expires after 30 minutes
-        # Generate or use provided session ID for conversation continuity
-        if request.session_id:
-            # Use provided session_id for multi-turn conversations
-            session_id = request.session_id
-            logger.info(f"📋 Using provided session ID: {session_id}")
-        else:
-            # Generate session based on user_id if available, otherwise time-based for widget continuity
-            if request.user_id:
-                # User-specific session (lasts 10 minutes for conversation continuity)
-                time_bucket = str(datetime.now().hour) + str(datetime.now().minute // 10)
-                session_id = hashlib.md5(f"widget_{request.user_id}_{time_bucket}".encode()).hexdigest()[:16]
-                logger.info(f"📋 Generated user session ID: {session_id} (10-min bucket)")
-            else:
-                # Anonymous session (lasts 10 minutes for widget users)
-                time_bucket = str(datetime.now().hour) + str(datetime.now().minute // 10)
-                session_id = hashlib.md5(f"widget_anon_{time_bucket}".encode()).hexdigest()[:16]
-                logger.info(f"📋 Generated anonymous session ID: {session_id} (10-min bucket)")
+        # ==================== STEP 1: Session Management ====================
+        session_id = await _get_or_create_session_id(request)
+        logger.info(f"📋 Session ID: {session_id}")
 
-        # ==================== NEW: Route to Agent Manager for Resource Operations ====================
-        # FIRST: Check if this is a continuation of an existing conversation
-        from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
-        existing_state = conversation_state_manager.get_session(session_id)
-        
-        # FALLBACK: If no state found and query looks like a response (short, simple answer like "all", "yes", datacenter name)
-        # Check for any recent session in COLLECTING_PARAMS state
-        if not existing_state and len(query.split()) <= 3:
-            logger.info(f"🔍 No state for session {session_id}, checking for recent active sessions...")
-            recent_state = conversation_state_manager.get_most_recent_active_session()
-            if recent_state and recent_state.status == ConversationStatus.COLLECTING_PARAMS:
-                logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS - using it!")
-                existing_state = recent_state
-                session_id = recent_state.session_id  # Use the found session ID
-        
-        if existing_state and existing_state.status == ConversationStatus.COLLECTING_PARAMS:
-            # This is a follow-up response to a parameter collection request
-            logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
-            # Route to agents to continue the conversation
-            has_action = True
-            has_resource = True
-        else:
-            # Check if this is a resource/cluster operation
-            query_lower = query.lower()
-            query_words = query_lower.split()  # Split into words for whole-word matching
-            action_keywords = ["create", "make", "build", "deploy", "provision", "delete", "remove", "update", "modify", "list", "show", "get", "view", "display"]
-            resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule", "load balancer", "database", "storage", "volume", "endpoint", "endpoints", "datacenter", "datacenters"]
-            
-            # Check for action/resource keywords (substring match for most, but whole-word for 'all')
-            has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
-            has_resource = any(keyword in query_lower for keyword in resource_keywords)
-            
-            # If keywords don't match, use LLM to understand intent and correct typos
-            if not (has_action and has_resource):
-                logger.info(f"🤖 Keywords not detected. Using LLM to analyze query intent: '{query}'")
-                
-                try:
-                    intent_prompt = f"""You are an intent classifier for a cloud infrastructure management system.
-
-User query: "{query}"
-
-Analyze if this query is about:
-1. Managing cloud resources (clusters, endpoints, datacenters, firewalls, databases, etc.)
-2. Resource operations (create, list, show, get, delete, update, etc.)
-
-Even if the user has typos (e.g., "lis" instead of "list"), understand the intent.
-
-Respond ONLY with a JSON object:
-{{
-  "is_resource_operation": true/false,
-  "corrected_query": "the query with typos fixed",
-  "action": "create/list/show/delete/update/etc or null",
-  "resource": "cluster/endpoint/firewall/etc or null",
-  "confidence": 0.0-1.0
-}}
-
-Examples:
-- "lis clusters" → {{"is_resource_operation": true, "corrected_query": "list clusters", "action": "list", "resource": "cluster", "confidence": 0.95}}
-- "show endpoints" → {{"is_resource_operation": true, "corrected_query": "show endpoints", "action": "show", "resource": "endpoint", "confidence": 0.98}}
-- "what is kubernetes" → {{"is_resource_operation": false, "corrected_query": "what is kubernetes", "action": null, "resource": null, "confidence": 0.9}}
-"""
-                    
-                    # Use the correct method signature for ai_service
-                    llm_response = await ai_service._call_chat_with_retries(
-                        prompt=intent_prompt,
-                        max_tokens=200,
-                        temperature=0.1,
-                        timeout=15
-                    )
-                    
-                    # Parse LLM response
-                    import json
-                    import re
-                    
-                    # Extract JSON from response
-                    json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', llm_response)
-                    if json_match:
-                        intent_data = json.loads(json_match.group(0))
-                        
-                        is_resource_op = intent_data.get("is_resource_operation", False)
-                        confidence = intent_data.get("confidence", 0.0)
-                        corrected_query = intent_data.get("corrected_query", query)
-                        
-                        logger.info(f"🤖 LLM Intent Analysis: is_resource_op={is_resource_op}, confidence={confidence}, corrected='{corrected_query}'")
-                        
-                        if is_resource_op and confidence >= 0.7:
-                            logger.info(f"✅ LLM confirmed resource operation with {confidence:.0%} confidence")
-                            has_action = True
-                            has_resource = True
-                            # Optionally use corrected query
-                            if corrected_query != query:
-                                logger.info(f"📝 Using corrected query: '{query}' → '{corrected_query}'")
-                                query = corrected_query  # Use corrected query for agent processing
-                        else:
-                            logger.info(f"❌ LLM classified as non-resource query (confidence: {confidence:.0%})")
-                    else:
-                        logger.warning(f"⚠️ Could not parse LLM intent response: {llm_response[:100]}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ LLM intent classification failed: {str(e)}")
-                    # Continue with original keyword-based detection
-            
-            # If short query without clear action/resource but there's recent conversation history, continue with agents
-            if not (has_action and has_resource):
-                logger.info(f"🔍 Query '{query}' lacks action/resource keywords. Checking conversation history...")
-                if existing_state and len(existing_state.conversation_history) > 0:
-                    logger.info(f"📋 Found state with {len(existing_state.conversation_history)} messages")
-                    last_messages = [msg for msg in existing_state.conversation_history if msg.get("role") == "assistant"]
-                    if last_messages:
-                        last_response = last_messages[-1].get("content", "").lower()
-                        logger.info(f"💬 Last response snippet: {last_response[:80]}...")
-                        # Check if we recently asked about clusters/resources
-                        if any(word in last_response for word in ["cluster", "data center", "endpoint", "which one"]):
-                            logger.info(f"🎯 Query '{query}' continuing conversation context → routing to agents")
-                            has_action = True
-                            has_resource = True
-                        else:
-                            logger.info(f"❌ Last response doesn't contain conversation indicators")
-                    else:
-                        logger.info(f"❌ No assistant messages in history")
-                else:
-                    logger.info(f"❌ No state or empty message history (state={existing_state is not None})")
-            
-            # NEW: Check if user is mentioning location-related terms (triggers the bot to ask for clarification)
-            location_indicators = ["in ", " at ", " from ", "dc", "datacenter", "data center", "location", "where"]
-            mentions_location = any(indicator in query_lower for indicator in location_indicators)
-            
-            # Implicit operation: If user mentions resource + location without action, treat as "list"
-            # Example: "cluster in delhi" or "clusters at datacenter" → "list clusters"
-            if has_resource and mentions_location and not has_action:
-                logger.info(f"🎯 Detected implicit list operation (resource + location indicator)")
-                has_action = True  # Treat as implicit "list" operation
-        
-        # IMPORTANT: Skip agent routing if force_rag_only is set (prevents infinite loop when RAGAgent calls this)
+        # ==================== STEP 2: Agent Routing Logic ====================
+        # Skip agent routing if force_rag_only is set (prevents infinite loop)
         if request.force_rag_only:
             logger.info(f"🔒 force_rag_only=True: Skipping agent routing, doing pure RAG lookup")
-            has_action = False
-            has_resource = False
+            should_route_to_agent = False
+        else:
+            should_route_to_agent = await _should_route_to_agent(query, session_id)
         
-        if has_action and has_resource:
-            logger.info(f"🎯 Routing to Agent Manager (detected resource operation)")
-            
-            # Route to agent manager instead of RAG
-            agent_manager = get_agent_manager(
-                vector_service=milvus_service,
-                ai_service=ai_service
+        # ==================== STEP 3: Route to Agent Manager if Applicable ====================
+        if should_route_to_agent:
+            logger.info(f"🎯 Routing to Agent Manager")
+            return await _handle_agent_routing(
+                query=query,
+                session_id=session_id,
+                request=request,
+                background_tasks=background_tasks
             )
-            
-            # Use the session ID we created above for conversation continuity
-            agent_result = await agent_manager.process_request(
-                user_input=query,
-                session_id=session_id,  # Persistent session for multi-turn
-                user_id="widget_user",
-                user_roles=["viewer", "user"]
-            )
-            
-            # ===== FULL AGENT FLOW: Let agents handle everything =====
-            logger.info(f"✅ Agent processing complete: routing={agent_result.get('routing')}, success={agent_result.get('success')}")
-            
-            # Check if agent wants to ask a question (collecting parameters)
-            response_text = agent_result.get("response", "")
-            metadata = agent_result.get("metadata", {})
-            missing_params = metadata.get("missing_params", [])
-            
-            # If agent is asking for more info, return the question directly
-            if missing_params or "?" in response_text or "which" in response_text.lower():
-                logger.info(f"🔄 Agent asking for clarification, missing: {missing_params}")
-                return {
-                    "query": query,
-                    "answer": response_text,
-                    "sources": [],
-                    "intent_detected": True,
-                    "routed_to": "agent_manager",
-                    "conversation_active": True,
-                    "session_id": session_id,  # Return session_id for multi-turn
-                    "missing_params": missing_params,
-                    "metadata": metadata,
-                    "timestamp": datetime.now().isoformat(),
-                    # Ensure user_main doesn't consider this a weak response
-                    "results_found": 100,  # High number to pass weak check
-                    "confidence": 0.95,
-                    "has_sources": True,
-                    "images": [],
-                    "steps": []
-                }
-            
-            # If agent has execution result (API was called), format it nicely
-            execution_result = agent_result.get("execution_result")
-            if execution_result and execution_result.get("success"):
-                logger.info(f"🎯 Agent executed operation successfully")
-                
-                # Use the execution result directly (don't re-execute!)
-                result_data = execution_result.get("data", {})
-                
-                # ===== HANDLE ENDPOINT LISTING =====
-                if isinstance(result_data, dict) and "endpoints" in result_data:
-                    endpoints = result_data.get("endpoints", [])
-                    total = result_data.get("total", len(endpoints))
-                    
-                    # Create formatted answer for endpoints
-                    answer = f"📍 **Available Endpoints/Datacenters** ({total} found)\n\n"
-                    answer += "| # | Name | ID | Type |\n"
-                    answer += "|---|------|----|----- |\n"
-                    
-                    for i, ep in enumerate(endpoints, 1):
-                        name = ep.get("name", "Unknown")
-                        ep_id = ep.get("id", "N/A")
-                        ep_type = ep.get("type", "")
-                        answer += f"| {i} | {name} | {ep_id} | {ep_type} |\n"
-                    
-                    answer += "\n💡 You can use these endpoints when listing or creating clusters."
-                    
-                    return {
-                        "query": query,
-                        "answer": answer,
-                        "sources": [],
-                        "intent_detected": True,
-                        "routed_to": "agent_manager",
-                        "auto_executed": True,
-                        "session_id": session_id,
-                        "execution_result": {
-                            "total_endpoints": total,
-                            "endpoints": endpoints
-                        },
-                        "metadata": metadata,
-                        "timestamp": datetime.now().isoformat(),
-                        "results_found": total,
-                        "results_used": total,
-                        "confidence": 0.99,
-                        "has_sources": True,
-                        "images": [],
-                        "steps": []
-                    }
-                
-                # ===== HANDLE CLUSTER LISTING =====
-                if isinstance(result_data, dict) and "data" in result_data:
-                    clusters = result_data["data"]
-                    
-                    # Group by endpoint for better formatting
-                    by_endpoint = {}
-                    for cluster in clusters:
-                        endpoint = cluster.get("displayNameEndpoint", "Unknown")
-                        if endpoint not in by_endpoint:
-                            by_endpoint[endpoint] = []
-                        by_endpoint[endpoint].append(cluster)
-                    
-                    # Create formatted answer
-                    if len(by_endpoint) == 1:
-                        endpoint_name = list(by_endpoint.keys())[0]
-                        answer = f"✅ Found **{len(clusters)} Kubernetes clusters** in **{endpoint_name}**:\n\n"
-                    else:
-                        answer = f"✅ Found **{len(clusters)} Kubernetes clusters** across **{len(by_endpoint)} data centers**:\n\n"
-                    
-                    for endpoint, endpoint_clusters in sorted(by_endpoint.items()):
-                        answer += f"📍 **{endpoint}** ({len(endpoint_clusters)} clusters)\n"
-                        for cluster in endpoint_clusters:
-                            status_emoji = "✅" if cluster.get("status") == "Healthy" else "⚠️"
-                            answer += f"  {status_emoji} {cluster.get('clusterName', 'N/A')} - "
-                            answer += f"{cluster.get('nodescount', 0)} nodes, "
-                            answer += f"K8s {cluster.get('kubernetesVersion', 'N/A')}\n"
-                        answer += "\n"
-                    
-                    return {
-                        "query": query,
-                        "answer": answer,
-                        "sources": [],
-                        "intent_detected": True,
-                        "routed_to": "agent_manager",
-                        "auto_executed": True,
-                        "session_id": session_id,
-                        "execution_result": {
-                            "total_clusters": len(clusters),
-                            "endpoints": len(by_endpoint),
-                            "clusters": clusters
-                        },
-                        "metadata": metadata,
-                        "timestamp": datetime.now().isoformat(),
-                        "results_found": len(clusters),
-                        "results_used": len(clusters),
-                        "confidence": 0.99,
-                        "has_sources": True,
-                        "images": [],
-                        "steps": []
-                    }
-            
-            # Default: return agent's response as-is (with high confidence to prevent fallback)
-            return {
-                "query": query,
-                "answer": response_text,
-                "sources": [],
-                "intent_detected": True,
-                "routed_to": "agent_manager",
-                "session_id": session_id,
-                "metadata": metadata,
-                "timestamp": datetime.now().isoformat(),
-                "results_found": 100,  # High number to pass weak response check
-                "confidence": 0.99,  # High confidence to prevent fallback
-                "has_sources": True,
-                "images": [],
-                "steps": []
-            }
         
-        # ==================== END NEW CODE ====================
-
-        # Detect task intent (for non-resource operations)
+        # ==================== STEP 4: Standard RAG Flow ====================
+        # Detect task intent for non-resource operations
         intent_analysis = await orchestration_service.detect_task_intent(query)
         
         # Auto-execute if enabled and intent is clear
         if request.auto_execute and intent_analysis.get("primary_task"):
-            primary_task = intent_analysis["primary_task"]
-            
-            if primary_task["confidence"] > 0.7:
-                logger.info(f"Auto-executing task: {primary_task['type']}")
-                
-                execution_result = await orchestration_service.execute_orchestrated_task(
-                    primary_task,
-                    background_tasks
-                )
-                
-                # Store interaction if enabled
-                if request.store_interaction:
-                    interaction_doc = {
-                        "content": json.dumps({
-                            "query": query,
-                            "intent": intent_analysis,
-                            "execution": execution_result
-                        }),
-                        "url": f"interaction://{datetime.now().timestamp()}",
-                        "title": f"User Interaction: {query[:50]}",
-                        "format": "application/json",
-                        "timestamp": datetime.now().isoformat(),
-                        "source": "widget_interaction",
-                    }
-                    background_tasks.add_task(store_document_task, [interaction_doc])
-                
-                return {
-                    "query": query,
-                    "intent_detected": intent_analysis,
-                    "auto_executed": True,
-                    "execution_result": execution_result,
-                    "timestamp": datetime.now().isoformat()
-                }
-
-        # Standard search flow if no auto-execution
-        search_params = {
-            "quick": {"max_results": min(request.max_results, 30), "use_reranking": False},
-            "balanced": {"max_results": request.max_results, "use_reranking": True},
-            "deep": {"max_results": min(request.max_results * 2, 100), "use_reranking": True},
-        }
-        search_config = search_params.get(request.search_depth, search_params["balanced"])
-
-        try:
-            search_results = await call_maybe_async(
-                milvus_service.search_documents,
-                query,
-                n_results=search_config["max_results"]
+            execution_result = await _handle_auto_execution(
+                query=query,
+                intent_analysis=intent_analysis,
+                request=request,
+                background_tasks=background_tasks
             )
-        except Exception as e:
-            logger.exception(f"Error while searching documents: {e}")
-            search_results = []
+            if execution_result:
+                return execution_result
 
+        # ==================== STEP 5: Search and Retrieve Documents ====================
+        search_results = await _perform_document_search(query, request)
+        
+        # Handle no results case
         if not search_results:
-            logger.warning("No search results found; attempting LLM-only fallback.")
-            try:
-                answer = await call_maybe_async(ai_service.generate_response, query, [])
-            except Exception as e:
-                logger.warning(f"LLM fallback failed: {e}")
-                answer = None
+            return await _handle_no_results(query, intent_analysis, request)
 
-            if answer:
-                summary = None
-                try:
-                    summary = await call_maybe_async(
-                        ai_service.generate_summary,
-                        answer,
-                        max_sentences=3,
-                        max_chars=600
-                    )
-                except Exception:
-                    summary = (answer[:600] + "...") if len(answer) > 600 else answer
-
-                return {
-                    "query": query,
-                    "answer": answer,
-                    "intent_detected": intent_analysis,
-                    "auto_executed": False,
-                    "steps": [],
-                    "images": [],
-                    "sources": [],
-                    "has_sources": False,
-                    "confidence": 0.45,
-                    "search_depth": request.search_depth,
-                    "timestamp": datetime.now().isoformat(),
-                    "summary": summary or "No summary available."
-                }
-
-            return {
-                "query": query,
-                "answer": "I don't have any relevant information in my knowledge base to answer your question. Please try rephrasing your query or add more context.",
-                "intent_detected": intent_analysis,
-                "steps": [],
-                "images": [],
-                "sources": [],
-                "has_sources": False,
-                "confidence": 0.0,
-                "search_depth": request.search_depth,
-                "timestamp": datetime.now().isoformat()
-            }
-
-        # Filter and process results
-        if request.enable_advanced_search:
-            avg_score = sum(r.get("relevance_score", 0) for r in search_results) / max(1, len(search_results))
-            min_threshold = max(0.3, avg_score * 0.6)
-            filtered_results = [r for r in search_results if r.get("relevance_score", 0) >= min_threshold]
-            if len(filtered_results) < max(3, int(len(search_results) * 0.2)):
-                filtered_results = search_results[:max(5, request.max_results // 2)]
-        else:
-            filtered_results = search_results[:request.max_results]
-
-        base_context = []
-        for result in filtered_results:
-            content = result.get("content", "") if isinstance(result, dict) else ""
-            if content and len(content.strip()) > 50:
-                score = result.get("relevance_score", 0.5)
-                if score > 0.7:
-                    base_context.append(content)
-                elif score > 0.5:
-                    base_context.append(content[:1500])
-                else:
-                    base_context.append(content[:800])
-
+        # ==================== STEP 6: Filter and Process Results ====================
+        filtered_results = _filter_search_results(search_results, request)
+        base_context = _extract_base_context(filtered_results)
+        
         if not base_context:
             base_context = [r.get("content", "")[:1000] for r in filtered_results[:3]]
 
-        # Generate enhanced response
-        try:
-            enhanced_result = await call_maybe_async(
-                ai_service.generate_enhanced_response,
-                query,
-                base_context,
-                None
-            )
-            answer = (enhanced_result or {}).get("text", "") if isinstance(enhanced_result, dict) else (enhanced_result or "")
-            expanded_context = (enhanced_result or {}).get("expanded_context", "") if isinstance(enhanced_result, dict) else ""
-            confidence = (enhanced_result or {}).get("quality_score", 0.0) if isinstance(enhanced_result, dict) else 0.0
-        except Exception as e:
-            logger.warning(f"Enhanced response generation failed: {e}")
-            try:
-                answer = await call_maybe_async(ai_service.generate_response, query, base_context[:3])
-            except Exception as e2:
-                logger.error(f"Fallback generate_response also failed: {e2}")
-                answer = ""
-            expanded_context = "\n\n".join(base_context[:2]) if base_context else ""
-            confidence = 0.6
-
-        # Generate steps
-        working_context = [expanded_context] if expanded_context else base_context[:3]
-        try:
-            steps_data = await call_maybe_async(
-                ai_service.generate_stepwise_response,
-                query,
-                working_context
-            )
-        except Exception as e:
-            logger.warning(f"Stepwise generation failed: {e}")
-            steps_data = []
-
-        if not steps_data:
-            if answer:
-                sentences = [s.strip() for s in answer.split(".") if s.strip()]
-                steps_data = [{"text": (s + "."), "type": "info"} for s in sentences[:5]]
-            else:
-                steps_data = [{"text": "Unable to generate structured response.", "type": "info"}]
-
-        # Extract and assign images
-        candidate_images = []
-        query_concepts = set(_extract_key_concepts(query.lower()))
-        answer_concepts = set(_extract_key_concepts(answer.lower())) if answer else set()
-        all_concepts = query_concepts | answer_concepts
-
-        for result in filtered_results:
-            meta = result.get("metadata", {}) or {}
-            page_url = meta.get("url", "")
-            page_title = meta.get("title", "")
-            relevance_score = result.get("relevance_score", 0.0)
-
-            images = meta.get("images", []) if isinstance(meta.get("images", []), list) else []
-            for img in images:
-                if not isinstance(img, dict) or not img.get("url"):
-                    continue
-
-                u = img.get("url", "").lower()
-                if any(noise in u for noise in ["logo", "icon", "favicon", "sprite", "banner"]):
-                    continue
-
-                img_text = (img.get("text", "") or "").lower()
-                img_concepts = set(_extract_key_concepts(img_text))
-                concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
-                text_similarity = _enhanced_similarity(query, img_text)
-
-                img_type = (img.get("type", "") or "").lower()
-                type_bonus = 0.2 if img_type in ["diagram", "chart", "screenshot", "illustration"] else 0.0
-
-                image_score = (
-                    text_similarity * 0.4
-                    + (concept_overlap / max(len(all_concepts), 1)) * 0.3
-                    + relevance_score * 0.2
-                    + type_bonus
-                )
-
-                if image_score > 0.15:
-                    candidate_images.append({
-                        "url": img.get("url"),
-                        "alt": img.get("alt", ""),
-                        "type": img.get("type", ""),
-                        "caption": img.get("caption", ""),
-                        "source_url": page_url,
-                        "source_title": page_title,
-                        "relevance_score": round(image_score, 3),
-                        "text": img_text[:500],
-                    })
-
-        seen_urls = set()
-        unique_images = []
-        for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
-            url = img.get("url")
-            if url and url not in seen_urls:
-                seen_urls.add(url)
-                unique_images.append(img)
-        selected_images = unique_images[:12]
-
-        # Build sources
-        sources = []
-        if request.include_sources:
-            for result in filtered_results:
-                meta = result.get("metadata", {}) or {}
-                content_preview_raw = result.get("content", "") or ""
-                content_preview = (
-                    content_preview_raw[:300] + "..." if len(content_preview_raw) > 300 else content_preview_raw
-                )
-                sources.append({
-                    "url": meta.get("url", ""),
-                    "title": meta.get("title", "Untitled"),
-                    "relevance_score": round(result.get("relevance_score", 0), 3),
-                    "content_preview": content_preview,
-                    "domain": meta.get("domain", ""),
-                    "last_updated": meta.get("timestamp", ""),
-                })
-
-        # Generate summary
-        summary_input = answer if answer else expanded_context
-        if summary_input:
-            try:
-                summary = await call_maybe_async(
-                    ai_service.generate_summary,
-                    summary_input,
-                    max_sentences=4,
-                    max_chars=600
-                )
-            except Exception:
-                summary = summary_input[:600] + "..." if len(summary_input) > 600 else summary_input
-        else:
-            summary = "No summary available."
-
-        # Combine steps with images
-        steps_with_images = []
-        for i, step in enumerate(steps_data):
-            step_obj = {"index": i + 1, "text": step.get("text", ""), "type": step.get("type", "action")}
-            assigned_img = None
-
-            if isinstance(step, dict):
-                si = step.get("image") if isinstance(step.get("image"), (dict, str)) else None
-                if isinstance(si, dict) and si.get("url"):
-                    assigned_img = {
-                        "url": si.get("url"),
-                        "alt": si.get("alt", "") or step.get("alt", "") or "",
-                        "caption": si.get("caption", "") or step.get("caption", "") or "",
-                        "relevance_score": si.get("relevance_score", None),
-                    }
-                elif isinstance(si, str) and si.startswith("http"):
-                    assigned_img = {
-                        "url": si,
-                        "alt": step.get("alt", "") or "",
-                        "caption": step.get("caption", "") or "",
-                        "relevance_score": None
-                    }
-
-                if not assigned_img:
-                    image_prompt = None
-                    if isinstance(step.get("image_prompt"), str) and step.get("image_prompt").strip():
-                        image_prompt = step.get("image_prompt").strip()
-                    elif isinstance(step.get("image"), dict) and isinstance(step["image"].get("image_prompt"), str):
-                        image_prompt = step["image"].get("image_prompt").strip()
-                    elif isinstance(step.get("image"), str) and not step.get("image").startswith("http") and len(step.get("image").strip()) > 0:
-                        image_prompt = step.get("image").strip()
-
-                    if image_prompt:
-                        assigned_img = {"image_prompt": image_prompt}
-
-            if not assigned_img and selected_images and i < len(selected_images):
-                step_img = selected_images[i]
-                if step_img.get("url"):
-                    assigned_img = {
-                        "url": step_img.get("url"),
-                        "alt": step_img.get("alt", "") or "",
-                        "caption": step_img.get("caption", "") or "",
-                        "relevance_score": step_img.get("relevance_score"),
-                    }
-
-            if assigned_img:
-                step_obj["image"] = assigned_img
-
-            steps_with_images.append(step_obj)
-
-        final_confidence = min(
-            1.0,
-            (
-                (confidence or 0.0) * 0.4
-                + (len(filtered_results) / max(request.max_results, 10)) * 0.3
-                + (1.0 if answer and len(answer) > 100 else 0.5) * 0.3
-            ),
+        # ==================== STEP 7: Generate Enhanced Response ====================
+        answer, expanded_context, confidence = await _generate_enhanced_response(
+            query, base_context
         )
 
-        # Store interaction if enabled
+        # ==================== STEP 8: Generate Steps ====================
+        steps_data = await _generate_steps(query, expanded_context, base_context, answer)
+
+        # ==================== STEP 9: Extract and Score Images ====================
+        selected_images = _extract_and_score_images(
+            query=query,
+            answer=answer,
+            filtered_results=filtered_results
+        )
+
+        # ==================== STEP 10: Build Sources ====================
+        sources = _build_sources(filtered_results, request)
+
+        # ==================== STEP 11: Generate Summary ====================
+        summary = await _generate_summary(answer, expanded_context)
+
+        # ==================== STEP 12: Combine Steps with Images ====================
+        steps_with_images = _combine_steps_with_images(steps_data, selected_images)
+
+        # ==================== STEP 13: Calculate Final Confidence ====================
+        final_confidence = _calculate_final_confidence(
+            confidence, filtered_results, answer, request
+        )
+
+        # ==================== STEP 14: Store Interaction ====================
         if request.store_interaction:
-            interaction_doc = {
-                "content": json.dumps({
-                    "query": query,
-                    "answer": answer,
-                    "confidence": final_confidence,
-                    "sources_count": len(sources)
-                }),
-                "url": f"interaction://{datetime.now().timestamp()}",
-                "title": f"Query: {query[:50]}",
-                "format": "application/json",
-                "timestamp": datetime.now().isoformat(),
-                "source": "widget_query",
+            await _store_interaction(
+                query=query,
+                answer=answer,
+                confidence=final_confidence,
+                sources=sources,
+                background_tasks=background_tasks
+            )
+
+        # ==================== STEP 15: Format and Return Response ====================
+        from app.services.openwebui_formatter import format_for_openwebui
+        
+        formatted_answer = format_for_openwebui(
+            answer=answer or "I was unable to generate a comprehensive answer based on the available information.",
+            steps=steps_with_images,
+            images=selected_images,
+            query=query,
+            confidence=final_confidence,
+            summary=summary,
+            metadata={
+                "results_found": len(search_results),
+                "results_used": len(filtered_results),
+                "search_depth": request.search_depth
             }
-            background_tasks.add_task(store_document_task, [interaction_doc])
+        )
 
         return {
             "query": query,
-            "answer": answer or "I was unable to generate a comprehensive answer based on the available information.",
+            "answer": formatted_answer,
             "intent_detected": intent_analysis,
             "auto_executed": False,
             "expanded_context": expanded_context if request.enable_advanced_search else None,
@@ -1250,6 +694,755 @@ Examples:
     except Exception as e:
         logger.exception(f"Widget query error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+async def _get_or_create_session_id(request: WidgetQueryRequest) -> str:
+    """Get or create session ID for conversation continuity."""
+    import hashlib
+    from datetime import datetime
+    
+    if request.session_id:
+        logger.info(f"📋 Using provided session ID: {request.session_id}")
+        return request.session_id
+    
+    # Generate session based on user_id if available, otherwise time-based
+    time_bucket = str(datetime.now().hour) + str(datetime.now().minute // 10)
+    
+    if request.user_id:
+        session_id = hashlib.md5(f"widget_{request.user_id}_{time_bucket}".encode()).hexdigest()[:16]
+        logger.info(f"📋 Generated user session ID: {session_id} (10-min bucket)")
+    else:
+        session_id = hashlib.md5(f"widget_anon_{time_bucket}".encode()).hexdigest()[:16]
+        logger.info(f"📋 Generated anonymous session ID: {session_id} (10-min bucket)")
+    
+    return session_id
+
+
+async def _should_route_to_agent(query: str, session_id: str) -> bool:
+    """Determine if query should be routed to agent manager."""
+    from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
+    
+    # Check if this is a continuation of an existing conversation
+    existing_state = conversation_state_manager.get_session(session_id)
+    
+    # Fallback: Check for recent active sessions if no state found
+    if not existing_state and len(query.split()) <= 3:
+        logger.info(f"🔍 No state for session {session_id}, checking for recent active sessions...")
+        recent_state = conversation_state_manager.get_most_recent_active_session()
+        if recent_state and recent_state.status == ConversationStatus.COLLECTING_PARAMS:
+            logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
+            return True
+    
+    # If existing conversation in parameter collection state
+    if existing_state and existing_state.status == ConversationStatus.COLLECTING_PARAMS:
+        logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
+        return True
+    
+    # Check for resource/cluster operation keywords
+    query_lower = query.lower()
+    query_words = query_lower.split()
+    
+    action_keywords = ["create", "make", "build", "deploy", "provision", "delete", 
+                      "remove", "update", "modify", "list", "show", "get", "view", "display"]
+    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule", 
+                        "load balancer", "database", "storage", "volume", "endpoint", 
+                        "endpoints", "datacenter", "datacenters"]
+    
+    has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
+    has_resource = any(keyword in query_lower for keyword in resource_keywords)
+    
+    # If keywords match, route to agent
+    if has_action and has_resource:
+        logger.info(f"✅ Action + Resource keywords detected")
+        return True
+    
+    # Use LLM to understand intent if keywords don't match
+    if not (has_action and has_resource):
+        llm_result = await _llm_intent_classification(query)
+        if llm_result:
+            return True
+    
+    # Check conversation history for context
+    if not (has_action and has_resource) and existing_state:
+        if _check_conversation_context(existing_state, query_lower):
+            return True
+    
+    # Check for implicit location-based operations
+    location_indicators = ["in ", " at ", " from ", "dc", "datacenter", "data center", "location", "where"]
+    mentions_location = any(indicator in query_lower for indicator in location_indicators)
+    
+    if has_resource and mentions_location and not has_action:
+        logger.info(f"🎯 Detected implicit list operation (resource + location)")
+        return True
+    
+    return False
+
+
+async def _llm_intent_classification(query: str) -> bool:
+    """Use LLM to classify query intent and detect typos."""
+    logger.info(f"🤖 Using LLM to analyze query intent: '{query}'")
+    
+    try:
+        intent_prompt = f"""You are an intent classifier for a cloud infrastructure management system.
+
+User query: "{query}"
+
+Analyze if this query is about:
+1. Managing cloud resources (clusters, endpoints, datacenters, firewalls, databases, etc.)
+2. Resource operations (create, list, show, get, delete, update, etc.)
+
+Even if the user has typos (e.g., "lis" instead of "list"), understand the intent.
+
+Respond ONLY with a JSON object:
+{{
+  "is_resource_operation": true/false,
+  "corrected_query": "the query with typos fixed",
+  "action": "create/list/show/delete/update/etc or null",
+  "resource": "cluster/endpoint/firewall/etc or null",
+  "confidence": 0.0-1.0
+}}"""
+        
+        llm_response = await ai_service._call_chat_with_retries(
+            prompt=intent_prompt,
+            max_tokens=200,
+            temperature=0.1,
+            timeout=15
+        )
+        
+        # Parse LLM response
+        import json
+        import re
+        
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', llm_response)
+        if json_match:
+            intent_data = json.loads(json_match.group(0))
+            
+            is_resource_op = intent_data.get("is_resource_operation", False)
+            confidence = intent_data.get("confidence", 0.0)
+            
+            logger.info(f"🤖 LLM Intent: is_resource_op={is_resource_op}, confidence={confidence:.0%}")
+            
+            if is_resource_op and confidence >= 0.7:
+                logger.info(f"✅ LLM confirmed resource operation")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ LLM intent classification failed: {str(e)}")
+        return False
+
+
+def _check_conversation_context(existing_state, query_lower: str) -> bool:
+    """Check if query continues an existing conversation."""
+    if len(existing_state.conversation_history) == 0:
+        return False
+    
+    last_messages = [msg for msg in existing_state.conversation_history 
+                    if msg.get("role") == "assistant"]
+    
+    if not last_messages:
+        return False
+    
+    last_response = last_messages[-1].get("content", "").lower()
+    
+    # Check if we recently asked about clusters/resources
+    conversation_indicators = ["cluster", "data center", "endpoint", "which one"]
+    if any(word in last_response for word in conversation_indicators):
+        logger.info(f"🎯 Query continues conversation context → routing to agents")
+        return True
+    
+    return False
+
+
+async def _handle_agent_routing(query: str, session_id: str, request: WidgetQueryRequest, 
+                                background_tasks: BackgroundTasks) -> dict:
+    """Handle routing to agent manager and process response."""
+    from app.services.openwebui_formatter import format_agent_response_for_openwebui
+    
+    agent_manager = get_agent_manager(
+        vector_service=postgres_service,
+        ai_service=ai_service
+    )
+    
+    agent_result = await agent_manager.process_request(
+        user_input=query,
+        session_id=session_id,
+        user_id="widget_user",
+        user_roles=["viewer", "user"]
+    )
+    
+    logger.info(f"✅ Agent processing complete: routing={agent_result.get('routing')}, "
+               f"success={agent_result.get('success')}")
+    
+    response_text = agent_result.get("response", "")
+    metadata = agent_result.get("metadata", {})
+    missing_params = metadata.get("missing_params", [])
+    
+    # If agent is asking for clarification
+    if missing_params or "?" in response_text or "which" in response_text.lower():
+        logger.info(f"🔄 Agent asking for clarification, missing: {missing_params}")
+        return {
+            "query": query,
+            "answer": response_text,
+            "sources": [],
+            "intent_detected": True,
+            "routed_to": "agent_manager",
+            "conversation_active": True,
+            "session_id": session_id,
+            "missing_params": missing_params,
+            "metadata": metadata,
+            "timestamp": datetime.now().isoformat(),
+            "results_found": 100,
+            "confidence": 0.95,
+            "has_sources": True,
+            "images": [],
+            "steps": []
+        }
+    
+    # If agent has execution result
+    execution_result = agent_result.get("execution_result")
+    if execution_result and execution_result.get("success"):
+        logger.info(f"🎯 Agent executed operation successfully")
+        result_data = execution_result.get("data", {})
+        
+        # Handle endpoint listing
+        if isinstance(result_data, dict) and "endpoints" in result_data:
+            return _format_endpoint_response(result_data, query, session_id, metadata)
+        
+        # Handle cluster listing
+        if isinstance(result_data, dict) and "data" in result_data:
+            return _format_cluster_response(result_data, query, session_id, metadata)
+    
+    # Format agent response using OpenWebUI formatter
+    formatted_answer = format_agent_response_for_openwebui(
+        response_text=response_text,
+        execution_result=execution_result,
+        session_id=session_id,
+        metadata=metadata
+    )
+    
+    # Default: return agent's response with high confidence
+    return {
+        "query": query,
+        "answer": formatted_answer,
+        "sources": [],
+        "intent_detected": True,
+        "routed_to": "agent_manager",
+        "session_id": session_id,
+        "metadata": metadata,
+        "timestamp": datetime.now().isoformat(),
+        "results_found": 100,
+        "confidence": 0.99,
+        "has_sources": True,
+        "images": [],
+        "steps": []
+    }
+
+
+def _format_endpoint_response(result_data: dict, query: str, session_id: str, metadata: dict) -> dict:
+    """Format endpoint listing response."""
+    endpoints = result_data.get("endpoints", [])
+    total = result_data.get("total", len(endpoints))
+    
+    answer = f"📍 **Available Endpoints/Datacenters** ({total} found)\n\n"
+    answer += "| # | Name | ID | Type |\n"
+    answer += "|---|------|----|----- |\n"
+    
+    for i, ep in enumerate(endpoints, 1):
+        name = ep.get("name", "Unknown")
+        ep_id = ep.get("id", "N/A")
+        ep_type = ep.get("type", "")
+        answer += f"| {i} | {name} | {ep_id} | {ep_type} |\n"
+    
+    answer += "\n💡 You can use these endpoints when listing or creating clusters."
+    
+    return {
+        "query": query,
+        "answer": answer,
+        "sources": [],
+        "intent_detected": True,
+        "routed_to": "agent_manager",
+        "auto_executed": True,
+        "session_id": session_id,
+        "execution_result": {
+            "total_endpoints": total,
+            "endpoints": endpoints
+        },
+        "metadata": metadata,
+        "timestamp": datetime.now().isoformat(),
+        "results_found": total,
+        "results_used": total,
+        "confidence": 0.99,
+        "has_sources": True,
+        "images": [],
+        "steps": []
+    }
+
+
+def _format_cluster_response(result_data: dict, query: str, session_id: str, metadata: dict) -> dict:
+    """Format cluster listing response."""
+    clusters = result_data["data"]
+    
+    # Group by endpoint
+    by_endpoint = {}
+    for cluster in clusters:
+        endpoint = cluster.get("displayNameEndpoint", "Unknown")
+        if endpoint not in by_endpoint:
+            by_endpoint[endpoint] = []
+        by_endpoint[endpoint].append(cluster)
+    
+    # Create formatted answer
+    if len(by_endpoint) == 1:
+        endpoint_name = list(by_endpoint.keys())[0]
+        answer = f"✅ Found **{len(clusters)} Kubernetes clusters** in **{endpoint_name}**:\n\n"
+    else:
+        answer = f"✅ Found **{len(clusters)} Kubernetes clusters** across **{len(by_endpoint)} data centers**:\n\n"
+    
+    for endpoint, endpoint_clusters in sorted(by_endpoint.items()):
+        answer += f"📍 **{endpoint}** ({len(endpoint_clusters)} clusters)\n"
+        for cluster in endpoint_clusters:
+            status_emoji = "✅" if cluster.get("status") == "Healthy" else "⚠️"
+            answer += f"  {status_emoji} {cluster.get('clusterName', 'N/A')} - "
+            answer += f"{cluster.get('nodescount', 0)} nodes, "
+            answer += f"K8s {cluster.get('kubernetesVersion', 'N/A')}\n"
+        answer += "\n"
+    
+    return {
+        "query": query,
+        "answer": answer,
+        "sources": [],
+        "intent_detected": True,
+        "routed_to": "agent_manager",
+        "auto_executed": True,
+        "session_id": session_id,
+        "execution_result": {
+            "total_clusters": len(clusters),
+            "endpoints": len(by_endpoint),
+            "clusters": clusters
+        },
+        "metadata": metadata,
+        "timestamp": datetime.now().isoformat(),
+        "results_found": len(clusters),
+        "results_used": len(clusters),
+        "confidence": 0.99,
+        "has_sources": True,
+        "images": [],
+        "steps": []
+    }
+
+
+async def _handle_auto_execution(query: str, intent_analysis: dict, 
+                                 request: WidgetQueryRequest, 
+                                 background_tasks: BackgroundTasks) -> dict:
+    """Handle auto-execution of detected tasks."""
+    primary_task = intent_analysis.get("primary_task")
+    
+    if not primary_task or primary_task["confidence"] <= 0.7:
+        return None
+    
+    logger.info(f"Auto-executing task: {primary_task['type']}")
+    
+    execution_result = await orchestration_service.execute_orchestrated_task(
+        primary_task,
+        background_tasks
+    )
+    
+    # Store interaction if enabled
+    if request.store_interaction:
+        interaction_doc = {
+            "content": json.dumps({
+                "query": query,
+                "intent": intent_analysis,
+                "execution": execution_result
+            }),
+            "url": f"interaction://{datetime.now().timestamp()}",
+            "title": f"User Interaction: {query[:50]}",
+            "format": "application/json",
+            "timestamp": datetime.now().isoformat(),
+            "source": "widget_interaction",
+        }
+        background_tasks.add_task(store_document_task, [interaction_doc])
+    
+    return {
+        "query": query,
+        "intent_detected": intent_analysis,
+        "auto_executed": True,
+        "execution_result": execution_result,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+async def _perform_document_search(query: str, request: WidgetQueryRequest) -> list:
+    """Perform document search with configured depth."""
+    search_params = {
+        "quick": {"max_results": min(request.max_results, 30), "use_reranking": False},
+        "balanced": {"max_results": request.max_results, "use_reranking": True},
+        "deep": {"max_results": min(request.max_results * 2, 100), "use_reranking": True},
+    }
+    search_config = search_params.get(request.search_depth, search_params["balanced"])
+
+    try:
+        search_results = await call_maybe_async(
+            postgres_service.search_documents,
+            query,
+            n_results=search_config["max_results"]
+        )
+        return search_results or []
+    except Exception as e:
+        logger.exception(f"Error while searching documents: {e}")
+        return []
+
+
+async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQueryRequest) -> dict:
+    """Handle case when no search results are found."""
+    try:
+        answer = await call_maybe_async(ai_service.generate_response, query, [])
+    except Exception as e:
+        logger.warning(f"LLM fallback failed: {e}")
+        answer = None
+
+    if answer:
+        summary = None
+        try:
+            summary = await call_maybe_async(
+                ai_service.generate_summary,
+                answer,
+                max_sentences=3,
+                max_chars=600
+            )
+        except Exception:
+            summary = (answer[:600] + "...") if len(answer) > 600 else answer
+
+        return {
+            "query": query,
+            "answer": answer,
+            "intent_detected": intent_analysis,
+            "auto_executed": False,
+            "steps": [],
+            "images": [],
+            "sources": [],
+            "has_sources": False,
+            "confidence": 0.45,
+            "search_depth": request.search_depth,
+            "timestamp": datetime.now().isoformat(),
+            "summary": summary or "No summary available."
+        }
+
+    return {
+        "query": query,
+        "answer": "I don't have any relevant information in my knowledge base to answer your question. Please try rephrasing your query or add more context.",
+        "intent_detected": intent_analysis,
+        "steps": [],
+        "images": [],
+        "sources": [],
+        "has_sources": False,
+        "confidence": 0.0,
+        "search_depth": request.search_depth,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+def _filter_search_results(search_results: list, request: WidgetQueryRequest) -> list:
+    """Filter search results based on relevance scores."""
+    if request.enable_advanced_search:
+        avg_score = sum(r.get("relevance_score", 0) for r in search_results) / max(1, len(search_results))
+        min_threshold = max(0.3, avg_score * 0.6)
+        filtered_results = [r for r in search_results if r.get("relevance_score", 0) >= min_threshold]
+        
+        if len(filtered_results) < max(3, int(len(search_results) * 0.2)):
+            filtered_results = search_results[:max(5, request.max_results // 2)]
+    else:
+        filtered_results = search_results[:request.max_results]
+    
+    return filtered_results
+
+
+def _extract_base_context(filtered_results: list) -> list:
+    """Extract base context from filtered results."""
+    base_context = []
+    for result in filtered_results:
+        content = result.get("content", "") if isinstance(result, dict) else ""
+        if content and len(content.strip()) > 50:
+            score = result.get("relevance_score", 0.5)
+            if score > 0.7:
+                base_context.append(content)
+            elif score > 0.5:
+                base_context.append(content[:1500])
+            else:
+                base_context.append(content[:800])
+    
+    return base_context
+
+
+async def _generate_enhanced_response(query: str, base_context: list) -> tuple:
+    """Generate enhanced response with expanded context."""
+    try:
+        enhanced_result = await call_maybe_async(
+            ai_service.generate_enhanced_response,
+            query,
+            base_context,
+            None
+        )
+        
+        if isinstance(enhanced_result, dict):
+            answer = enhanced_result.get("text", "")
+            expanded_context = enhanced_result.get("expanded_context", "")
+            confidence = enhanced_result.get("quality_score", 0.0)
+        else:
+            answer = enhanced_result or ""
+            expanded_context = ""
+            confidence = 0.0
+            
+    except Exception as e:
+        logger.warning(f"Enhanced response generation failed: {e}")
+        try:
+            answer = await call_maybe_async(ai_service.generate_response, query, base_context[:3])
+        except Exception as e2:
+            logger.error(f"Fallback generate_response also failed: {e2}")
+            answer = ""
+        expanded_context = "\n\n".join(base_context[:2]) if base_context else ""
+        confidence = 0.6
+    
+    return answer, expanded_context, confidence
+
+
+async def _generate_steps(query: str, expanded_context: str, base_context: list, answer: str) -> list:
+    """Generate stepwise response."""
+    working_context = [expanded_context] if expanded_context else base_context[:3]
+    
+    try:
+        steps_data = await call_maybe_async(
+            ai_service.generate_stepwise_response,
+            query,
+            working_context
+        )
+    except Exception as e:
+        logger.warning(f"Stepwise generation failed: {e}")
+        steps_data = []
+
+    if not steps_data:
+        if answer:
+            sentences = [s.strip() for s in answer.split(".") if s.strip()]
+            steps_data = [{"text": (s + "."), "type": "info"} for s in sentences[:5]]
+        else:
+            steps_data = [{"text": "Unable to generate structured response.", "type": "info"}]
+    
+    return steps_data
+
+
+def _extract_and_score_images(query: str, answer: str, filtered_results: list) -> list:
+    """Extract and score images from search results."""
+    candidate_images = []
+    query_concepts = set(_extract_key_concepts(query.lower()))
+    answer_concepts = set(_extract_key_concepts(answer.lower())) if answer else set()
+    all_concepts = query_concepts | answer_concepts
+
+    for result in filtered_results:
+        meta = result.get("metadata", {}) or {}
+        page_url = meta.get("url", "")
+        page_title = meta.get("title", "")
+        relevance_score = result.get("relevance_score", 0.0)
+
+        images = meta.get("images", []) if isinstance(meta.get("images", []), list) else []
+        for img in images:
+            if not isinstance(img, dict) or not img.get("url"):
+                continue
+
+            u = img.get("url", "").lower()
+            if any(noise in u for noise in ["logo", "icon", "favicon", "sprite", "banner"]):
+                continue
+
+            img_text = (img.get("text", "") or "").lower()
+            img_concepts = set(_extract_key_concepts(img_text))
+            concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
+            text_similarity = _enhanced_similarity(query, img_text)
+
+            img_type = (img.get("type", "") or "").lower()
+            type_bonus = 0.2 if img_type in ["diagram", "chart", "screenshot", "illustration"] else 0.0
+
+            image_score = (
+                text_similarity * 0.4
+                + (concept_overlap / max(len(all_concepts), 1)) * 0.3
+                + relevance_score * 0.2
+                + type_bonus
+            )
+
+            if image_score > 0.15:
+                candidate_images.append({
+                    "url": img.get("url"),
+                    "alt": img.get("alt", ""),
+                    "type": img.get("type", ""),
+                    "caption": img.get("caption", ""),
+                    "source_url": page_url,
+                    "source_title": page_title,
+                    "relevance_score": round(image_score, 3),
+                    "text": img_text[:500],
+                })
+
+    seen_urls = set()
+    unique_images = []
+    for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
+        url = img.get("url")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            unique_images.append(img)
+    
+    return unique_images[:12]
+def _build_sources(filtered_results: list, request: WidgetQueryRequest) -> list:
+    """Build sources list from filtered results."""
+    sources = []
+    if request.include_sources:
+        for result in filtered_results:
+            meta = result.get("metadata", {}) or {}
+            content_preview_raw = result.get("content", "") or ""
+            content_preview = (
+                content_preview_raw[:300] + "..." if len(content_preview_raw) > 300 else content_preview_raw
+            )
+            sources.append({
+                "url": meta.get("url", ""),
+                "title": meta.get("title", "Untitled"),
+                "relevance_score": round(result.get("relevance_score", 0), 3),
+                "content_preview": content_preview,
+                "domain": meta.get("domain", ""),
+                "last_updated": meta.get("timestamp", ""),
+            })
+    
+    return sources
+
+
+async def _generate_summary(answer: str, expanded_context: str) -> str:
+    """Generate summary from answer or context."""
+    summary_input = answer if answer else expanded_context
+    
+    if summary_input:
+        try:
+            summary = await call_maybe_async(
+                ai_service.generate_summary,
+                summary_input,
+                max_sentences=4,
+                max_chars=600
+            )
+        except Exception:
+            summary = summary_input[:600] + "..." if len(summary_input) > 600 else summary_input
+    else:
+        summary = "No summary available."
+    
+    return summary
+
+
+def _combine_steps_with_images(steps_data: list, selected_images: list) -> list:
+    """Combine steps with relevant images."""
+    steps_with_images = []
+    
+    for i, step in enumerate(steps_data):
+        step_obj = {
+            "index": i + 1,
+            "text": step.get("text", ""),
+            "type": step.get("type", "action")
+        }
+        assigned_img = None
+
+        if isinstance(step, dict):
+            # Check for existing image in step
+            si = step.get("image") if isinstance(step.get("image"), (dict, str)) else None
+            
+            if isinstance(si, dict) and si.get("url"):
+                assigned_img = {
+                    "url": si.get("url"),
+                    "alt": si.get("alt", "") or step.get("alt", "") or "",
+                    "caption": si.get("caption", "") or step.get("caption", "") or "",
+                    "relevance_score": si.get("relevance_score", None),
+                }
+            elif isinstance(si, str) and si.startswith("http"):
+                assigned_img = {
+                    "url": si,
+                    "alt": step.get("alt", "") or "",
+                    "caption": step.get("caption", "") or "",
+                    "relevance_score": None
+                }
+
+            # Check for image prompt
+            if not assigned_img:
+                image_prompt = None
+                if isinstance(step.get("image_prompt"), str) and step.get("image_prompt").strip():
+                    image_prompt = step.get("image_prompt").strip()
+                elif isinstance(step.get("image"), dict) and isinstance(step["image"].get("image_prompt"), str):
+                    image_prompt = step["image"].get("image_prompt").strip()
+                elif isinstance(step.get("image"), str) and not step.get("image").startswith("http") and len(step.get("image").strip()) > 0:
+                    image_prompt = step.get("image").strip()
+
+                if image_prompt:
+                    assigned_img = {"image_prompt": image_prompt}
+
+        # Assign from selected images if no image yet
+        if not assigned_img and selected_images and i < len(selected_images):
+            step_img = selected_images[i]
+            if step_img.get("url"):
+                assigned_img = {
+                    "url": step_img.get("url"),
+                    "alt": step_img.get("alt", "") or "",
+                    "caption": step_img.get("caption", "") or "",
+                    "relevance_score": step_img.get("relevance_score"),
+                }
+
+        if assigned_img:
+            step_obj["image"] = assigned_img
+
+        steps_with_images.append(step_obj)
+    
+    return steps_with_images
+
+
+def _calculate_final_confidence(confidence: float, filtered_results: list, 
+                                answer: str, request: WidgetQueryRequest) -> float:
+    """Calculate final confidence score."""
+    return min(
+        1.0,
+        (
+            (confidence or 0.0) * 0.4
+            + (len(filtered_results) / max(request.max_results, 10)) * 0.3
+            + (1.0 if answer and len(answer) > 100 else 0.5) * 0.3
+        ),
+    )
+
+
+async def _store_interaction(query: str, answer: str, confidence: float, 
+                             sources: list, background_tasks: BackgroundTasks):
+    """Store interaction for future reference."""
+    interaction_doc = {
+        "content": json.dumps({
+            "query": query,
+            "answer": answer,
+            "confidence": confidence,
+            "sources_count": len(sources)
+        }),
+        "url": f"interaction://{datetime.now().timestamp()}",
+        "title": f"Query: {query[:50]}",
+        "format": "application/json",
+        "timestamp": datetime.now().isoformat(),
+        "source": "widget_query",
+    }
+    background_tasks.add_task(store_document_task, [interaction_doc])
+
+
+def _extract_key_concepts(text: str) -> list:
+    """Extract key concepts from text (placeholder - implement actual logic)."""
+    # This is a simplified version - you should have the actual implementation
+    words = text.split()
+    return [w for w in words if len(w) > 3]
+
+
+def _enhanced_similarity(text1: str, text2: str) -> float:
+    """Calculate enhanced similarity between two texts (placeholder)."""
+    # This is a simplified version - you should have the actual implementation
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / len(words1 | words2)
 
 
 @router.post("/widget/execute-task")
@@ -1305,9 +1498,9 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
             
             required_services = {
                 "scrape": ["scraper"],
-                "search": ["milvus", "ai_service"],
+                "search": ["postgres", "ai_service"],
                 "analyze": ["ai_service"],
-                "bulk_operation": ["scraper", "milvus"]
+                "bulk_operation": ["scraper", "postgres"]
             }
             
             missing_services = []
@@ -1676,11 +1869,11 @@ async def widget_upload_file(
             candidates = ["add_documents", "store_documents", "add_docs", "store", "add"]
             func = None
             for name in candidates:
-                if hasattr(milvus_service, name):
-                    func = getattr(milvus_service, name)
+                if hasattr(postgres_service, name):
+                    func = getattr(postgres_service, name)
                     break
             if not func:
-                raise RuntimeError("milvus_service has no storage method")
+                raise RuntimeError("postgres_service has no storage method")
 
             res = func(docs)
             if inspect.isawaitable(res):
@@ -1753,7 +1946,7 @@ async def widget_upload_file(
 async def widget_knowledge_stats():
     """Enhanced knowledge base statistics"""
     try:
-        stats = await call_maybe_async(milvus_service.get_collection_stats)
+        stats = await call_maybe_async(postgres_service.get_collection_stats)
         health = await ai_service.get_service_health()
         services = await orchestration_service.check_service_availability()
 
@@ -1762,7 +1955,7 @@ async def widget_knowledge_stats():
             "collection_status": stats.get("status", "unknown") if isinstance(stats, dict) else "unknown",
             "collection_name": stats.get("collection_name", "unknown") if isinstance(stats, dict) else "unknown",
             "search_config": stats.get("search_config", {}) if isinstance(stats, dict) else {},
-            "database": stats.get("database", "milvus") if isinstance(stats, dict) else "milvus",
+            "database": stats.get("database", "postgres") if isinstance(stats, dict) else "postgres",
             "connection": stats.get("connection", {}) if isinstance(stats, dict) else {},
             "indexes": stats.get("indexes", []) if isinstance(stats, dict) else [],
             "embedding_dimension": stats.get("embedding_dimension", 0) if isinstance(stats, dict) else 0,
@@ -1781,8 +1974,8 @@ async def widget_knowledge_stats():
 async def widget_clear_knowledge():
     """Clear knowledge base with confirmation"""
     try:
-        await call_maybe_async(milvus_service.delete_collection)
-        await call_maybe_async(milvus_service.initialize)
+        await call_maybe_async(postgres_service.delete_collection)
+        await call_maybe_async(postgres_service.initialize)
         return {
             "status": "success",
             "message": "Knowledge base cleared and reinitialized successfully",
@@ -1798,9 +1991,9 @@ async def widget_clear_knowledge():
 async def store_document_task(docs: List[Dict[str, Any]]):
     """Background storage task"""
     try:
-        func = getattr(milvus_service, "store_documents", None) or getattr(milvus_service, "add_documents", None)
+        func = getattr(postgres_service, "store_documents", None) or getattr(postgres_service, "add_documents", None)
         if not func:
-            raise RuntimeError("milvus_service lacks a store_documents/add_documents function")
+            raise RuntimeError("postgres_service lacks a store_documents/add_documents function")
         res = func(docs)
         if inspect.isawaitable(res):
             await res
@@ -1881,9 +2074,9 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
 
         if documents_to_store:
             try:
-                store_fn = getattr(milvus_service, "add_documents", None) or getattr(milvus_service, "store_documents", None)
+                store_fn = getattr(postgres_service, "add_documents", None) or getattr(postgres_service, "store_documents", None)
                 if not store_fn:
-                    raise RuntimeError("No storage function found on milvus_service")
+                    raise RuntimeError("No storage function found on postgres_service")
                 res = store_fn(documents_to_store)
                 if inspect.isawaitable(res):
                     stored_ids = await res

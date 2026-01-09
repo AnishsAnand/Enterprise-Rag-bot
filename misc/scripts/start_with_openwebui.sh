@@ -101,4 +101,3 @@ echo "Stop services:"
 echo "  docker-compose -f docker-compose.openwebui.yml down"
 echo ""
 echo "======================================================================="
-

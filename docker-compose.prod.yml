@@ -1,0 +1,420 @@
+# docker-compose.prod.yml
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL with pgvector (PRIMARY VECTOR & RELATIONAL STORE)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:0.7.3-pg16
+    container_name: enterprise-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ragbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragbot_secret_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_rag}
+      TZ: ${TIMEZONE:-UTC}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ragbot} -d ${POSTGRES_DB:-enterprise_rag} -h 127.0.0.1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - rag-network
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "effective_cache_size=2GB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis (Caching & Session Store)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: enterprise-rag-redis
+    restart: unless-stopped
+    command: >
+      sh -c '
+        if [ -n "${REDIS_PASSWORD:-}" ]; then
+          redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD}"
+        else
+          redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+        fi
+      '
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"${REDIS_PASSWORD:-}\" ]; then redis-cli -a \"${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rag-network
+    environment:
+      TZ: ${TIMEZONE:-UTC}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Enterprise RAG Bot (Admin - ingestion / training)
+  # ---------------------------------------------------------------------------
+  enterprise-rag-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_ENV=${ENV:-production}
+    image: enterprise-rag-bot:prod
+    container_name: enterprise-rag-bot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    # CRITICAL: Load .env file first
+    env_file:
+      - .env
+    
+    environment:
+      # =========================================================================
+      # CRITICAL: AI Service Configuration (MUST BE SET)
+      # =========================================================================
+      GROK_API_KEY: ${GROK_API_KEY:?ERROR - GROK_API_KEY is required but not set}
+      GROK_BASE_URL: ${GROK_BASE_URL:-https://models.cloudservices.tatacommunications.com/v1}
+      
+      # =========================================================================
+      # AI/RAG Model Configuration
+      # =========================================================================
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}
+      HOSTED_EMBEDDING_MODEL: ${HOSTED_EMBEDDING_MODEL:-openai/gpt-oss-20b-embedding}
+      CHAT_MODEL: ${CHAT_MODEL:-openai/gpt-oss-120b}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-4096}
+      
+      # =========================================================================
+      # Service Performance Tuning
+      # =========================================================================
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-25}
+      AI_SERVICE_MAX_RETRIES: ${AI_SERVICE_MAX_RETRIES:-2}
+      AI_SERVICE_BACKOFF_BASE: ${AI_SERVICE_BACKOFF_BASE:-2.0}
+      MIN_RELEVANCE_THRESHOLD: ${MIN_RELEVANCE_THRESHOLD:-0.25}
+      MAX_CHUNKS_RETURN: ${MAX_CHUNKS_RETURN:-12}
+      
+      # =========================================================================
+      # Application Configuration
+      # =========================================================================
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: ${TIMEZONE:-UTC}
+      
+      # =========================================================================
+      # Database Configuration (Docker internal)
+      # =========================================================================
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ragbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragbot_secret_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_rag}
+      POSTGRES_TABLE: ${POSTGRES_TABLE:-enterprise_rag}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ragbot}:${POSTGRES_PASSWORD:-ragbot_secret_2024}@postgres:5432/${POSTGRES_DB:-enterprise_rag}
+      
+      # =========================================================================
+      # Redis Configuration
+      # =========================================================================
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      
+      # =========================================================================
+      # Admin Authentication
+      # =========================================================================
+      DEFAULT_ADMIN_USER: ${DEFAULT_ADMIN_USER:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-admin123}
+      
+      # =========================================================================
+      # API Configuration
+      # =========================================================================
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    
+    ports:
+      - "${API_PORT:-8000}:8000"
+    
+    volumes:
+      # Mount .env file explicitly for additional safety
+      - ./.env:/app/.env:ro
+      # Application data volumes
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - ./outputs:/app/outputs
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    
+    networks:
+      - rag-network
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Enterprise RAG Bot - User-facing service (OpenWebUI target)
+  # ---------------------------------------------------------------------------
+  enterprise-rag-user:
+    image: enterprise-rag-bot:prod
+    container_name: enterprise-rag-user
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      enterprise-rag-bot:
+        condition: service_healthy
+    
+    # CRITICAL: Load .env file
+    env_file:
+      - .env
+    
+    environment:
+      # =========================================================================
+      # CRITICAL: AI Service Configuration
+      # =========================================================================
+      GROK_API_KEY: ${GROK_API_KEY:?ERROR - GROK_API_KEY is required but not set}
+      GROK_BASE_URL: ${GROK_BASE_URL:-https://models.cloudservices.tatacommunications.com/v1}
+      
+      # =========================================================================
+      # AI/RAG Model Configuration
+      # =========================================================================
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}
+      HOSTED_EMBEDDING_MODEL: ${HOSTED_EMBEDDING_MODEL:-openai/gpt-oss-20b-embedding}
+      CHAT_MODEL: ${CHAT_MODEL:-openai/gpt-oss-120b}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-4096}
+      
+      # =========================================================================
+      # Service Configuration
+      # =========================================================================
+      HTTP_TIMEOUT_SECONDS: ${HTTP_TIMEOUT_SECONDS:-25}
+      AI_SERVICE_MAX_RETRIES: ${AI_SERVICE_MAX_RETRIES:-2}
+      MIN_RELEVANCE_THRESHOLD: ${MIN_RELEVANCE_THRESHOLD:-0.25}
+      MAX_CHUNKS_RETURN: ${MAX_CHUNKS_RETURN:-12}
+      
+      # =========================================================================
+      # Application Configuration
+      # =========================================================================
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: ${TIMEZONE:-UTC}
+      
+      # =========================================================================
+      # Database Configuration
+      # =========================================================================
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ragbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragbot_secret_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_rag}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ragbot}:${POSTGRES_PASSWORD:-ragbot_secret_2024}@postgres:5432/${POSTGRES_DB:-enterprise_rag}
+      
+      # =========================================================================
+      # Redis Configuration
+      # =========================================================================
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      
+      # =========================================================================
+      # User App Configuration
+      # =========================================================================
+      USER_APP_HOST: 0.0.0.0
+      USER_APP_PORT: 8001
+      USER_ALLOWED_ORIGINS: ${USER_ALLOWED_ORIGINS:-http://localhost:3000}
+    
+    command: ["python", "-m", "uvicorn", "app.user_main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]
+
+    ports:
+      - "${USER_APP_PORT:-8001}:8001"
+    
+    volumes:
+      # Mount .env file explicitly
+      - ./.env:/app/.env:ro
+      # Read-only access to uploads, writable logs
+      - ./uploads:/app/uploads:ro
+      - ./logs:/app/logs
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    
+    networks:
+      - rag-network
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI (Frontend Chat Interface)
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: enterprise-rag-openwebui
+    restart: unless-stopped
+    depends_on:
+      enterprise-rag-user:
+        condition: service_healthy
+    
+    environment:
+      # OpenWebUI connects to enterprise-rag-user service
+      OPENAI_API_BASE_URL: http://enterprise-rag-user:8001/api/v1
+      OPENAI_API_KEY: ${OPENWEBUI_API_KEY:?ERROR - OPENWEBUI_API_KEY is required but not set}
+      
+      # OpenAI API settings
+      ENABLE_OPENAI_API: "true"
+      ENABLE_OLLAMA_API: "false"
+      
+      # Authentication
+      WEBUI_AUTH: "true"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?ERROR - WEBUI_SECRET_KEY is required but not set}
+      
+      # Optional: Additional settings
+      DEFAULT_USER_ROLE: ${WEBUI_DEFAULT_USER_ROLE:-user}
+      WEBUI_NAME: ${WEBUI_NAME:-Enterprise RAG Chat}
+      
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    
+    volumes:
+      - open_webui_data:/app/backend/data
+    
+    networks:
+      - rag-network
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Nginx Reverse Proxy (Production Gateway)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: enterprise-rag-nginx
+    restart: unless-stopped
+    depends_on:
+      - enterprise-rag-bot
+      - enterprise-rag-user
+      - open-webui
+    
+    ports:
+      - "80:80"
+      - "443:443"
+    
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - nginx_cache:/var/cache/nginx
+      - nginx_logs:/var/log/nginx
+    
+    networks:
+      - rag-network
+    
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+# ---------------------------------------------------------------------------
+# Network Configuration
+# ---------------------------------------------------------------------------
+networks:
+  rag-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1450
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ---------------------------------------------------------------------------
+# Persistent Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${VOLUME_PATH:-./volumes}/postgres
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${VOLUME_PATH:-./volumes}/redis
+  open_webui_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${VOLUME_PATH:-./volumes}/open_webui
+  nginx_cache:
+    driver: local
+  nginx_logs:
+    driver: local

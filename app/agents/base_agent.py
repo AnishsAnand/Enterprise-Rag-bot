@@ -47,7 +47,7 @@ class BaseAgent(ABC):
         self.max_tokens = max_tokens
         
         # Get model configuration from environment
-        grok_base_url = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
+        grok_base_url = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
         grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
         self.model_name = model_name or os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
         
@@ -272,4 +272,3 @@ class BaseAgent(ABC):
     
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(name={self.agent_name}, executions={self.state['execution_count']})>"
-

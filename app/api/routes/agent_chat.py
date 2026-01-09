@@ -264,4 +264,3 @@ async def agent_health_check():
             "error": str(e),
             "timestamp": datetime.utcnow().isoformat()
         }
-

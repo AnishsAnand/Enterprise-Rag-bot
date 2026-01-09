@@ -1,169 +1,246 @@
-import { Injectable } from '@angular/core'; 
-import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
-import type { Observable } from 'rxjs';
-
-export interface ScrapeRequest {
-  url: string;
-  extract_text: boolean;
-  extract_links: boolean;
-  extract_images: boolean;
-  extract_tables: boolean;
-  output_format: string;
-  wait_for_element?: string;
-  scroll_page: boolean;
-}
-
-export interface BulkScrapeRequest {
-  base_url: string;
-  max_depth: number;
-  max_urls: number;
-  output_format: string;
-  store_in_rag: boolean;
-  scrape_params: {
-    extract_text: boolean;
-    extract_links: boolean;
-    extract_images: boolean;
-    extract_tables: boolean;
-  };
-}
-
-export interface QueryRequest {
-  query: string;
-  max_results: number;
-  include_context?: boolean;
-  include_sources?: boolean;
-}
-
-export interface RagStats {
-  document_count: number;
-  status: string;
-  last_updated: string;
-}
+// api.service.ts - COMPLETE FIXED VERSION
+import { Injectable } from '@angular/core';
+import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
+import { Observable, throwError } from 'rxjs';
+import { catchError, retry, timeout } from 'rxjs/operators';
+import { environment } from '../../environments/environment';
 
 @Injectable({
-  providedIn: 'root',
+  providedIn: 'root'
 })
 export class ApiService {
-  private baseUrl = 'http://localhost:8000/api';
+  private readonly API_URL = environment.apiUrl;
+  private readonly REQUEST_TIMEOUT = 30000; // 30 seconds
 
   constructor(private http: HttpClient) {}
 
-  private getAuthHeaders(): HttpHeaders {
-    const token = localStorage.getItem('token');
-    return new HttpHeaders({
-      Authorization: token ? `Bearer ${token}` : '',
-    });
+  // ==============================================
+  // SCRAPING ENDPOINTS
+  // ==============================================
+
+  getScrapingStatus(): Observable<any> {
+    return this.http.get(`${this.API_URL}/api/scraper/status`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      retry(1),
+      catchError(this.handleError)
+    );
   }
 
-  // 🔐 Auth
-  login(username: string, password: string): Observable<any> {
-    const body = new HttpParams()
-      .set('username', username)
-      .set('password', password);
-
-    return this.http.post(`${this.baseUrl}/auth/login`, body.toString(), {
-      headers: new HttpHeaders({
-        'Content-Type': 'application/x-www-form-urlencoded',
-      }),
-    });
-  }
-
-  register(username: string, password: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/auth/register`, { username, password });
-  }
-
-  getProfile(): Observable<any> {
-    return this.http.get(`${this.baseUrl}/auth/me`, {
-      headers: this.getAuthHeaders(),
-    });
-  }
-
-  // 💬 RAG Bot (Widget-based)
-  sendRagMessage(request: QueryRequest): Observable<any> {
-    return this.http.post(`${this.baseUrl}/rag-widget/widget/query`, request, {
-      headers: this.getAuthHeaders(),
-    });
-  }
-
-  uploadFileToRag(file: File): Observable<any> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('store_in_knowledge', 'true');
-
-    return this.http.post(`${this.baseUrl}/rag-widget/widget/upload-file`, formData, {
-      headers: this.getAuthHeaders(),
-    });
-  }
-
-  getRagKnowledgeStats(): Observable<any> {
-    return this.http.get(`${this.baseUrl}/rag-widget/widget/knowledge-stats`, {
-      headers: this.getAuthHeaders(),
-    });
-  }
-
-  clearRagKnowledge(): Observable<any> {
-    return this.http.delete(`${this.baseUrl}/rag-widget/widget/clear-knowledge`, {
-      headers: this.getAuthHeaders(),
-    });
-  }
-
-  // 🔍 Scraper
-  scrapeSingleUrl(url: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/rag-widget/widget/scrape`, {
+  scrapeUrl(url: string, storeInKnowledge: boolean = true): Observable<any> {
+    return this.http.post(`${this.API_URL}/api/scraper/scrape`, {
       url,
-      store_in_knowledge: true,
-    }, {
-      headers: this.getAuthHeaders(),
-    });
+      store_in_knowledge: storeInKnowledge
+    }).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
   }
 
-  bulkScrape(base_url: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/rag-widget/widget/bulk-scrape`, {
-      base_url,
-      max_depth: 2,
-      max_urls: 50,
-      auto_store: true,
-    }, {
-      headers: this.getAuthHeaders(),
-    });
+  bulkScrape(baseUrl: string, maxDepth: number = 2, maxUrls: number = 50): Observable<any> {
+    return this.http.post(`${this.API_URL}/api/scraper/bulk-scrape`, {
+      base_url: baseUrl,
+      max_depth: maxDepth,
+      max_urls: maxUrls,
+      auto_store: true
+    }).pipe(
+      timeout(60000), // Longer timeout for bulk operations
+      catchError(this.handleError)
+    );
   }
 
-  // ✅ ADD THIS: To support admin dashboard
-  getRagStats(): Observable<RagStats> {
-    return this.http.get<RagStats>(`${this.baseUrl}/rag/stats`, {
-      headers: this.getAuthHeaders(),
-    });
+  // ==============================================
+  // RAG ENDPOINTS
+  // ==============================================
+
+  getRagStats(): Observable<any> {
+    return this.http.get(`${this.API_URL}/api/rag/stats`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      retry(1),
+      catchError(this.handleError)
+    );
   }
 
-  // 🛠️ Admin-only APIs
-  getSystemStats(): Observable<any> {
-    return this.http.get(`${this.baseUrl}/admin/stats`, {
-      headers: this.getAuthHeaders(),
-    });
+  queryRag(query: string, maxResults: number = 8): Observable<any> {
+    return this.http.post(`${this.API_URL}/api/rag/query`, {
+      query,
+      max_results: maxResults,
+      include_sources: true
+    }).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
   }
+
+  clearKnowledge(): Observable<any> {
+    return this.http.delete(`${this.API_URL}/api/rag/clear-knowledge`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
+  }
+
+  // ==============================================
+  // SYSTEM HEALTH ENDPOINTS
+  // ==============================================
 
   getSystemHealth(): Observable<any> {
-    return this.http.get(`${this.baseUrl}/admin/health`, {
-      headers: this.getAuthHeaders(),
-    });
+    return this.http.get(`${this.API_URL}/health/readiness`).pipe(
+      timeout(10000),
+      retry(1),
+      catchError(this.handleError)
+    );
   }
 
-  // 📩 Support
-  submitSupportTicket(ticket: any): Observable<any> {
-    return this.http.post(`${this.baseUrl}/support/tickets`, ticket, {
-      headers: this.getAuthHeaders(),
-    });
+  getSystemStats(): Observable<any> {
+    return this.http.get(`${this.API_URL}/api/info`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      retry(1),
+      catchError(this.handleError)
+    );
   }
 
-  getSupportArticles(): Observable<any> {
-    return this.http.get(`${this.baseUrl}/support/articles`, {
-      headers: this.getAuthHeaders(),
-    });
+  checkLiveness(): Observable<any> {
+    return this.http.get(`${this.API_URL}/health/liveness`).pipe(
+      timeout(5000),
+      retry(1),
+      catchError(this.handleError)
+    );
   }
 
-  sendChatMessage(message: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/support/chat`, { message }, {
-      headers: this.getAuthHeaders(),
-    });
+  // ==============================================
+  // RAG WIDGET ENDPOINTS
+  // ==============================================
+
+  getKnowledgeStats(): Observable<any> {
+    return this.http.get(`${this.API_URL}/api/rag-widget/widget/knowledge-stats`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      retry(1),
+      catchError(this.handleError)
+    );
+  }
+
+  uploadFile(file: File, storeInKnowledge: boolean = true): Observable<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('store_in_knowledge', storeInKnowledge.toString());
+
+    return this.http.post(`${this.API_URL}/api/rag-widget/widget/upload-file`, formData, {
+      reportProgress: true,
+      observe: 'events'
+    }).pipe(
+      timeout(60000), // Longer timeout for file uploads
+      catchError(this.handleError)
+    );
+  }
+
+  // ==============================================
+  // API KEY MANAGEMENT (ADMIN)
+  // ==============================================
+
+  getAPIKeyStatus(): Observable<any> {
+    return this.http.get(`${this.API_URL}/api/rag-widget/widget/api-keys`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
+  }
+
+  updateAPIKey(service: string, apiKey?: string, baseUrl?: string): Observable<any> {
+    const payload: any = { service };
+    
+    if (apiKey !== undefined) {
+      payload.api_key = apiKey;
+    }
+    
+    if (baseUrl !== undefined) {
+      payload.base_url = baseUrl;
+    }
+
+    return this.http.post(`${this.API_URL}/api/rag-widget/widget/api-keys`, payload).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
+  }
+
+  testAPIKeys(): Observable<any> {
+    return this.http.post(`${this.API_URL}/api/rag-widget/widget/api-keys/test`, {}).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
+  }
+
+  clearAllAPIKeys(): Observable<any> {
+    return this.http.delete(`${this.API_URL}/api/rag-widget/widget/api-keys`).pipe(
+      timeout(this.REQUEST_TIMEOUT),
+      catchError(this.handleError)
+    );
+  }
+
+  // ==============================================
+  // ERROR HANDLING
+  // ==============================================
+
+  private handleError(error: HttpErrorResponse): Observable<never> {
+    let errorMessage = 'An error occurred';
+
+    if (error.error instanceof ErrorEvent) {
+      // Client-side or network error
+      errorMessage = `Client Error: ${error.error.message}`;
+      console.error('Client-side error:', error.error);
+    } else {
+      // Backend returned an unsuccessful response code
+      if (error.status === 0) {
+        errorMessage = 'Cannot connect to server. Please check if the backend is running.';
+        console.error('❌ Backend connection failed. Is the server running on ' + environment.apiUrl + '?');
+      } else if (error.status === 401) {
+        errorMessage = 'Unauthorized. Please login again.';
+      } else if (error.status === 403) {
+        errorMessage = 'Access forbidden. You do not have permission.';
+      } else if (error.status === 404) {
+        errorMessage = 'Resource not found.';
+      } else if (error.status === 500) {
+        errorMessage = 'Server error. Please try again later.';
+      } else if (error.error?.detail) {
+        errorMessage = error.error.detail;
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+
+      console.error(
+        `❌ Backend returned code ${error.status}, ` +
+        `body was: ${JSON.stringify(error.error)}`
+      );
+    }
+
+    return throwError(() => ({
+      status: error.status,
+      message: errorMessage,
+      error: error.error
+    }));
+  }
+
+  // ==============================================
+  // UTILITY METHODS
+  // ==============================================
+
+  /**
+   * Check if backend is reachable
+   */
+  async checkBackendConnection(): Promise<boolean> {
+    try {
+      await this.http.get(`${this.API_URL}/health/liveness`, {
+        headers: new HttpHeaders().set('skip-auth', 'true')
+      }).toPromise();
+      console.log('✅ Backend is reachable');
+      return true;
+    } catch (error) {
+      console.error('❌ Backend is not reachable:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Get API URL for external use
+   */
+  getApiUrl(): string {
+    return this.API_URL;
   }
 }

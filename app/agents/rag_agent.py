@@ -229,4 +229,3 @@ Always be helpful, accurate, and transparent about the source of your informatio
                 "error": str(e),
                 "output": f"I encountered an error while searching the knowledge base: {str(e)}"
             }
-

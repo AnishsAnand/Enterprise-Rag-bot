@@ -269,4 +269,3 @@ def get_agent_manager(vector_service=None, ai_service=None) -> AgentManager:
         agent_manager.initialize()
     
     return agent_manager
-

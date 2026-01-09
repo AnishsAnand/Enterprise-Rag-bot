@@ -670,4 +670,3 @@ Respond with ONLY ONE of these:
                 "response": f"Error executing routing: {str(e)}",
                 "routing": route
             }
-

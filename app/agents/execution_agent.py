@@ -673,9 +673,9 @@ The cluster creation payload has been generated successfully!
 **No API call was made** - this is for testing/validation only.
 
 **📦 Complete Payload:**
-```json
+\`\`\`json
 {payload_json}
-```
+\`\`\`
 
 **💡 To actually create the cluster:**
 1. Set `DRY_RUN = False` in `execution_agent.py` (line ~380)
@@ -886,4 +886,3 @@ The cluster creation payload has been generated successfully!
             message += "💡 Please check your parameters and try again. If the issue persists, contact support."
         
         return message
-

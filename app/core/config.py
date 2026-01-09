@@ -1,41 +1,251 @@
+# app/core/config.py - PRODUCTION SETTINGS (Pydantic v2 Compatible)
 import os
 from typing import Optional
+from pydantic import Field
 from pydantic_settings import BaseSettings
-
+from pydantic_settings import SettingsConfigDict
 class Settings(BaseSettings):
-    OPENROUTER_API_KEY: Optional[str] = os.getenv("OPENROUTER_API_KEY")
-    VOYAGE_API_KEY: Optional[str] = os.getenv("VOYAGE_API_KEY")
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    GROK_API_KEY: Optional[str] = os.getenv("GROK_API_KEY")
-    # PostgreSQL for session persistence (Memori) - Docker container on port 5435
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://ragbot:ragbot_secret_2024@localhost:5435/ragbot_sessions")
-    REDIS_URL: Optional[str] = os.getenv("REDIS_URL")
-    CHROMA_PERSIST_DIRECTORY: str = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-    UPLOAD_DIRECTORY: str = os.getenv("UPLOAD_DIRECTORY", "./uploads")
-    OUTPUT_DIRECTORY: str = os.getenv("OUTPUT_DIRECTORY", "./outputs")
-    pythonpath: str  = os.getenv("PYTHONPATH", "./app")
+    """
+    PRODUCTION-GRADE Configuration Settings
+    All fields properly typed for Pydantic v2 compatibility
+    """
     
-    DOTS_OCR_API_KEY: str = os.getenv("DOTS_OCR_API_KEY", "")
-    OCR_ENABLED: bool = os.getenv("OCR_ENABLED", "true").lower() == "true"
-    OCR_MAX_IMAGES_PER_PAGE: int = int(os.getenv("OCR_MAX_IMAGES_PER_PAGE", "5"))
-    OCR_TIMEOUT_SECONDS: int = int(os.getenv("OCR_TIMEOUT_SECONDS", "30"))
+    # =========================
+    # AI Service Configuration
+    # =========================
+    OPENROUTER_API_KEY: Optional[str] = Field(
+        default_factory=lambda: os.getenv("OPENROUTER_API_KEY"),
+        description="OpenRouter API key for LLM access"
+    )
+    VOYAGE_API_KEY: Optional[str] = Field(
+        default_factory=lambda: os.getenv("VOYAGE_API_KEY"),
+        description="Voyage AI API key for embeddings"
+    )
+    GROK_API_KEY: Optional[str] = Field(
+        default_factory=lambda: os.getenv("GROK_API_KEY"),
+        description="Grok API key"
+    )
+    OLLAMA_BASE_URL: str = Field(
+        default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        description="Ollama service base URL"
+    )
     
-    SCRAPER_MAX_CONCURRENT: int = int(os.getenv("SCRAPER_MAX_CONCURRENT", "3"))
-    SCRAPER_DELAY_SECONDS: float = float(os.getenv("SCRAPER_DELAY_SECONDS", "1.0"))
+    # =========================
+    # Database Configuration
+    # =========================
+    DATABASE_URL: str = Field(
+        default_factory=lambda: os.getenv(
+            "DATABASE_URL",
+            "postgresql://ragbot:ragbot_secret_2024@localhost:5435/ragbot_sessions"
+        ),
+        description="PostgreSQL connection URL for sessions"
+    )
+    
+    # =========================
+    # PostgreSQL Configuration (Vector Store)
+    # =========================
+    POSTGRES_HOST: str = Field(
+        default_factory=lambda: os.getenv("POSTGRES_HOST", "localhost"),
+        description="PostgreSQL host"
+    )
+    POSTGRES_PORT: int = Field(
+        default_factory=lambda: int(os.getenv("POSTGRES_PORT", "5432")),
+        description="PostgreSQL port"
+    )
+    POSTGRES_USER: str = Field(
+        default_factory=lambda: os.getenv("POSTGRES_USER", "ragbot"),
+        description="PostgreSQL user"
+    )
+    POSTGRES_PASSWORD: str = Field(
+        default_factory=lambda: os.getenv("POSTGRES_PASSWORD", "ragbot_secret_2024"),
+        description="PostgreSQL password"
+    )
+    POSTGRES_DB: str = Field(
+        default_factory=lambda: os.getenv("POSTGRES_DB", "enterprise_rag"),
+        description="PostgreSQL database name"
+    )
+    POSTGRES_TABLE: str = Field(
+        default_factory=lambda: os.getenv("POSTGRES_TABLE", "enterprise_rag"),
+        description="PostgreSQL table name for documents"
+    )
+    
+    # =========================
+    # Redis Configuration
+    # =========================
+    REDIS_HOST: str = Field(
+        default_factory=lambda: os.getenv("REDIS_HOST", "redis"),
+        description="Redis host"
+    )
+    REDIS_PORT: int = Field(
+        default_factory=lambda: int(os.getenv("REDIS_PORT", "6379")),
+        description="Redis port"
+    )
+    REDIS_DB: int = Field(
+        default_factory=lambda: int(os.getenv("REDIS_DB", "0")),
+        description="Redis database number"
+    )
+    REDIS_PASSWORD: Optional[str] = Field(
+        default_factory=lambda: os.getenv("REDIS_PASSWORD"),
+        description="Redis password (optional)"
+    )
+    REDIS_URL: Optional[str] = Field(
+        default=None,
+        description="Redis connection URL (auto-generated)"
+    )
+    
+    # =========================
+    # Storage Configuration
+    # =========================
+    CHROMA_PERSIST_DIRECTORY: str = Field(
+        default_factory=lambda: os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
+        description="ChromaDB persistence directory"
+    )
+    UPLOAD_DIRECTORY: str = Field(
+        default_factory=lambda: os.getenv("UPLOAD_DIRECTORY", "./uploads"),
+        description="File upload directory"
+    )
+    OUTPUT_DIRECTORY: str = Field(
+        default_factory=lambda: os.getenv("OUTPUT_DIRECTORY", "./outputs"),
+        description="Output files directory"
+    )
+    
+    # =========================
+    # OCR Configuration
+    # =========================
+    DOTS_OCR_API_KEY: str = Field(
+        default_factory=lambda: os.getenv("DOTS_OCR_API_KEY", ""),
+        description="DOTS OCR API key"
+    )
+    OCR_ENABLED: bool = Field(
+        default_factory=lambda: os.getenv("OCR_ENABLED", "true").lower() == "true",
+        description="Enable OCR processing"
+    )
+    OCR_MAX_IMAGES_PER_PAGE: int = Field(
+        default_factory=lambda: int(os.getenv("OCR_MAX_IMAGES_PER_PAGE", "5")),
+        description="Max images to OCR per page"
+    )
+    OCR_TIMEOUT_SECONDS: int = Field(
+        default_factory=lambda: int(os.getenv("OCR_TIMEOUT_SECONDS", "30")),
+        description="OCR operation timeout"
+    )
+    
+    # =========================
+    # Scraper Configuration
+    # =========================
+    SCRAPER_MAX_CONCURRENT: int = Field(
+        default_factory=lambda: int(os.getenv("SCRAPER_MAX_CONCURRENT", "3")),
+        description="Max concurrent scraping operations"
+    )
+    SCRAPER_DELAY_SECONDS: float = Field(
+        default_factory=lambda: float(os.getenv("SCRAPER_DELAY_SECONDS", "1.0")),
+        description="Delay between scraping requests"
+    )
+    
+    # =========================
+    # Session Configuration
+    # =========================
+    SESSION_PERSISTENCE_ENABLED: bool = Field(
+        default_factory=lambda: os.getenv("SESSION_PERSISTENCE_ENABLED", "true").lower() == "true",
+        description="Enable session persistence"
+    )
+    SESSION_TTL_HOURS: int = Field(
+        default_factory=lambda: int(os.getenv("SESSION_TTL_HOURS", "24")),
+        description="Session time-to-live in hours"
+    )
+    
+    # =========================
+    # Embedding Configuration
+    # =========================
+    EMBEDDING_DIMENSION: int = Field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "4096")),
+        description="Embedding vector dimension"
+    )
+    EMBEDDING_MODEL: str = Field(
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "openai"),
+        description="Embedding model to use"
+    )
+    
+    # =========================
+    # RAG Configuration
+    # =========================
+    MIN_RELEVANCE_THRESHOLD: float = Field(
+    default=0.08,
+    description="Minimum relevance score threshold"
+)
+    MAX_CHUNKS_RETURN: int = Field(
+        default_factory=lambda: int(os.getenv("MAX_CHUNKS_RETURN", "12")),
+        description="Maximum chunks to return"
+    )
+    ENABLE_QUERY_EXPANSION: bool = Field(
+        default_factory=lambda: os.getenv("ENABLE_QUERY_EXPANSION", "true").lower() == "true",
+        description="Enable query expansion"
+    )
+    ENABLE_SEMANTIC_RERANK: bool = Field(
+        default_factory=lambda: os.getenv("ENABLE_SEMANTIC_RERANK", "true").lower() == "true",
+        description="Enable semantic reranking"
+    )
+    
+    # =========================
+    # Security Configuration
+    # =========================
+    SECRET_KEY: str = Field(
+        default_factory=lambda: os.getenv("SECRET_KEY", "your-secret-key-change-in-production"),
+        description="JWT secret key"
+    )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default_factory=lambda: int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")),
+        description="Access token expiration time"
+    )
+    REFRESH_TOKEN_EXPIRE_DAYS: int = Field(
+        default_factory=lambda: int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")),
+        description="Refresh token expiration time"
+    )
+    
+    # =========================
+    # API Configuration
+    # =========================
+    ALLOWED_ORIGINS: str = Field(
+        default_factory=lambda: os.getenv(
+            "ALLOWED_ORIGINS",
+            "http://localhost:3000,http://localhost:4200,http://localhost:4201"
+        ),
+        description="CORS allowed origins"
+    )
+    API_HOST: str = Field(
+        default_factory=lambda: os.getenv("API_HOST", "0.0.0.0"),
+        description="API server host"
+    )
+    API_PORT: int = Field(
+        default_factory=lambda: int(os.getenv("API_PORT", "8000")),
+        description="API server port"
+    )
+    
+    # =========================
+    # Python Path
+    # =========================
+    PYTHONPATH: str = Field(
+        default_factory=lambda: os.getenv("PYTHONPATH", "./app"),
+        description="Python path"
+    )
+    
+    def model_post_init(self, __context):
+        if not self.REDIS_URL:
+            if self.REDIS_PASSWORD:
+                self.REDIS_URL = (
+                    f"redis://:{self.REDIS_PASSWORD}@"
+                    f"{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+            )
+            else:
+                self.REDIS_URL = (
+                    f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+             )
+    
+    model_config = SettingsConfigDict(
+    env_file=".env",
+    env_file_encoding="utf-8",
+    case_sensitive=True,
+    extra="allow"
+)
 
-    MILVUS_HOST: str = os.getenv("MILVUS_HOST", "localhost")
-    MILVUS_PORT: int = int(os.getenv("MILVUS_PORT", "19530"))
-    MILVUS_USER: Optional[str] = os.getenv("MILVUS_USER", "")
-    MILVUS_PASSWORD: Optional[str] = os.getenv("MILVUS_PASSWORD", "")
-    MILVUS_COLLECTION: str = os.getenv("MILVUS_COLLECTION", "enterprise_rag")
-
-    # Session persistence settings
-    SESSION_PERSISTENCE_ENABLED: bool = os.getenv("SESSION_PERSISTENCE_ENABLED", "true").lower() == "true"
-    SESSION_TTL_HOURS: int = int(os.getenv("SESSION_TTL_HOURS", "24"))
-
-
-    class Config:
-        env_file = ".env"
-        extra = "allow"  
-
+# Global settings instance
 settings = Settings()

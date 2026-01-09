@@ -1,230 +1,248 @@
-import { Injectable } from "@angular/core"
-import { HttpClient } from "@angular/common/http"
-import { BehaviorSubject, type Observable, of } from "rxjs"
-import { catchError, tap } from "rxjs/operators"
-import { Router } from "@angular/router"
+// auth.service.ts - COMPLETE FIXED VERSION
+import { Injectable } from "@angular/core";
+import { BehaviorSubject, Observable, throwError } from "rxjs";
+import { catchError, tap, map } from "rxjs/operators";
+import { Router } from "@angular/router";
+import { HttpClient, HttpParams, HttpErrorResponse } from "@angular/common/http";
+import { environment } from "../../environments/environment";
 
 export interface User {
-  id: string
-  email: string
-  name: string
-  avatar?: string
-  provider?: string
-  role: "user" | "admin"
-  is_verified: boolean
-  theme: string
-  language: string
-  timezone: string
-  notifications_enabled: boolean
-  email_notifications: boolean
-  bio?: string
-  location?: string
-  website?: string
-  company?: string
-  job_title?: string
-  login_count: number
-  created_at: Date
-  last_login: Date
-  two_factor_enabled?: boolean;
-}
-
-export interface LoginRequest {
-  email: string
-  password: string
-}
-
-export interface RegisterRequest {
-  name: string
-  email: string
-  password: string
-}
-
-export interface PasswordResetRequest {
-  email: string
-}
-
-export interface PasswordResetConfirm {
-  token: string
-  new_password: string
-}
-
-export interface UserPreferences {
-  theme?: string
-  language?: string
-  timezone?: string
-  notifications_enabled?: boolean
-  email_notifications?: boolean
-}
-
-export interface UserProfileUpdate {
-  name?: string
-  bio?: string
-  location?: string
-  website?: string
-  company?: string
-  job_title?: string
+  id: number;
+  username: string;
+  email?: string;
+  role: "user" | "admin";
+  is_verified?: boolean;
+  created_at?: string;
+  last_login?: string;
 }
 
 export interface AuthResponse {
-  user: User
-  token: string
-  refresh_token?: string
+  access_token: string;
+  token_type: string;
+  user: User;
 }
 
-@Injectable({
-  providedIn: "root",
-})
+@Injectable({ providedIn: "root" })
 export class AuthService {
-  private baseUrl = "http://localhost:8000/api/auth"
-  private currentUserSubject = new BehaviorSubject<User | null>(null)
-  public currentUser$ = this.currentUserSubject.asObservable()
-  private tokenKey = "auth_token"
-  private refreshTokenKey = "refresh_token"
+  /** Use environment variable for API URL */
+  private readonly API_URL = `${environment.apiUrl}/api/auth`;
+
+  private readonly tokenKey = "token";
+  private currentUserSubject = new BehaviorSubject<User | null>(null);
+  public currentUser$ = this.currentUserSubject.asObservable();
 
   constructor(
     private http: HttpClient,
-    private router: Router,
+    private router: Router
   ) {
-    this.loadUserFromStorage()
+    this.restoreSession();
   }
 
-  private loadUserFromStorage(): void {
-    const token = localStorage.getItem(this.tokenKey)
-    if (token) {
-      try {
-        const base64Url = token.split(".")[1]
-        const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/")
-        const payload = JSON.parse(window.atob(base64))
+  /** ===================== SESSION ===================== */
 
-        if (payload && payload.user) {
-          this.currentUserSubject.next(payload.user)
-        }
-      } catch (e) {
-        console.error("Error parsing token", e)
-        this.logout()
+  private restoreSession(): void {
+    const token = localStorage.getItem(this.tokenKey);
+    const userRaw = localStorage.getItem("user");
+
+    if (token && userRaw) {
+      try {
+        const user = JSON.parse(userRaw);
+        this.currentUserSubject.next(user);
+        console.log('✅ Session restored:', user.username);
+      } catch (error) {
+        console.error('❌ Failed to restore session:', error);
+        this.logout();
       }
     }
   }
 
-  register(userData: RegisterRequest): Observable<any> {
-    return this.http.post(`${this.baseUrl}/register`, userData).pipe(
-      catchError((error) => {
-        console.error("Registration error", error)
-        throw error
-      }),
-    )
-  }
+  /** ===================== AUTH ===================== */
 
-  login(credentials: LoginRequest): Observable<AuthResponse> {
-    return this.http.post<AuthResponse>(`${this.baseUrl}/login`, credentials).pipe(
-      tap((response) => this.handleAuthentication(response)),
-      catchError((error) => {
-        console.error("Login error", error)
-        throw error
-      }),
-    )
-  }
+  /**
+   * ✅ FastAPI OAuth2PasswordRequestForm compatible login
+   */
+  login(username: string, password: string): Observable<AuthResponse> {
+    console.log('🔐 Attempting login:', username);
+    
+    const body = new HttpParams()
+      .set("username", username)
+      .set("password", password);
 
-  verifyEmail(token: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/verify-email`, null, {
-      params: { token },
-    })
-  }
-
-  forgotPassword(email: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/forgot-password`, { email })
-  }
-
-  resetPassword(token: string, new_password: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/reset-password`, {
-      token,
-      new_password,
-    })
-  }
-
-  updatePreferences(preferences: UserPreferences): Observable<any> {
-    return this.http.put(`${this.baseUrl}/preferences`, preferences)
-  }
-
-  updateProfile(profile: UserProfileUpdate): Observable<any> {
-    return this.http.put(`${this.baseUrl}/profile`, profile)
-  }
-
-  loginWithGoogle(): void {
-    window.location.href = `${this.baseUrl}/google`
-  }
-
-  loginWithGithub(): void {
-    window.location.href = `${this.baseUrl}/github`
-  }
-
-  handleSocialCallback(token: string, refreshToken?: string): void {
-    if (token) {
-      localStorage.setItem(this.tokenKey, token)
-      if (refreshToken) {
-        localStorage.setItem(this.refreshTokenKey, refreshToken)
+    return this.http.post<AuthResponse>(
+      `${this.API_URL}/login`,
+      body.toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
       }
-      try {
-        const base64Url = token.split(".")[1]
-        const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/")
-        const payload = JSON.parse(window.atob(base64))
-
-        if (payload && payload.user) {
-          this.currentUserSubject.next(payload.user)
+    ).pipe(
+      tap(res => {
+        console.log('✅ Login successful:', res.user?.username);
+        
+        // Store token and user data
+        localStorage.setItem(this.tokenKey, res.access_token);
+        
+        if (res.user) {
+          localStorage.setItem("user", JSON.stringify(res.user));
+          this.currentUserSubject.next(res.user);
         }
-      } catch (e) {
-        console.error("Error parsing social auth token", e)
-      }
-    }
+      }),
+      catchError((error: HttpErrorResponse) => {
+        console.error('❌ Login failed:', error);
+        
+        // Enhanced error handling
+        let errorMessage = 'Login failed';
+        
+        if (error.status === 0) {
+          errorMessage = 'Cannot connect to server. Please check if backend is running.';
+        } else if (error.status === 401) {
+          errorMessage = 'Invalid username or password';
+        } else if (error.status === 403) {
+          errorMessage = 'Account disabled';
+        } else if (error.error?.detail) {
+          errorMessage = error.error.detail;
+        }
+        
+        return throwError(() => ({
+          ...error,
+          message: errorMessage
+        }));
+      })
+    );
+  }
+
+  register(data: {
+    username: string;
+    email: string;
+    password: string;
+  }): Observable<AuthResponse> {
+    console.log('📝 Attempting registration:', data.username);
+    
+    return this.http.post<AuthResponse>(`${this.API_URL}/register`, data).pipe(
+      tap(res => {
+        console.log('✅ Registration successful:', res.user?.username);
+        
+        // Store token and user data
+        localStorage.setItem(this.tokenKey, res.access_token);
+        
+        if (res.user) {
+          localStorage.setItem("user", JSON.stringify(res.user));
+          this.currentUserSubject.next(res.user);
+        }
+      }),
+      catchError((error: HttpErrorResponse) => {
+        console.error('❌ Registration failed:', error);
+        
+        let errorMessage = 'Registration failed';
+        
+        if (error.status === 0) {
+          errorMessage = 'Cannot connect to server';
+        } else if (error.status === 400) {
+          errorMessage = error.error?.detail || 'User already exists';
+        } else if (error.error?.detail) {
+          errorMessage = error.error.detail;
+        }
+        
+        return throwError(() => ({
+          ...error,
+          message: errorMessage
+        }));
+      })
+    );
   }
 
   logout(): void {
-    localStorage.removeItem(this.tokenKey)
-    localStorage.removeItem(this.refreshTokenKey)
-    this.currentUserSubject.next(null)
-    this.router.navigate(["/login"])
+    console.log('🚪 Logging out user');
+    localStorage.removeItem(this.tokenKey);
+    localStorage.removeItem("user");
+    this.currentUserSubject.next(null);
+    this.router.navigateByUrl("/login");
   }
 
-  refreshToken(): Observable<AuthResponse> {
-    const refreshToken = localStorage.getItem(this.refreshTokenKey)
-    if (!refreshToken) {
-      return of(null as any)
-    }
-
-    return this.http.post<AuthResponse>(`${this.baseUrl}/refresh-token`, { refreshToken }).pipe(
-      tap((response) => this.handleAuthentication(response)),
-      catchError((error) => {
-        console.error("Token refresh error", error)
-        this.logout()
-        throw error
-      }),
-    )
-  }
+  /** ===================== USER ===================== */
 
   getCurrentUser(): Observable<User> {
-    return this.http.get<User>(`${this.baseUrl}/me`)
+    return this.http.get<User>(`${this.API_URL}/me`).pipe(
+      tap(user => {
+        // Update local user data
+        localStorage.setItem("user", JSON.stringify(user));
+        this.currentUserSubject.next(user);
+      }),
+      catchError((error: HttpErrorResponse) => {
+        console.error('❌ Failed to get current user:', error);
+        
+        // If unauthorized, logout
+        if (error.status === 401) {
+          this.logout();
+        }
+        
+        return throwError(() => error);
+      })
+    );
+  }
+
+  getCurrentUserValue(): User | null {
+    return this.currentUserSubject.value;
   }
 
   isAuthenticated(): boolean {
-    return !!this.currentUserSubject.value
+    return !!this.currentUserSubject.value && !!this.getToken();
   }
 
   isAdmin(): boolean {
-    const user = this.currentUserSubject.value
-    return user?.role === "admin"
+    return this.currentUserSubject.value?.role === "admin";
   }
 
   getToken(): string | null {
-    return localStorage.getItem(this.tokenKey)
+    return localStorage.getItem(this.tokenKey);
   }
 
-  private handleAuthentication(response: AuthResponse): void {
-    if (response && response.token) {
-      localStorage.setItem(this.tokenKey, response.token)
-      if (response.refresh_token) {
-        localStorage.setItem(this.refreshTokenKey, response.refresh_token)
-      }
-      this.currentUserSubject.next(response.user)
+  /** Handle social authentication callback */
+  handleSocialCallback(token: string, refreshToken?: string): void {
+    localStorage.setItem(this.tokenKey, token);
+    
+    if (refreshToken) {
+      localStorage.setItem("refresh_token", refreshToken);
     }
+    
+    // Fetch user details
+    this.getCurrentUser().subscribe({
+      next: (user) => {
+        console.log('✅ Social auth successful:', user.username);
+      },
+      error: (error) => {
+        console.error('❌ Failed to fetch user after social auth:', error);
+        this.logout();
+      }
+    });
+  }
+
+  /** Refresh token (if implementing refresh tokens) */
+  refreshToken(): Observable<AuthResponse> {
+    const refreshToken = localStorage.getItem("refresh_token");
+    
+    if (!refreshToken) {
+      return throwError(() => new Error('No refresh token available'));
+    }
+    
+    return this.http.post<AuthResponse>(
+      `${this.API_URL}/refresh`,
+      { refresh_token: refreshToken }
+    ).pipe(
+      tap(res => {
+        localStorage.setItem(this.tokenKey, res.access_token);
+        
+        if (res.user) {
+          localStorage.setItem("user", JSON.stringify(res.user));
+          this.currentUserSubject.next(res.user);
+        }
+      }),
+      catchError((error) => {
+        console.error('❌ Token refresh failed:', error);
+        this.logout();
+        return throwError(() => error);
+      })
+    );
   }
 }

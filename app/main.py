@@ -13,11 +13,11 @@ from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 from app.core.config import settings
-from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat
+from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat, health
 from app.routers import openai_compatible
-from app.services.milvus_service import milvus_service
 from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
+from app.services.postgres_service import postgres_service
 from app.core.database import init_db
 
 load_dotenv()
@@ -43,12 +43,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("❌ Database initialization failed (continuing): %s", e)
 
-    # Initialize Milvus Service
+
+    app.state.postgres_ready = False
+
     try:
-        await milvus_service.initialize()
-        logger.info("✅ Milvus vector database initialized successfully")
+        await postgres_service.initialize()
+        app.state.postgres_ready = True
+        logger.info("✅ PostgreSQL (pgvector) initialized successfully")
     except Exception as e:
-        logger.exception("❌ Milvus initialization failed (continuing without vector search): %s", e)
+        logger.exception(
+        "❌ PostgreSQL vector initialization failed (vector search disabled): %s",
+        e,
+    )
+
+   
 
     # Test AI Services
     logger.info("Testing AI Services...")
@@ -65,10 +73,7 @@ async def lifespan(app: FastAPI):
         logger.exception("❌ Embedding service test failed: %s", e)
 
     try:
-        test_response = await ai_service.generate_enhanced_response(
-            "Hello",
-            ["Test context for validation"]
-        )
+        test_response = await ai_service.generate_enhanced_response("health", ["health check"])
         if test_response and isinstance(test_response, dict):
             response_text = test_response.get("text", "")
             if response_text and len(response_text.strip()) > 0:
@@ -81,13 +86,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("❌ Text generation service test failed: %s", e)
 
-    # Get Milvus stats
+
     try:
-        stats = await milvus_service.get_collection_stats()
+        stats = await postgres_service.get_collection_stats()
         doc_count = stats.get("document_count", 0) if isinstance(stats, dict) else 0
-        logger.info("✅ Milvus Collection Stats - Documents: %d", doc_count)
+        logger.info("✅ PostgreSQL Vector Stats - Documents: %d", doc_count)
     except Exception as e:
-        logger.exception("⚠️ Could not retrieve Milvus stats: %s", e)
+        logger.exception("⚠️ Could not retrieve stats: %s", e)
 
     logger.info("=" * 70)
     logger.info("✅ Enterprise RAG Bot startup sequence complete")
@@ -101,10 +106,10 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Enterprise RAG Bot...")
 
     try:
-        await milvus_service.close()
-        logger.info("✅ Milvus connection closed gracefully")
+        await postgres_service.close()
+        logger.info("✅ PostgreSQL connection closed gracefully")
     except Exception as e:
-        logger.warning("⚠️ Error closing Milvus connection: %s", e)
+        logger.warning("⚠️ Error closing PostgreSQL connection: %s", e)
 
     logger.info("✅ Enterprise RAG Bot shutdown complete")
     logger.info("=" * 70)
@@ -112,13 +117,15 @@ async def lifespan(app: FastAPI):
 # ===================== FastAPI App Initialization =====================
 app = FastAPI(
     title="Enterprise RAG Bot",
-    description="Advanced RAG system with Milvus vector database, web scraping, and AI-powered knowledge retrieval",
+    description="Advanced RAG system with postgres vector database, web scraping, and AI-powered knowledge retrieval",
     version="2.0.0",
     lifespan=lifespan,
 )
 
 # ===================== CORS Configuration =====================
 allowed_origins: List[str] = [
+    "http://localhost:4200", 
+    "http://127.0.0.1:4200",
     "http://localhost:4201",      # Angular frontend (user-frontend)
     "http://127.0.0.1:4201",      # Angular frontend (alternative)
     "http://localhost:3000",      # Open WebUI
@@ -140,6 +147,7 @@ app.add_middleware(
 )
 
 # ===================== API Routes =====================
+app.include_router(health.router)  # Add health check routes
 app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
@@ -222,31 +230,34 @@ async def liveness_check():
     }
 
 @app.get("/health")
+def health():
+    return {"status": "ok", "service": "admin"}
+@app.get("/health/readiness")
 async def readiness_check():
     """
     Comprehensive readiness check endpoint.
-    Verifies all critical services (Milvus, AI services, Database).
+    Verifies all critical services (postgres, AI services, Database).
     
     Use this for k8s/ECS readiness probes.
     Only returns 200 when all services are operational.
     """
-    # Check Milvus connection and collection
-    milvus_status = "unavailable"
-    milvus_docs = 0
-    milvus_error = None
+    # Check postgres connection and collection
+    postgres_status = "unavailable"
+    postgres_docs = 0
+    postgres_error = None
 
     try:
-        stats = await milvus_service.get_collection_stats()
+        stats = await postgres_service.get_collection_stats()
         if isinstance(stats, dict):
-            milvus_status = stats.get("status", "unknown")
-            milvus_docs = int(stats.get("document_count", 0))
+            postgres_status = stats.get("status", "unknown")
+            postgres_docs = int(stats.get("document_count", 0))
         else:
-            milvus_status = "error"
-            milvus_error = "Invalid response format"
+            postgres_status = "error"
+            postgres_error = "Invalid response format"
     except Exception as e:
-        milvus_status = "unavailable"
-        milvus_error = str(e)
-        logger.exception("❌ Milvus stats fetch failed: %s", e)
+        postgres_status = "unavailable"
+        postgres_error = str(e)
+        logger.exception("❌ postgres stats fetch failed: %s", e)
 
     # Check AI services
     ai_services_status = {
@@ -270,7 +281,7 @@ async def readiness_check():
 
     # Determine overall health
     overall_status = "healthy"
-    if milvus_status not in ("active", "healthy"):
+    if postgres_status not in ("active", "healthy"):
         overall_status = "degraded"
     if not ai_services_status["embedding"] or not ai_services_status["generation"]:
         overall_status = "degraded" if overall_status == "healthy" else "unhealthy"
@@ -279,10 +290,10 @@ async def readiness_check():
         "status": overall_status,
         "timestamp": str(__import__("datetime").datetime.utcnow().isoformat()),
         "services": {
-            "milvus": {
-                "status": milvus_status,
-                "documents_stored": milvus_docs,
-                "error": milvus_error,
+            "postgres": {
+                "status": postgres_status,
+                "documents_stored": postgres_docs,
+                "error": postgres_error,
             },
             "ai_services": {
                 "embedding": "operational" if ai_services_status["embedding"] else "unavailable",
@@ -313,7 +324,7 @@ async def api_root():
         "version": app.version,
         "features": [
             "Advanced web scraping with anti-blocking",
-            "Milvus vector database for semantic search",
+            "postgres vector database for semantic search",
             "AI-powered knowledge retrieval (Grok, OpenRouter)",
             "Multi-source ingestion (web, files, bulk scraping)",
             "Popup widget interface for easy integration",
@@ -331,10 +342,10 @@ async def app_info():
     Useful for debugging and monitoring.
     """
     try:
-        stats = await milvus_service.get_collection_stats()
-        milvus_info = stats if isinstance(stats, dict) else {}
+        stats = await postgres_service.get_collection_stats()
+        postgres_info = stats if isinstance(stats, dict) else {}
     except Exception as e:
-        milvus_info = {"error": str(e)}
+        postgres_info = {"error": str(e)}
 
     return {
         "application": {
@@ -343,7 +354,7 @@ async def app_info():
             "environment": os.getenv("ENV", "development"),
         },
         "infrastructure": {
-            "milvus": milvus_info,
+            "postgres": postgres_info,
             "ai_service": {
                 "embedding_model": os.getenv("EMBEDDING_MODEL", "unknown"),
                 "chat_model": os.getenv("CHAT_MODEL", "unknown"),

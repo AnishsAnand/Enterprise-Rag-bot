@@ -181,4 +181,3 @@ Examples:
         except Exception as e:
             logger.error(f"Error extracting location: {e}")
             return None
-

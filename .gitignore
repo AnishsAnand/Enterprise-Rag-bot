@@ -1,27 +1,38 @@
-.angular/
-dist/
-node_modules/
+# Python
 __pycache__/
 *.pyc
-
-# Python virtual environment
-.venv/
-venv/
-env/
-
-# Environment variables
+*.pyo
+*.pyd
 .env
-.env.local
+.venv
+venv/
 
-# Database files
-*.db
-*.sqlite
-*.sqlite3
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
 
-# Data directories
+# Angular / Frontend builds
+**/dist/
+**/.angular/
+
+# Git
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+
+# Logs
+*.log
+
+volumes/
+
 milvus_data/
+postgres_data/
+open-webui-data/
+redis_data/
+outputs/
 minio_data/
-etcd_data/
-
-# Package lock files (optional, but often ignored)
-package-lock.json

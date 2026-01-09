@@ -5,7 +5,9 @@ import logging
 import os
 import random
 import re
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -18,9 +20,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-OUTPUT_DIR = os.path.join(os.getcwd(), "outputs")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -30,8 +29,11 @@ class WebScraperService:
     Production-oriented scraper with multiple strategies (trafilatura, requests, selenium),
     robust URL discovery, and structured extraction (text, links, images, tables).
 
-    Each extracted image includes a 'text' field for downstream semantic matching.
-    Compatible with both ChromaDB and Milvus vector databases.
+    PRODUCTION FIXES:
+    - Graceful handling of permission errors with temp file fallback
+    - Proper directory creation with error handling
+    - Better error messages and logging
+    - Compatible with both ChromaDB and Milvus vector databases
     """
 
     def __init__(self, request_timeout: int = 30):
@@ -39,6 +41,63 @@ class WebScraperService:
         self.request_timeout = request_timeout
         self.ua = self._safe_user_agent()
         self._setup_session()
+        self._setup_output_directory()
+
+    def _setup_output_directory(self) -> None:
+        """
+        PRODUCTION FIX: Setup output directory with proper error handling and fallback.
+        Priority: 1. /app/outputs (Docker) 2. ./outputs (Local) 3. /tmp/scraper_outputs (Fallback)
+        """
+        # Try multiple locations in order of preference
+        candidate_dirs = [
+            os.getenv("SCRAPER_OUTPUT_DIR", "/app/outputs"),  # Docker environment
+            os.path.join(os.getcwd(), "outputs"),             # Local development
+            os.path.join(tempfile.gettempdir(), "scraper_outputs")  # System temp fallback
+        ]
+        
+        self.output_dir = None
+        self.is_temp_fallback = False
+        
+        for candidate in candidate_dirs:
+            try:
+                # Try to create directory
+                Path(candidate).mkdir(parents=True, exist_ok=True)
+                
+                # Test write permissions with a temp file
+                test_file = Path(candidate) / f".test_write_{os.getpid()}"
+                try:
+                    test_file.write_text("test")
+                    test_file.unlink()
+                    
+                    # Success! Use this directory
+                    self.output_dir = Path(candidate)
+                    
+                    # Set permissions if possible (may fail in containers, that's OK)
+                    try:
+                        os.chmod(self.output_dir, 0o755)
+                    except Exception:
+                        pass
+                    
+                    if candidate == candidate_dirs[-1]:
+                        self.is_temp_fallback = True
+                        logger.warning(f"⚠️  Using fallback temp directory: {self.output_dir}")
+                    else:
+                        logger.info(f"✅ Outputs directory: {self.output_dir}")
+                    
+                    return
+                    
+                except (PermissionError, OSError):
+                    # Can't write to this directory, try next one
+                    continue
+                    
+            except Exception as e:
+                logger.debug(f"Could not use directory {candidate}: {e}")
+                continue
+        
+        # If we get here, none worked - use system temp as absolute last resort
+        self.output_dir = Path(tempfile.gettempdir())
+        self.is_temp_fallback = True
+        logger.error(f"❌ All output directories failed, using system temp: {self.output_dir}")
 
     def _safe_user_agent(self) -> str:
         """Use fake-useragent if available, otherwise a sane fallback UA."""
@@ -67,7 +126,7 @@ class WebScraperService:
     async def scrape_url(self, url: str, scrape_params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Attempt multiple scraping methods until one succeeds with non-empty text.
-        Saves extracted content to OUTPUT_DIR in requested format (default JSON).
+        Saves extracted content to output directory in requested format (default JSON).
         Returns a dict with content plus a RAG-ready 'rag_documents' list for direct vector DB ingestion.
         
         Compatible with both ChromaDB and Milvus backends.
@@ -106,13 +165,16 @@ class WebScraperService:
                             "title": content.get("title") or "",
                             "format": "text/html",
                             "source": "web_scraping",
-                            "timestamp": datetime.now().isoformat(),
+                            "timestamp": datetime.now(),
                             "images": content.get("images", []),
                         }
                         content["rag_documents"] = [rag_doc]
 
+                        # PRODUCTION FIX: Save with better error handling
                         output_format = str(scrape_params.get("output_format", "json")).lower()
-                        await self._save_to_output_file(url, content, output_format)
+                        saved_path = await self._save_to_output_file(url, content, output_format)
+                        if saved_path:
+                            content["saved_to"] = str(saved_path)
 
                         logger.info(f"✅ Successfully scraped {url} using {method}")
                         return {
@@ -270,25 +332,63 @@ class WebScraperService:
 
         return content
 
-    async def _save_to_output_file(self, url: str, content: Dict[str, Any], output_format: str) -> None:
+    async def _save_to_output_file(self, url: str, content: Dict[str, Any], output_format: str) -> Optional[Path]:
         """
-        Serialize extracted 'content' to OUTPUT_DIR in requested format.
-        Supports: json, txt (text-only).
+        PRODUCTION FIX: Serialize extracted 'content' to output directory with proper error handling.
+        
+        Features:
+        - Multiple fallback locations
+        - Graceful handling of permission errors
+        - Temp file fallback as last resort
+        - Clear error messages
+        
+        Returns: Path to saved file, or None if save failed
         """
         try:
+            # Generate safe filename
             safe_name = hashlib.md5(url.encode("utf-8")).hexdigest()
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             ext = "json" if output_format not in ("json", "txt") else output_format
             filename = f"{safe_name}_{ts}.{ext}"
-            filepath = os.path.join(OUTPUT_DIR, filename)
-
+            
+            # Try primary output directory first
+            if self.output_dir:
+                filepath = self.output_dir / filename
+                
+                try:
+                    # Ensure parent directory exists
+                    filepath.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Convert content to bytes
+                    file_bytes = self._process_to_format_bytes(content, ext)
+                    
+                    # Try to write file
+                    filepath.write_bytes(file_bytes)
+                    
+                    logger.info(f"✅ Saved to: {filepath}")
+                    return filepath
+                    
+                except PermissionError:
+                    # PRODUCTION FIX: Permission denied - try temp fallback
+                    logger.warning(f"⚠️  Permission denied for {filepath}, using temp file")
+                    
+                except OSError as e:
+                    # Other OS errors (disk full, etc.)
+                    logger.warning(f"⚠️  OS error saving to {filepath}: {e}")
+            
+            # FALLBACK: Use system temp directory
+            temp_path = Path(tempfile.gettempdir()) / filename
             file_bytes = self._process_to_format_bytes(content, ext)
-            with open(filepath, "wb") as f:
-                f.write(file_bytes)
-
-            logger.debug(f"💾 Output saved to {filepath}")
+            temp_path.write_bytes(file_bytes)
+            
+            logger.info(f"✅ Saved to temp: {temp_path}")
+            return temp_path
+            
         except Exception as e:
-            logger.error(f"❌ Failed saving file: {e}", exc_info=False)
+            # PRODUCTION FIX: Don't raise - log error and continue
+            logger.error(f"❌ Failed saving file: {e}")
+            logger.debug(f"Failed to save scraped content for {url}", exc_info=True)
+            return None
 
     def _process_to_format_bytes(self, content: Dict[str, Any], fmt: str) -> bytes:
         """Convert extracted 'content' to bytes for persistence."""
@@ -298,6 +398,7 @@ class WebScraperService:
             payload = (f"{title}\n\n{text}").strip()
             return payload.encode("utf-8", errors="ignore")
 
+        # Default to JSON
         return json.dumps(content, ensure_ascii=False, indent=2).encode("utf-8")
 
     def _clean_html(self, soup: BeautifulSoup) -> None:

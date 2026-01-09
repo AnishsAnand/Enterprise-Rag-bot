@@ -694,4 +694,3 @@ Would you like me to proceed with creating this cluster?
             "success": True,
             "output": output
         }
-

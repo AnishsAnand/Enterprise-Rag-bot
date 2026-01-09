@@ -21,16 +21,23 @@ MAX_RETRIES = int(os.getenv("AI_SERVICE_MAX_RETRIES", "2"))  # Reduced from 3 to
 RETRY_BACKOFF_BASE = float(os.getenv("AI_SERVICE_BACKOFF_BASE", "2.0"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B").strip()
 HOSTED_EMBEDDING_MODEL = os.getenv("HOSTED_EMBEDDING_MODEL", "openai/gpt-oss-20b-embedding")
+MIN_RELEVANCE_THRESHOLD = float(os.getenv("MIN_RELEVANCE_THRESHOLD", "0.25"))
+MAX_CHUNKS_RETURN = int(os.getenv("MAX_CHUNKS_RETURN", "12"))
 
 REQUIRED_EMBEDDING_DIM = 4096
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
-PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-4o-mini")
 # Fallback models disabled - they all return 500 errors
 # Only use PRIMARY_CHAT_MODEL (openai/gpt-oss-120b) which is fast (0.2-0.3s) and reliable
-FALLBACK_CHAT_MODELS = []
+FALLBACK_CHAT_MODELS = [
+    "openai/gpt-3.5-turbo",
+    "meta/llama-3.1-70b-instruct", 
+    "meta/Llama-3.1-8B-Instruct",
+    "openai/gpt-oss-120b",  # Moved to end as it's failing
+]
 # Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
 
-GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://api.ai-cloud.cloudlyte.com/v1")
+GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +100,8 @@ class AIService:
             "chat": False,
             "http_fallback": False
         }
+        self.failed_models: set = set()  
+        self.working_models: List[str] = []
         
         # User requirements storage
         self.user_requirements_buffer: List[Dict[str, Any]] = []
@@ -214,43 +223,52 @@ class AIService:
             self.connected_services["embedding"] = False
 
     def _test_grok_connection(self) -> bool:
-        """Test Grok connection with model fallback"""
         if not self.grok_client:
             self.last_error = "Grok client not initialized"
             return False
 
         models_to_try = [PRIMARY_CHAT_MODEL] + FALLBACK_CHAT_MODELS
-        
+
         for model in models_to_try:
+        # Skip known failed models
+            if model in self.failed_models:
+                logger.debug(f"⏭️ Skipping failed model: {model}")
+                continue
+        
             try:
-                logger.info(f"Testing connection with model: {model}")
+                logger.info(f"🔄 Testing model: {model}")
                 resp = self.grok_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "test"}],
-                    max_tokens=5,
-                    timeout=10
+                model=model,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=5,
+                timeout=15
                 )
-                
-                if resp and (getattr(resp, "choices", None) or (isinstance(resp, dict) and resp.get("choices"))):
+        
+                if resp and (getattr(resp, "choices", None) or 
+                        (isinstance(resp, dict) and resp.get("choices"))):
                     self.current_chat_model = model
-                    logger.info(f"✅ Successfully connected using model: {model}")
+                    if model not in self.working_models:
+                        self.working_models.append(model)
+                    logger.info(f"✅ Connected with model: {model}")
                     return True
+            
+            except openai.APIError as e:
+                status_code = getattr(e, 'status_code', None)
+                logger.error(f"❌ Model {model} failed: HTTP {status_code}")
+            
+            # Mark as failed and continue
+                if status_code in [500, 502, 503, 404]:
+                    self.failed_models.add(model)
+                    continue
+                elif status_code in [401, 403]:
+                    return False  # Auth error is fatal
                 
             except Exception as e:
-                err_str = str(e)
-                logger.warning(f"⚠️ Model {model} failed: {err_str[:200]}")
-                
-                if "500" in err_str or "Connection error" in err_str or "InternalServerError" in err_str:
-                    continue
-                elif "403" in err_str or "permission" in err_str.lower():
-                    self.last_error = "No credits/permission for Grok API (403)"
-                    return False
-                elif "401" in err_str or "unauthorized" in err_str.lower():
-                    self.last_error = "Invalid Grok API key (401)"
-                    return False
-        
-        self.last_error = f"All models failed. Tried: {', '.join(models_to_try)}"
-        logger.error(f"❌ {self.last_error}")
+                logger.error(f"❌ Model {model} error: {str(e)[:200]}")
+                self.failed_models.add(model)
+                continue
+
+        self.last_error = f"All models failed: {', '.join(models_to_try)}"
         return False
 
     def _ensure_service_available(self) -> None:
@@ -758,167 +776,171 @@ class AIService:
 
     # ==================== Chat Generation ====================
 
-    def _llm_chat(self, prompt: str, max_tokens: int = 1500, temperature: float = 0.2, 
-                  system_message: str = None, model: str = None) -> str:
-        """Synchronous LLM chat call with model fallback"""
-        if not prompt:
-            logger.warning("Empty prompt provided to _llm_chat")
-            return ""
-
+    def _llm_chat(self, prompt: str, max_tokens: int = 1500, 
+              temperature: float = 0.2, system_message: str = None, 
+              model: str = None) -> str:
+    
         self._ensure_service_available()
-
+    
         if system_message is None:
-            system_message = (
-                "You are a helpful AI assistant that provides accurate, comprehensive, and well-structured responses. "
-                "Focus on being practical and actionable while maintaining clarity. Always base your responses on the provided context. "
-                "Be precise, thorough, and verify facts before presenting them."
-            )
+            system_message = "You are a helpful AI assistant."
 
         messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt}
         ]
 
+    # Use provided model or current working model
         model_to_use = model or self.current_chat_model
-        models_to_try = [model_to_use] + [m for m in FALLBACK_CHAT_MODELS if m != model_to_use]
-
-        last_error = None
-        for attempt_model in models_to_try:
-            try:
-                logger.debug(f"Attempting chat with model: {attempt_model}")
-                resp = self.grok_client.chat.completions.create(
-                    model=attempt_model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=0.9,
-                    presence_penalty=0.1,
-                    frequency_penalty=0.1
-                )
-                
-                if hasattr(resp, "choices") and resp.choices:
-                    content = self._extract_message_content(resp.choices[0])
-                    if content:
-                        if attempt_model != self.current_chat_model:
-                            logger.info(f"✅ Switched to working model: {attempt_model}")
-                            self.current_chat_model = attempt_model
-                        return content
-                    else:
-                        logger.warning(f"⚠️ Model {attempt_model} returned empty content in response.choices[0]")
-                
-                if isinstance(resp, dict) and resp.get("choices"):
-                    first = resp["choices"][0]
-                    if isinstance(first, dict):
-                        if "message" in first and isinstance(first["message"], dict):
-                            content = first["message"].get("content") or ""
-                            if content and attempt_model != self.current_chat_model:
-                                self.current_chat_model = attempt_model
-                            if content:
-                                return content
-                            else:
-                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'content' field")
-                        if "text" in first:
-                            content = first.get("text") or ""
-                            if content and attempt_model != self.current_chat_model:
-                                self.current_chat_model = attempt_model
-                            if content:
-                                return content
-                            else:
-                                logger.warning(f"⚠️ Model {attempt_model} returned empty 'text' field")
-                
-                # If we get here, response was valid but empty
-                logger.warning(f"⚠️ Model {attempt_model} returned valid response but no content extracted")
-                
-            except Exception as e:
-                last_error = e
-                err_str = str(e)
-                logger.warning(f"⚠️ Model {attempt_model} failed: {err_str[:200]}")
-                
-                if "500" in err_str or "Connection error" in err_str or "InternalServerError" in err_str:
-                    continue
-                else:
-                    raise
+    
+    # If current model failed, try working models
+        if model_to_use in self.failed_models and self.working_models:
+            model_to_use = self.working_models[0]
+        logger.info(f"Switching to working model: {model_to_use}")
+    
+        try:
+            resp = self.grok_client.chat.completions.create(
+            model=model_to_use,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=0.9,
+            timeout=30
+            )
         
-        if last_error:
-            logger.error(f"❌ All models failed. Last error: {last_error}")
-            raise last_error
+            if hasattr(resp, "choices") and resp.choices:
+                content = self._extract_message_content(resp.choices[0])
+                if content:
+                    return content
         
-        return ""
+            logger.error(f"❌ Empty response from {model_to_use}")
+            return ""
+        
+        except Exception as e:
+            err_str = str(e)
+            logger.error(f"❌ Model {model_to_use} failed: {err_str[:300]}")
+        
+        # Mark as failed
+            self.failed_models.add(model_to_use)
+        
+        # Don't retry on certain errors
+            if "401" in err_str or "403" in err_str:
+                raise AIServiceError(f"Authentication error: {err_str}")
+        
+            if "500" in err_str or "502" in err_str:
+                raise AIServiceError(f"Service unavailable: {err_str}")
+        
+            raise
 
-    async def _call_chat_with_retries(self, prompt: str, max_tokens: int = 1500, 
-                                     temperature: float = 0.2, system_message: str = None,
-                                     timeout: float = None) -> str:
-        """Async wrapper with timeout and retries with auto-reconnection"""
+    async def _call_chat_with_retries(self, prompt: str, max_tokens: int = 1500,
+                                   temperature: float = 0.2, 
+                                   system_message: str = None,
+                                   timeout: float = None) -> str:
         if timeout is None:
-            timeout = HTTP_TIMEOUT_SECONDS
+            timeout = 30
 
-        # Auto-connect if needed
+    # Auto-connect if needed
         if not self.connected_services["chat"]:
             await self.auto_connect_services()
 
         if not self.connected_services["chat"]:
-            await self.store_user_requirement({
-                "type": "chat_unavailable",
-                "prompt_length": len(prompt),
-                "error": "Chat service unavailable"
-            })
-            raise AIServiceError("Chat service unavailable after auto-connection attempt")
+            raise AIServiceError("Chat service unavailable")
 
-        last_exc = None
-        last_result = ""
-        for attempt in range(1, MAX_RETRIES + 1):
+    # Reduce retries for faster failure
+        MAX_ATTEMPTS = 2
+    
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 fut = asyncio.to_thread(
-                    partial(self._llm_chat, prompt, max_tokens, temperature, system_message)
+                    partial(self._llm_chat, prompt, max_tokens, 
+                        temperature, system_message)
                 )
                 result = await asyncio.wait_for(fut, timeout=timeout)
+            
+                if result and result.strip():
+                    return result
+            
+                logger.warning(f"Empty response on attempt {attempt}")
+                if attempt < MAX_ATTEMPTS:
+                    await asyncio.sleep(1)
+                    continue
+                else:
+                    raise AIServiceError("Empty response")
                 
-                if result is None:
-                    result = ""
-                
-                last_result = result  # Store the last result
-                
-                if len(result.strip()) < 20:
-                    logger.warning(f"Response too short ({len(result)} chars) on attempt {attempt}")
-                    if attempt < MAX_RETRIES:
-                        await _async_exp_backoff_sleep(attempt)
-                        continue
-                    else:
-                        # Final attempt also returned short response - raise error
-                        logger.error(f"❌ All attempts returned short responses (last: {len(result)} chars)")
-                        raise AIServiceError(f"LLM returned empty/short response after {MAX_RETRIES} attempts")
-                
-                return result
-                
-            except asyncio.TimeoutError as te:
-                last_exc = te
-                logger.warning(f"⚠️ Chat attempt {attempt} timed out after {timeout}s")
+            except asyncio.TimeoutError:
+                logger.error(f"❌ Timeout after {timeout}s")
+                raise AIServiceError(f"Timeout after {timeout}s")
+            
             except AIServiceError:
-                # Re-raise AIServiceError (don't wrap it)
                 raise
+            
             except Exception as e:
-                last_exc = e
-                err_str = str(e)
-                logger.warning(f"⚠️ Chat attempt {attempt} failed: {err_str[:300]}")
-                
-                if "401" in err_str or "403" in err_str:
-                    self.connected_services["chat"] = False
-                    raise AIServiceError(f"Authentication/Permission error: {err_str}")
-
-            if attempt < MAX_RETRIES:
-                await _async_exp_backoff_sleep(attempt)
-            else:
+                logger.error(f"❌ Attempt {attempt} failed: {str(e)[:300]}")
                 self.connected_services["chat"] = False
-                await self.store_user_requirement({
-                    "type": "chat_generation_failed",
-                    "prompt_length": len(prompt),
-                    "error": str(last_exc) if last_exc else f"Short response: {len(last_result)} chars"
-                })
-                error_msg = str(last_exc) if last_exc else f"Empty/short responses (last: {len(last_result)} chars)"
-                logger.error(f"❌ All chat attempts failed: {error_msg}")
-                raise AIServiceError(f"Failed to generate response after {MAX_RETRIES} attempts: {error_msg}")
+                raise AIServiceError(f"Service error: {str(e)[:200]}")
 
-    # ==================== High-level Response Generation ====================
+    
+    async def answer_without_context(self, query: str) -> Dict[str, Any]:
+  
+        logger.info(f"📝 Generating response without context for: {query[:50]}...")
+    
+    # Try to generate answer using general knowledge
+        try:
+            prompt = (
+                f"User Question: {query}\n\n"
+                "Provide a helpful, accurate response based on general knowledge. "
+                "Be clear and concise. If you're not certain, say so."
+            )
+        
+            answer = await self._call_chat_with_retries(
+                prompt,
+             max_tokens=800,
+                temperature=0.3,
+                timeout=20  # Shorter timeout for no-context queries
+            )
+        
+            if answer and len(answer.strip()) > 20:
+            # Generate summary
+                try:
+                    summary = await self.generate_summary(answer, max_sentences=2, max_chars=300)
+                except Exception:
+                    summary = answer[:300] + "..." if len(answer) > 300 else answer
+            
+                return {
+                "query": query,
+                "answer": answer,
+                "steps": [],
+                "images": [],
+                "sources": [],
+                "has_sources": False,
+                "confidence": 0.45,  # Lower confidence without sources
+                "results_found": 0,
+                "results_used": 0,
+                "timestamp": datetime.now().isoformat(),
+                "summary": summary,
+                "summaryTitle": "Quick Summary"
+            }
+    
+        except Exception as e:
+            logger.error(f"Failed to generate no-context response: {e}")
+    
+    # Final fallback
+        return {
+        "query": query,
+        "answer": "I apologize, but I don't have enough information in my knowledge base to answer that question, and the AI service is currently unavailable. Please try again later or rephrase your question.",
+        "steps": [],
+        "images": [],
+        "sources": [],
+        "has_sources": False,
+        "confidence": 0.0,
+        "results_found": 0,
+        "results_used": 0,
+        "timestamp": datetime.now().isoformat(),
+        "summary": "Service temporarily unavailable",
+        "summaryTitle": "Status"
+        }
+            
+
 
     async def generate_response(self, query: str, context: List[str]) -> str:
         """Generate response with automatic fallback"""
@@ -1010,8 +1032,12 @@ class AIService:
             logger.error(f"Unexpected error in context expansion: {e}")
             return context_text
 
-    async def generate_enhanced_response(self, query: str, context: List[str], 
-                                        query_type: str = None) -> Dict[str, Any]:
+    async def generate_enhanced_response(self, 
+                                         query: str, 
+                                         context: List[str], 
+                                        query_type: str = None,
+                                        system_prompt: str = None,
+                                        temperature: float = 0.1,) -> Dict[str, Any]:
         """Generate enhanced response with automatic service management"""
         if not query_type:
             query_type = self._classify_query_type(query)
@@ -1041,17 +1067,17 @@ class AIService:
             "Response:"
         )
 
-        system_msg = (
-            f"You are an expert assistant specializing in {query_type} responses. "
-            "Provide detailed, accurate, and actionable information based strictly on the provided context. "
-            "Be thorough and comprehensive. Never invent information."
-        )
+        system_msg = system_prompt or (
+    f"You are an expert assistant specializing in {query_type} responses. "
+    "Provide detailed, accurate, and actionable information based strictly on the provided context. "
+    "Be thorough and comprehensive. Never invent information."
+    )
 
         try:
             raw_response = await self._call_chat_with_retries(
                 prompt,
                 max_tokens=2000,
-                temperature=0.1,
+                temperature=temperature,
                 system_message=system_msg,
                 timeout=HTTP_TIMEOUT_SECONDS
             )
@@ -1725,6 +1751,20 @@ class AIService:
                 logger.info("✅ Grok client closed successfully")
             except Exception as e:
                 logger.debug(f"Grok client close attempt raised: {e}")
+    
+    def diagnose_connection(self) -> Dict[str, Any]:
+        grok_key = os.getenv("GROK_API_KEY")
+    
+        return {
+        "api_key_present": bool(grok_key),
+        "api_key_length": len(grok_key) if grok_key else 0,
+        "api_key_preview": f"{grok_key[:8]}...{grok_key[-4:]}" if grok_key and len(grok_key) > 12 else "Invalid",
+        "base_url": GROK_BASE_URL,
+        "primary_model": PRIMARY_CHAT_MODEL,
+        "client_initialized": bool(self.grok_client),
+        "is_healthy": self.is_healthy,
+        "last_error": self.last_error
+    }
 
 
 # ==================== Production Singleton ====================

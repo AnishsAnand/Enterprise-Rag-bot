@@ -234,4 +234,3 @@ class ResponseFormatter:
 
 # Create global instance
 response_formatter = ResponseFormatter()
-

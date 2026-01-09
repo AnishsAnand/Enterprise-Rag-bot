@@ -707,4 +707,3 @@ class ConversationStateManager:
 
 # Global instance with persistence enabled
 conversation_state_manager = ConversationStateManager(use_persistence=True)
-
