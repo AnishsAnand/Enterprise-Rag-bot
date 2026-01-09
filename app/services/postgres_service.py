@@ -395,27 +395,24 @@ class PostgresService:
             return False
 
     async def add_documents(self, documents: List[Dict[str, Any]]) -> List[str]:
-        """
-        Add documents to PostgreSQL.
 
-        ✅ PRODUCTION FIX: Properly converts timestamps to datetime objects
-        before passing to asyncpg, which fixes the DataError.
-        Also ensures table exists before inserting.
-        """
         if not self.pool or not self._connection_established:
             logger.warning("⚠️ PostgreSQL unavailable - cannot add documents")
             return []
 
         try:
-            # Quick table existence check; ensure schema if missing
+        # Ensure table exists
             async with self.pool.acquire() as conn:
                 if not await self._table_exists(conn):
-                    logger.warning(f"⚠️ Table '{self.table_name}' missing when adding documents - attempting to ensure schema")
-                    # try to create table (serialized)
+                    logger.warning(
+                    f"⚠️ Table '{self.table_name}' missing - attempting to create"
+                    )
                     await self._ensure_schema()
-                    # Re-check
+                
                     if not await self._table_exists(conn):
-                        logger.error(f"❌ Table '{self.table_name}' still missing after _ensure_schema()")
+                        logger.error(
+                        f"❌ Table '{self.table_name}' still missing after schema creation"
+                    )
                         return []
 
             ids: List[str] = []
@@ -429,27 +426,40 @@ class PostgresService:
                 content = str(doc.get("content", ""))[:8000]
                 texts.append(content)
 
-                # ✅ CRITICAL FIX: Use _parse_timestamp() to get datetime object
+            # ✅ CRITICAL: Parse timestamp properly
                 timestamp_value = self._parse_timestamp(doc.get("timestamp"))
 
-                documents_data.append({
-                    "id": doc_id,
-                    "content": content,
-                    "url": str(doc.get("url", ""))[:2000],
-                    "title": str(doc.get("title", ""))[:500],
-                    "format": str(doc.get("format", "text"))[:100],
-                    "timestamp": timestamp_value,  # ✅ Now a datetime object, not string!
-                    "source": str(doc.get("source", "web_scraping"))[:100],
-                    "content_length": len(content),
-                    "word_count": len(content.split()),
-                    "image_count": 0,
-                    "has_images": False,
-                    "domain": "",
-                    "content_hash": abs(hash(content)) % (10**8),
-                    "images_json": [],  # callers may set this field if they have images
-                    "key_terms": [],
-                })
+            # ✅ CRITICAL: Process images field
+                images_raw = doc.get("images", [])
+                images_normalized = self._normalize_images_for_storage(images_raw)
+            
+            # Log image storage
+                if images_normalized:
+                    logger.info(
+                    f"📷 Storing {len(images_normalized)} images for document "
+                    f"{doc.get('url', 'unknown')[:60]}"
+                )
+                    logger.debug(f"Sample image URL: {images_normalized[0].get('url', 'N/A')[:80]}")
 
+                documents_data.append({
+                "id": doc_id,
+                "content": content,
+                "url": str(doc.get("url", ""))[:2000],
+                "title": str(doc.get("title", ""))[:500],
+                "format": str(doc.get("format", "text"))[:100],
+                "timestamp": timestamp_value,
+                "source": str(doc.get("source", "web_scraping"))[:100],
+                "content_length": len(content),
+                "word_count": len(content.split()),
+                "image_count": len(images_normalized),  # ✅ Set correct count
+                "has_images": len(images_normalized) > 0,  # ✅ Set boolean
+                "domain": self._extract_domain(doc.get("url", "")),
+                "content_hash": abs(hash(content)) % (10**8),
+                "images_json": images_normalized,  # ✅ Store normalized images
+                "key_terms": [],
+            })
+
+        # Generate embeddings
             logger.info(f"🔄 Generating embeddings for {len(texts)} documents...")
             embeddings = await ai_service.generate_embeddings(texts)
 
@@ -457,47 +467,111 @@ class PostgresService:
                 logger.error("❌ Failed to generate embeddings")
                 return []
 
+        # Insert into database
             insert_sql = f"""
             INSERT INTO {self.table_name} 
             (id, embedding, content, url, title, format, timestamp, source,
-             content_length, word_count, image_count, has_images, domain,
-             content_hash, images_json, key_terms)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+         content_length, word_count, image_count, has_images, domain,
+         content_hash, images_json, key_terms)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             """
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     for i, doc_data in enumerate(documents_data):
-                        # Prepare embedding as a vector literal — pgvector accepts array-like literal
+                    # Prepare embedding as vector literal
                         embedding_str = '[' + ','.join(map(str, embeddings[i])) + ']'
 
-                        # The $2 parameter (embedding) must be cast to vector by the query ('$1::vector' style is used in search).
+                    # ✅ CRITICAL: Serialize images_json as JSON string
+                        images_json_str = json.dumps(doc_data["images_json"])
+
                         await conn.execute(
-                            insert_sql,
-                            doc_data["id"],
-                            embedding_str,
-                            doc_data["content"],
-                            doc_data["url"],
-                            doc_data["title"],
-                            doc_data["format"],
-                            doc_data["timestamp"],  # datetime object
-                            doc_data["source"],
-                            doc_data["content_length"],
-                            doc_data["word_count"],
-                            doc_data["image_count"],
-                            doc_data["has_images"],
-                            doc_data["domain"],
-                            doc_data["content_hash"],
-                            json.dumps(doc_data["images_json"]),
-                            doc_data["key_terms"]
+                        insert_sql,
+                        doc_data["id"],
+                        embedding_str,
+                        doc_data["content"],
+                        doc_data["url"],
+                        doc_data["title"],
+                        doc_data["format"],
+                        doc_data["timestamp"],
+                        doc_data["source"],
+                        doc_data["content_length"],
+                        doc_data["word_count"],
+                        doc_data["image_count"],
+                        doc_data["has_images"],
+                        doc_data["domain"],
+                        doc_data["content_hash"],
+                        images_json_str,  # ✅ JSON string
+                        doc_data["key_terms"]
                         )
 
-            logger.info(f"✅ Successfully added {len(ids)} documents")
+            logger.info(
+            f"✅ Successfully added {len(ids)} documents "
+            f"with {sum(d['image_count'] for d in documents_data)} total images"
+        )
             return ids
 
         except Exception as e:
             logger.exception(f"❌ Error adding documents: {e}")
             return []
+        
+    def _normalize_images_for_storage(self, images_raw: Any) -> List[Dict[str, Any]]:
+
+        if not images_raw:
+            return []
+    
+    # Ensure it's a list
+        if isinstance(images_raw, str):
+            try:
+                images_raw = json.loads(images_raw)
+            except:
+                return []
+    
+        if not isinstance(images_raw, list):
+            return []
+    
+        normalized = []
+    
+        for img in images_raw:
+        # Handle string URLs
+            if isinstance(img, str):
+                if img.startswith("http"):
+                    normalized.append({
+                    "url": img,
+                    "alt": "",
+                    "caption": "",
+                    "type": "content",
+                    "text": ""
+                })
+                continue
+        
+        # Handle dict images
+            if isinstance(img, dict):
+                url = img.get("url")
+            
+            # Must have valid URL
+                if not url or not isinstance(url, str):
+                    continue
+                if not url.startswith("http"):
+                    continue
+            
+                normalized.append({
+                "url": url,
+                "alt": str(img.get("alt", ""))[:200],
+                "caption": str(img.get("caption", ""))[:500],
+                "type": str(img.get("type", "content"))[:50],
+                "text": str(img.get("text", ""))[:800]
+            })
+    
+        return normalized
+    def _extract_domain(self, url: str) -> str:
+
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            return parsed.netloc[:500] if parsed.netloc else ""
+        except:
+            return ""
 
     async def search_documents(self, query: str, n_results: Optional[int] = None) -> List[Dict[str, Any]]:
         """Perform vector similarity search."""
@@ -601,92 +675,111 @@ class PostgresService:
             return []
 
     def _coerce_images_from_db(self, images_field: Any) -> List[Dict[str, Any]]:
-        """
-        Normalize images stored in the DB into a list of dicts:
-        [{ "url": "...", "alt": "...", "caption": "..." }, ...]
-        Accepts:
-          - None
-          - list of dicts
-          - JSON string
-          - list of strings (URLs)
-          - dict with 'image_prompt' (generates placeholder URL)
-        """
+
         normalized: List[Dict[str, Any]] = []
 
         try:
-            # If it's already a list (likely decoded by asyncpg)
+        # Parse the field into a list
             if isinstance(images_field, list):
                 entries = images_field
             elif isinstance(images_field, str) and images_field.strip():
                 try:
                     entries = json.loads(images_field)
                 except Exception:
-                    # Maybe it's a comma-separated string of URLs
+                # Maybe comma-separated URLs
                     entries = [s.strip() for s in images_field.split(",") if s.strip()]
             else:
                 entries = []
 
             for item in entries:
-                # item can be a string URL
+            # Handle string URLs
                 if isinstance(item, str):
                     if item.startswith("http"):
                         normalized.append({
-                            "url": item,
-                            "alt": "",
-                            "caption": ""
-                        })
+                        "url": item,
+                        "alt": "",
+                        "caption": ""
+                    })
                     else:
-                        # treat as prompt / label -> placeholder
-                        ph = self._placeholder_for_prompt(item)
+                    # Treat as prompt / label → generate placeholder
+                        placeholder_url = self._placeholder_for_prompt(item)
                         normalized.append({
-                            "url": ph,
-                            "alt": item[:80],
-                            "caption": ""
-                        })
+                        "url": placeholder_url,
+                        "alt": item[:80],
+                        "caption": ""
+                    })
                     continue
 
-                # if item is dict-like
+            # Handle dict-like objects
                 if isinstance(item, dict):
                     url = item.get("url") or item.get("image_url") or None
                     alt = item.get("alt") or item.get("title") or item.get("caption") or ""
                     caption = item.get("caption") or item.get("title") or ""
 
-                    # If there's an explicit image prompt but no url -> placeholder
+                # CRITICAL: Handle image_prompt conversion
                     if not url and item.get("image_prompt"):
                         prompt = item.get("image_prompt")
                         url = self._placeholder_for_prompt(prompt)
+                        alt = f"Visual Guide: {prompt[:60]}"
+                        logger.debug(f"Converted image_prompt to placeholder URL: {url[:60]}...")
 
-                    # If still no url, skip
+                # Skip if still no URL
                     if not url:
+                        logger.debug(f"Skipping image entry with no URL or prompt: {item}")
                         continue
 
                     normalized.append({
-                        "url": url,
-                        "alt": alt[:200] if isinstance(alt, str) else "",
-                        "caption": caption[:500] if isinstance(caption, str) else ""
-                    })
+                    "url": url,
+                    "alt": alt[:200] if isinstance(alt, str) else "",
+                    "caption": caption[:500] if isinstance(caption, str) else ""
+                })
                     continue
 
-                # otherwise — ignore
         except Exception as e:
-            logger.debug(f"⚠️ _coerce_images_from_db failed: {e}")
+            logger.error(f"⚠️ _coerce_images_from_db failed: {e}", exc_info=True)
 
+        logger.debug(f"Normalized {len(normalized)} images from DB field")
         return normalized
 
     def _placeholder_for_prompt(self, prompt: str, size: Tuple[int, int] = (900, 400)) -> str:
-        """
-        Create a safe placeholder image URL for a given prompt.
-        Uses via.placeholder.com with the prompt URL-encoded.
-        This ensures OpenWebUI will show an image even if no real image is stored.
-        """
+    
         try:
+        # Clean prompt text
             text = prompt.strip()[:120]
+        
+        # Remove special characters
+            text = re.sub(r'[^\w\s-]', '', text)
+            text = re.sub(r'\s+', ' ', text)
+        
+        # Ensure non-empty
+            if not text:
+                text = "Visual Guide"
+        
+        # Truncate if too long
+            if len(text) > 50:
+                text = text[:47] + "..."
+        
+        # URL encode
             encoded = quote_plus(text)
+        
             width, height = size
-            # Example: https://via.placeholder.com/900x400.png?text=Log+in+screen
-            return f"https://via.placeholder.com/{width}x{height}.png?text={encoded}"
-        except Exception:
-            return f"https://via.placeholder.com/900x400.png?text=Image"
+        
+        # Professional color scheme
+            bg_color = "4A90E2"  # Professional blue
+            text_color = "FFFFFF"  # White text
+        
+        # Generate URL
+            url = (
+            f"https://via.placeholder.com/{width}x{height}/{bg_color}/{text_color}"
+            f"?text={encoded}"
+            )
+        
+            logger.debug(f"Generated placeholder URL: {url[:80]}...")
+            return url
+        
+        except Exception as e:
+            logger.error(f"Placeholder generation error: {e}")
+            return "https://via.placeholder.com/900x400/4A90E2/FFFFFF?text=Image"
 
     def _preprocess_query(self, query: str) -> Tuple[str, List[str]]:
         """Preprocess query and extract key terms."""

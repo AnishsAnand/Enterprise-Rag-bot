@@ -1233,55 +1233,139 @@ async def _generate_steps(query: str, expanded_context: str, base_context: list,
     return steps_data
 
 
-def _extract_and_score_images(query: str, answer: str, filtered_results: list) -> list:
-    """Extract and score images from search results."""
+def _extract_and_score_images(
+    query: str,
+    answer: str,
+    filtered_results: list
+) -> list:
+    """
+    Extract and score images from search results.
+    
+    CRITICAL CHANGES:
+    1. Properly extract images from metadata.images field
+    2. Validate image URLs (must be absolute HTTP/HTTPS)
+    3. Score images by relevance to query
+    4. Return top-ranked images
+    
+    Returns:
+        List of top-scored images with URLs, ready for OpenWebUI display
+    """
     candidate_images = []
     query_concepts = set(_extract_key_concepts(query.lower()))
     answer_concepts = set(_extract_key_concepts(answer.lower())) if answer else set()
     all_concepts = query_concepts | answer_concepts
 
-    for result in filtered_results:
+    logger.info(f"🔍 Extracting images from {len(filtered_results)} search results")
+
+    for result_idx, result in enumerate(filtered_results):
         meta = result.get("metadata", {}) or {}
         page_url = meta.get("url", "")
         page_title = meta.get("title", "")
         relevance_score = result.get("relevance_score", 0.0)
 
-        images = meta.get("images", []) if isinstance(meta.get("images", []), list) else []
-        for img in images:
-            if not isinstance(img, dict) or not img.get("url"):
+        # ✅ CRITICAL: Extract images from metadata
+        # The images field can be in multiple locations
+        images_raw = meta.get("images", [])
+        
+        # Fallback: check images_json field
+        if not images_raw:
+            images_raw = meta.get("images_json", [])
+        
+        # Ensure it's a list
+        if not isinstance(images_raw, list):
+            if isinstance(images_raw, str):
+                try:
+                    images_raw = json.loads(images_raw)
+                except:
+                    images_raw = []
+            else:
+                images_raw = []
+
+        if not images_raw:
+            logger.debug(f"No images in result {result_idx + 1}")
+            continue
+
+        logger.info(
+            f"✅ Found {len(images_raw)} images in result {result_idx + 1} "
+            f"from {page_url[:60]}"
+        )
+
+        # Process each image
+        for img_idx, img in enumerate(images_raw):
+            # Validate image format
+            if not isinstance(img, dict):
+                if isinstance(img, str) and img.startswith("http"):
+                    # Convert string URL to dict
+                    img = {"url": img, "alt": "", "caption": ""}
+                else:
+                    logger.debug(f"Skipping invalid image format: {type(img)}")
+                    continue
+
+            # ✅ CRITICAL: Validate image URL
+            img_url = img.get("url", "")
+            if not img_url or not isinstance(img_url, str):
+                logger.debug("Skipping image with no URL")
+                continue
+            
+            # Must be absolute HTTP/HTTPS URL
+            if not img_url.startswith("http://") and not img_url.startswith("https://"):
+                logger.debug(f"Skipping relative/invalid URL: {img_url[:60]}")
                 continue
 
-            u = img.get("url", "").lower()
-            if any(noise in u for noise in ["logo", "icon", "favicon", "sprite", "banner"]):
+            # Filter out tracking pixels and tiny images
+            if any(skip in img_url.lower() for skip in ["1x1", "pixel", "tracker", "blank"]):
+                logger.debug(f"Skipping tracking pixel: {img_url[:60]}")
                 continue
 
-            img_text = (img.get("text", "") or "").lower()
-            img_concepts = set(_extract_key_concepts(img_text))
+            # Extract image metadata
+            img_alt = img.get("alt", "")
+            img_caption = img.get("caption", "")
+            img_type = img.get("type", "content")
+            img_text = img.get("text", "")
+
+            # Build text for similarity scoring
+            img_search_text = " ".join([
+                img_alt,
+                img_caption,
+                img_text,
+                page_title
+            ]).lower()
+
+            # Calculate relevance score
+            img_concepts = set(_extract_key_concepts(img_search_text))
             concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
-            text_similarity = _enhanced_similarity(query, img_text)
+            text_similarity = _enhanced_similarity(query, img_search_text)
 
-            img_type = (img.get("type", "") or "").lower()
-            type_bonus = 0.2 if img_type in ["diagram", "chart", "screenshot", "illustration"] else 0.0
+            # Bonus for instructional image types
+            type_bonus = 0.3 if img_type in ["diagram", "screenshot", "illustration"] else 0.1
 
+            # Combined score
             image_score = (
-                text_similarity * 0.4
-                + (concept_overlap / max(len(all_concepts), 1)) * 0.3
-                + relevance_score * 0.2
-                + type_bonus
+                text_similarity * 0.4 +
+                (concept_overlap / max(len(all_concepts), 1)) * 0.3 +
+                relevance_score * 0.2 +
+                type_bonus * 0.1
             )
 
+            # Only include images with minimum relevance
             if image_score > 0.15:
                 candidate_images.append({
-                    "url": img.get("url"),
-                    "alt": img.get("alt", ""),
-                    "type": img.get("type", ""),
-                    "caption": img.get("caption", ""),
+                    "url": img_url,  # ✅ Absolute URL
+                    "alt": img_alt or "Image",
+                    "type": img_type,
+                    "caption": img_caption,
                     "source_url": page_url,
                     "source_title": page_title,
                     "relevance_score": round(image_score, 3),
                     "text": img_text[:500],
                 })
+                
+                logger.debug(
+                    f"✅ Added image: {img_url[:60]} "
+                    f"(score: {image_score:.3f}, type: {img_type})"
+                )
 
+    # Deduplicate by URL
     seen_urls = set()
     unique_images = []
     for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
@@ -1289,8 +1373,24 @@ def _extract_and_score_images(query: str, answer: str, filtered_results: list) -
         if url and url not in seen_urls:
             seen_urls.add(url)
             unique_images.append(img)
+
+    logger.info(
+        f"✅ Extracted {len(unique_images)} unique, scored images "
+        f"(from {len(candidate_images)} candidates)"
+    )
     
-    return unique_images[:12]
+    # Log top images for debugging
+    if unique_images:
+        logger.info("Top 3 images:")
+        for i, img in enumerate(unique_images[:3], 1):
+            logger.info(
+                f"  {i}. {img.get('url', 'N/A')[:60]} "
+                f"(score: {img.get('relevance_score', 0):.3f}, "
+                f"type: {img.get('type', 'N/A')})"
+            )
+
+    return unique_images[:12]  # Return top 12 images
+
 def _build_sources(filtered_results: list, request: WidgetQueryRequest) -> list:
     """Build sources list from filtered results."""
     sources = []
@@ -1428,21 +1528,47 @@ async def _store_interaction(query: str, answer: str, confidence: float,
     background_tasks.add_task(store_document_task, [interaction_doc])
 
 
-def _extract_key_concepts(text: str) -> list:
-    """Extract key concepts from text (placeholder - implement actual logic)."""
-    # This is a simplified version - you should have the actual implementation
-    words = text.split()
-    return [w for w in words if len(w) > 3]
+def _extract_key_concepts(text: str) -> List[str]:
+    """Extract key terms from text for concept matching"""
+    if not text:
+        return []
+    
+    # Remove special characters and split
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
+    
+    # Common stopwords to filter
+    stopwords = {
+        'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
+        'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has'
+    }
+    
+    # Filter stopwords and return unique terms
+    concepts = [w for w in words if w not in stopwords]
+    return list(dict.fromkeys(concepts))[:20]
 
 
-def _enhanced_similarity(text1: str, text2: str) -> float:
-    """Calculate enhanced similarity between two texts (placeholder)."""
-    # This is a simplified version - you should have the actual implementation
-    words1 = set(text1.lower().split())
-    words2 = set(text2.lower().split())
-    if not words1 or not words2:
+def _enhanced_similarity(query: str, text: str) -> float:
+    """Calculate enhanced similarity between query and text"""
+    if not query or not text:
         return 0.0
-    return len(words1 & words2) / len(words1 | words2)
+    
+    query_norm = " ".join(query.lower().split())
+    text_norm = " ".join(text.lower().split())
+    
+    # Sequence matching
+    import difflib
+    seq_ratio = difflib.SequenceMatcher(None, query_norm, text_norm).ratio()
+    
+    # Word overlap
+    query_words = set(query_norm.split())
+    text_words = set(text_norm.split())
+    overlap = len(query_words & text_words) / len(query_words | text_words) if query_words else 0.0
+    
+    # Substring bonus
+    substring_bonus = 0.2 if query_norm in text_norm else 0.0
+    
+    score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
+    return min(1.0, max(0.0, score))
 
 
 @router.post("/widget/execute-task")
@@ -1578,36 +1704,69 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
 
 @router.post("/widget/scrape")
 async def widget_scrape(request: WidgetScrapeRequest, background_tasks: BackgroundTasks):
-    """Enhanced scraping with better error handling and options"""
+    """
+    Enhanced scraping with proper image extraction and storage.
+    
+    CRITICAL CHANGES:
+    1. Extract images with scraper
+    2. Store images_json in database
+    3. Return images in response
+    """
     try:
-        logger.info(f"Scraping URL: {request.url}")
+        logger.info(f"🌐 Scraping URL with image extraction: {request.url}")
+        
         scrape_params = {
             "extract_text": True,
             "extract_links": False,
-            "extract_images": request.extract_images,
+            "extract_images": True,  # ✅ CRITICAL: Must be True
             "extract_tables": True,
             "scroll_page": request.wait_for_js,
             "wait_for_element": "body" if request.wait_for_js else None,
             "output_format": "json",
         }
 
-        result = await call_maybe_async(scraper_service.scrape_url, str(request.url), scrape_params)
+        # Scrape the page
+        result = await call_maybe_async(
+            scraper_service.scrape_url, 
+            str(request.url), 
+            scrape_params
+        )
+        
         if not result or result.get("status") != "success":
             raise HTTPException(
                 status_code=400,
-                detail=f"Scraping failed: {result.get('error', 'Unknown error') if result else 'No result'}"
+                detail=f"Scraping failed: {result.get('error', 'Unknown error')}"
             )
 
         content = result.get("content", {}) or {}
         page_text = content.get("text", "") or ""
+        
         if len(page_text.strip()) < 50:
-            raise HTTPException(status_code=400, detail="Scraped content is too short or empty")
+            raise HTTPException(
+                status_code=400, 
+                detail="Scraped content is too short or empty"
+            )
 
+        # ✅ CRITICAL: Extract images from scraped content
+        scraped_images = content.get("images", []) or []
+        
+        logger.info(
+            f"✅ Scraped {len(page_text)} chars, "
+            f"{len(scraped_images)} images from {request.url}"
+        )
+
+        # ✅ CRITICAL: Store in knowledge base with images
         if request.store_in_knowledge:
+            documents_to_store = []
+            
             if len(page_text) > 2000:
+                # Split into chunks
                 chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
-                documents_to_store = []
+                
                 for i, chunk in enumerate(chunks):
+                    # ✅ First chunk gets all images, others get empty array
+                    chunk_images = scraped_images if i == 0 else []
+                    
                     documents_to_store.append({
                         "content": chunk,
                         "url": f"{str(request.url)}#chunk-{i}",
@@ -1615,21 +1774,29 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                         "format": "text/html",
                         "timestamp": datetime.now().isoformat(),
                         "source": "widget_scrape",
-                        "images": content.get("images", []) if i == 0 else [],
+                        "images": chunk_images,  # ✅ Store images array
                     })
             else:
-                documents_to_store = [{
+                # Single document with all images
+                documents_to_store.append({
                     "content": page_text,
                     "url": str(request.url),
                     "title": content.get("title", "") or f"Content from {request.url}",
                     "format": "text/html",
                     "timestamp": datetime.now().isoformat(),
                     "source": "widget_scrape",
-                    "images": content.get("images", []) or [],
-                }]
+                    "images": scraped_images,  # ✅ Store images array
+                })
 
+            # Store in background
             background_tasks.add_task(store_document_task, documents_to_store)
+            
+            logger.info(
+                f"✅ Queued {len(documents_to_store)} documents for storage "
+                f"with {len(scraped_images)} images"
+            )
 
+        # Generate summary
         try:
             summary = await call_maybe_async(
                 ai_service.generate_summary,
@@ -1640,13 +1807,15 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
 
+        # ✅ CRITICAL: Include images in response
         return {
             "status": "success",
             "url": str(request.url),
             "title": content.get("title", "Untitled"),
             "content_length": len(page_text),
             "word_count": len(page_text.split()),
-            "images_count": len(content.get("images", [])),
+            "images_count": len(scraped_images),  # ✅ Report image count
+            "images": scraped_images[:10],  # ✅ Include sample images in response
             "tables_count": len(content.get("tables", [])),
             "method_used": result.get("method"),
             "stored_in_knowledge": request.store_in_knowledge,
@@ -1660,7 +1829,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
     except Exception as e:
         logger.exception(f"Widget scrape error: {e}")
         raise HTTPException(status_code=500, detail=f"Scraping error: {str(e)}")
-
+    
 
 @router.post("/widget/bulk-scrape")
 async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: BackgroundTasks):
@@ -1989,17 +2158,68 @@ async def widget_clear_knowledge():
 # ===================== Background Tasks =====================
 
 async def store_document_task(docs: List[Dict[str, Any]]):
-    """Background storage task"""
+    """
+    Background task to store documents with images.
+    
+    CRITICAL: Ensures images_json is properly formatted before storage.
+    """
     try:
-        func = getattr(postgres_service, "store_documents", None) or getattr(postgres_service, "add_documents", None)
+        # Validate and normalize images in each document
+        for doc in docs:
+            images = doc.get("images", [])
+            
+            # Ensure images is a list
+            if not isinstance(images, list):
+                doc["images"] = []
+                continue
+            
+            # Normalize each image
+            normalized_images = []
+            for img in images:
+                if isinstance(img, dict):
+                    # Ensure required fields exist
+                    if img.get("url"):
+                        normalized_images.append({
+                            "url": img.get("url"),
+                            "alt": img.get("alt", ""),
+                            "caption": img.get("caption", ""),
+                            "type": img.get("type", "content"),
+                            "text": img.get("text", "")[:800]  # Limit text length
+                        })
+                elif isinstance(img, str) and img.startswith("http"):
+                    # Convert string URL to dict
+                    normalized_images.append({
+                        "url": img,
+                        "alt": "",
+                        "caption": "",
+                        "type": "content",
+                        "text": ""
+                    })
+            
+            doc["images"] = normalized_images
+            
+            logger.debug(
+                f"Normalized {len(normalized_images)} images for document "
+                f"{doc.get('url', 'unknown')[:60]}"
+            )
+        
+        # Store documents
+        func = getattr(postgres_service, "add_documents", None)
         if not func:
-            raise RuntimeError("postgres_service lacks a store_documents/add_documents function")
-        res = func(docs)
-        if inspect.isawaitable(res):
-            await res
-        logger.info(f"✅ Stored {len(docs)} docs in knowledge base")
+            raise RuntimeError("postgres_service has no add_documents method")
+        
+        result = func(docs)
+        if inspect.isawaitable(result):
+            await result
+        
+        total_images = sum(len(doc.get("images", [])) for doc in docs)
+        logger.info(
+            f"✅ Stored {len(docs)} documents with {total_images} images total"
+        )
+        
     except Exception as e:
         logger.error(f"❌ Failed storing docs: {e}")
+        logger.exception("Full traceback:")
 
 
 async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth: int):

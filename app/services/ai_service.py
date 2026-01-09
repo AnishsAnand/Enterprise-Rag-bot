@@ -13,7 +13,11 @@ from functools import partial, lru_cache
 from httpx import TimeoutException, ConnectError
 import difflib
 import hashlib
+import json
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
 load_dotenv()
 
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "25"))
@@ -1123,135 +1127,624 @@ class AIService:
             "expanded_context": expanded_context,
         }
 
-    async def generate_stepwise_response(self, query: str, context: List[str]) -> List[Dict[str, Any]]:
-        """Generate comprehensive stepwise instructions with image assignment"""
-        organized_context = self._organize_context(context, query)
-        candidate_images = self._extract_candidate_images_from_context(organized_context)
-
-        available_images_json = json.dumps(candidate_images[:30], ensure_ascii=False, indent=2)
-        
-        query_type = self._classify_query_type(query)
-        
-        prompt = (
-            "Provide clear, actionable step-by-step instructions based on the context.\n\n"
-            f"Context:\n{organized_context}\n\n"
-            f"Available Images (reference by URL when appropriate):\n{available_images_json}\n\n"
-            f"Question: {query}\n\n"
-            "Return ONLY a JSON array of steps in this exact format:\n"
-            '[\n'
-            '  {\n'
-            '    "text": "Clear, specific step description",\n'
-            '    "type": "action",\n'
-            '    "image": {"url": "https://example.com/image.png", "alt": "Description", "caption": "Optional caption"}\n'
-            '  },\n'
-            '  {\n'
-            '    "text": "Another step",\n'
-            '    "type": "action",\n'
-            '    "image_prompt": "Description of desired illustration if no URL available"\n'
-            '  }\n'
-            ']\n\n'
-            "Requirements:\n"
-            "1. If an available image matches a step, reference it by including the URL in the image object\n"
-            "2. If no suitable image exists, provide an image_prompt describing the desired visual\n"
-            "3. Use 5-12 steps depending on complexity\n"
-            "4. Each step must be specific, clear, and actionable\n"
-            "5. Use 'action' for actionable steps, 'note' for important warnings/tips, 'info' for context\n"
-            "6. Number steps implicitly through array order\n"
-            "7. Ensure each step builds logically on previous steps\n"
-            "8. Include technical details and specifications where relevant\n\n"
-            "Output ONLY valid JSON - no additional text or explanation."
-        )
+    async def generate_stepwise_response(self, query: str, context: List[str],max_steps: int = 8) -> List[Dict[str, Any]]:
 
         try:
-            raw = await self._call_chat_with_retries(
-                prompt,
-                max_tokens=1500,
-                temperature=0.1,
-                timeout=HTTP_TIMEOUT_SECONDS
+            organized_context = self._organize_context(context, query)
+            candidate_images = self._extract_candidate_images_from_context(organized_context)
+        
+            available_images_json = json.dumps(
+            candidate_images[:30],
+            ensure_ascii=False,
+            indent=2
+            ) if candidate_images else "[]"
+        
+        # Step 3: Classify query type for better image assignment
+            query_type = self._classify_query_type(query)
+        
+        # Step 4: Generate steps with AI
+            logger.info(f"🔄 Generating stepwise response for: '{query[:60]}...'")
+            steps = await self._generate_steps_with_ai_enhanced(
+            query=query,
+            context=organized_context,
+            available_images_json=available_images_json,
+            max_steps=max_steps,
+            query_type=query_type
             )
-            steps = self._extract_json_array_safe(raw)
-        except AIServiceError as e:
-            logger.error(f"Failed to generate stepwise response: {e}")
-            await self.store_user_requirement({
-                "type": "stepwise_generation_failed",
-                "query": query,
-                "error": str(e)
-            })
-            return [{
-                "text": f"AI service unavailable: {self.last_error}",
-                "type": "error",
-                "step_number": 1
-            }]
-        except Exception as e:
-            logger.error(f"Unexpected error in stepwise response: {e}")
-            return [{
-                "text": "Unable to generate steps at this time.",
-                "type": "error",
-                "step_number": 1
-            }]
-
-        enhanced_steps = []
-        for i, step in enumerate(steps[:12]):
-            if isinstance(step, dict) and "text" in step:
-                normalized = {
-                    "text": step["text"].strip(),
-                    "type": step.get("type", "action"),
-                    "step_number": i + 1
-                }
-                
-                if "image" in step and isinstance(step["image"], dict):
-                    normalized["image"] = step["image"]
-                elif "image_url" in step and isinstance(step["image_url"], str):
-                    normalized["image"] = {"url": step["image_url"]}
-                elif "image_prompt" in step and isinstance(step["image_prompt"], str):
-                    normalized["image_prompt"] = step["image_prompt"]
-                
-                enhanced_steps.append(normalized)
-
-        if not enhanced_steps:
-            try:
-                fallback_steps = []
-                lines = raw.splitlines()
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    
-                    m = re.match(
-                        r'^(?:\d+[\.\)]\s*)?(?:Step\s*\d+:)?\s*(.+)',
-                        line,
-                        re.IGNORECASE
-                    )
-                    if m:
-                        text = m.group(1).strip()
-                        if len(text) > 5:
-                            fallback_steps.append({
-                                "text": text,
-                                "type": "action",
-                                "step_number": len(fallback_steps) + 1
-                            })
-                            if len(fallback_steps) >= 12:
-                                break
-                
-                enhanced_steps = fallback_steps if fallback_steps else [{
-                    "text": "No steps available.",
-                    "type": "info",
-                    "step_number": 1
-                }]
-            except Exception:
-                enhanced_steps = [{
-                    "text": "Unable to parse steps.",
-                    "type": "info",
-                    "step_number": 1
-                }]
-
-        final_steps = self._assign_images_to_steps(
-            enhanced_steps,
+        
+        # Step 5: Validate and normalize steps
+            validated_steps = self._validate_and_normalize_steps_enhanced(steps, max_steps)
+        
+        # Step 6: Assign images to steps intelligently
+            final_steps = self._assign_images_to_steps(
+            validated_steps,
             candidate_images,
             query_type
-        )
+            )
+        
+        # Step 7: CRITICAL - Ensure all steps have image_prompt for OpenWebUI
+            final_steps = self._ensure_image_prompts_for_openwebui(final_steps, query_type)
+        
+            logger.info(f"✅ Generated {len(final_steps)} steps with images for query")
+            return final_steps
+        
+        except AIServiceError as e:
+            logger.error(f"❌ AI Service error in stepwise generation: {e}")
+            await self.store_user_requirement({
+            "type": "stepwise_generation_failed",
+            "query": query,
+            "error": str(e)
+            })
+            return self._generate_emergency_fallback_steps(query, context, max_steps)
+        
+        except Exception as e:
+            logger.exception(f"❌ Unexpected error in stepwise generation: {e}")
+            return self._generate_emergency_fallback_steps(query, context, max_steps)
 
-        return final_steps
+
+    async def _generate_steps_with_ai_enhanced(self,query: str,context: str,available_images_json: str,max_steps: int,query_type: str) -> List[Dict[str, Any]]:
+
+    
+        style_guidance = {
+        "instructional": "step-by-step tutorial format with clear actions",
+        "troubleshooting": "diagnostic and solution-focused approach",
+        "explanatory": "educational format with clear explanations",
+        "informational": "structured information delivery"
+        }
+    
+        style = style_guidance.get(query_type, "clear and actionable format")
+    
+    # ✅ UPDATED PROMPT: No image_prompt requirement
+        prompt = f"""Provide clear, actionable step-by-step instructions based on the context below.
+
+Context:
+{context}
+
+Available Images (use ONLY if relevant):
+{available_images_json}
+
+User Question: {query}
+
+INSTRUCTIONS:
+
+1. Generate {max_steps} clear, specific steps in {style}
+
+2. For images:
+   - If a relevant image exists in Available Images, include it:
+     "image": {{"url": "exact_url_from_above", "alt": "description", "caption": "optional"}}
+   - If NO relevant image exists, OMIT the image field entirely
+   - Do NOT create image_prompt or placeholder descriptions
+   - Only include images that directly illustrate the step
+
+3. Each step must be specific, clear, and actionable
+
+4. Use appropriate step types:
+   - "action": For steps requiring user action
+   - "note": For warnings, tips, or cautions
+   - "info": For context or background
+
+5. Return ONLY valid JSON array (no markdown, no preamble):
+
+[
+  {{
+    "step_number": 1,
+    "text": "Clear step description",
+    "type": "action",
+    "image": {{"url": "https://...", "alt": "...", "caption": "..."}}
+  }},
+  {{
+    "step_number": 2,
+    "text": "Another step description",
+    "type": "action"
+  }}
+]
+
+IMPORTANT:
+- Steps WITHOUT matching images should not have an "image" field at all
+- Do NOT generate placeholder image descriptions
+- Only include real image URLs from the Available Images list
+"""
+
+        try:
+            raw_response = await self._call_chat_with_retries(
+            prompt=prompt,
+            max_tokens=2000,
+            temperature=0.15,
+            timeout=30
+            )
+        
+        # Parse JSON
+            steps = self._extract_json_from_response_robust(raw_response)
+        
+            if not steps:
+                logger.warning("⚠️ JSON extraction failed, trying text fallback")
+                steps = self._parse_text_to_steps_fallback(raw_response, max_steps)
+        
+        # ✅ CRITICAL: Clean steps - remove any image_prompt fields
+            cleaned_steps = []
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+            
+            # Remove image_prompt if present
+                if "image_prompt" in step:
+                    del step["image_prompt"]
+                    logger.debug(f"Removed image_prompt from step {step.get('step_number', '?')}")
+            
+            # Validate image field (must have real URL)
+                if "image" in step:
+                    img = step["image"]
+                
+                # If image is a dict, check URL
+                    if isinstance(img, dict):
+                        url = img.get("url", "")
+                        if not url or not url.startswith("http"):
+                        # Invalid URL - remove image field
+                            del step["image"]
+                            logger.debug(f"Removed invalid image from step {step.get('step_number', '?')}")
+                
+                # If image is a string, check if it's a URL
+                    elif isinstance(img, str):
+                        if not img.startswith("http"):
+                        # Not a URL - remove image field
+                            del step["image"]
+                            logger.debug(f"Removed non-URL image from step {step.get('step_number', '?')}")
+            
+                cleaned_steps.append(step)
+        
+            logger.info(
+            f"✅ Generated {len(cleaned_steps)} steps "
+            f"(real images only, no placeholders)"
+        )
+            return cleaned_steps
+        
+        except Exception as e:
+            logger.error(f"❌ AI step generation failed: {e}")
+        # Return basic steps without images
+            return self._create_fallback_steps_no_images(query, max_steps)
+        
+    def _create_fallback_steps_no_images(self, query: str, max_steps: int) -> List[Dict[str, Any]]:
+
+        logger.warning("⚠️ Creating fallback steps (text-only, no images)")
+    
+        return [
+            {
+            "step_number": 1,
+            "text": "Review the requirements and understand the task objective.",
+            "type": "info"
+            },
+            {
+            "step_number": 2,
+            "text": "Gather necessary information and resources before proceeding.",
+            "type": "action"
+            },
+            {
+            "step_number": 3,
+            "text": "Follow the documented procedure carefully, referring to official documentation.",
+            "type": "action"
+            },
+            {
+            "step_number": 4,
+            "text": "Verify results and confirm successful completion.",
+            "type": "action"
+            }
+        ][:max_steps]
+        
+    def _generate_auto_image_prompt(self, step_text: str, step_num: int, query_type: str) -> str:
+
+        text_lower = step_text.lower()
+    
+    # Action-based prompts
+        if "login" in text_lower or "sign in" in text_lower:
+            return f"Screenshot of login interface showing username and password input fields with 'Sign In' button clearly visible. Highlight the username field."
+    
+        if "click" in text_lower or "select" in text_lower:
+        # Try to extract what to click
+            words = step_text.split()
+            context = " ".join(words[:15])  # First 15 words for context
+            return f"UI screenshot showing {context} with the clickable element circled in red with an arrow pointing to it."
+    
+        if "navigate" in text_lower or "go to" in text_lower:
+            return f"Screenshot showing navigation menu or breadcrumb trail with the target location highlighted. Menu items should be clearly visible."
+    
+        if "configure" in text_lower or "settings" in text_lower:
+            return f"Configuration panel screenshot showing relevant settings options with checkboxes, dropdowns, or input fields clearly labeled."
+    
+        if "enter" in text_lower or "type" in text_lower:
+            return f"Form interface showing input field where data should be entered, with field label clearly visible and cursor positioned in the field."
+    
+        if "verify" in text_lower or "check" in text_lower:
+            return f"Screenshot showing verification or confirmation screen with success indicators (checkmarks, green highlights) or validation results displayed."
+    
+        if "download" in text_lower or "upload" in text_lower:
+            action = "download" if "download" in text_lower else "upload"
+            return f"Screenshot of {action} interface showing file selection dialog, progress indicator, or {action} button prominently displayed."
+    
+        if "create" in text_lower or "add" in text_lower:
+            return f"Screenshot of creation interface showing empty form or dialog with required fields, 'Create' or 'Add' button visible at bottom."
+    
+        if "delete" in text_lower or "remove" in text_lower:
+            return f"Screenshot showing item selected for deletion with confirmation dialog asking 'Are you sure?' and Yes/No buttons."
+    
+    # Query type based prompts
+        if query_type == "instructional":
+            return f"Step-by-step visual guide showing: {step_text[:70]}, with numbered markers and arrows indicating sequence."
+    
+        if query_type == "troubleshooting":
+            return f"Diagnostic screenshot highlighting the issue area with red border, and solution indicator with green checkmark showing correct state."
+    
+    # Generic fallback
+        context = step_text[:80].strip()
+        return f"Professional illustration demonstrating: {context}. Show clear labels, indicators, and visual hierarchy with appropriate colors and markers."
+    
+    def _create_fallback_steps_with_images(self, query: str, max_steps: int, query_type: str) -> List[Dict[str, Any]]:
+
+        logger.warning(f"⚠️ Creating fallback steps with guaranteed image prompts")
+    
+        fallback_steps = [
+        {
+            "step_number": 1,
+            "text": "Review the requirements and understand the task objective.",
+            "type": "info",
+            "image_prompt": "Flowchart or checklist showing the key requirements and objectives to accomplish, with checkboxes for each item."
+        },
+        {
+            "step_number": 2,
+            "text": "Gather all necessary information, credentials, and resources before proceeding.",
+            "type": "action",
+            "image_prompt": "Dashboard screenshot showing required resources panel with icons for credentials, documentation, and tools. Each item has a status indicator (ready/pending)."
+        },
+        {
+            "step_number": 3,
+            "text": "Follow the documented procedure carefully, referring to official documentation if needed.",
+            "type": "action",
+            "image_prompt": "Split-screen view showing documentation panel on left with step-by-step instructions, and implementation interface on right with current step highlighted."
+        },
+        {
+            "step_number": 4,
+            "text": "Verify the results and confirm successful completion of all steps.",
+            "type": "action",
+            "image_prompt": "Success confirmation screen showing green checkmarks for completed steps, with summary of results and 'Task Complete' banner at top."
+        }
+    ]
+    
+        return fallback_steps[:max_steps]
+
+    def _extract_json_from_response_robust(self, response: str) -> List[Dict[str, Any]]:
+    
+    
+        if not response or not response.strip():
+            return []
+    
+    # Strategy 1: Direct JSON parse
+        try:
+            data = json.loads(response)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+            if isinstance(data, dict) and "steps" in data:
+                return data["steps"] if isinstance(data["steps"], list) else []
+        except json.JSONDecodeError:
+            pass
+    
+    
+        cleaned = re.sub(r'```(?:json)?\s*', '', response)
+        cleaned = cleaned.strip()
+        try:
+            data = json.loads(cleaned)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        except json.JSONDecodeError:
+            pass
+    
+    # Strategy 3: Extract JSON array pattern using regex
+        json_array_pattern = r'\[\s*\{.*?\}\s*\]'
+        match = re.search(json_array_pattern, response, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                if isinstance(data, list):
+                    return [item for item in data if isinstance(item, dict)]
+            except json.JSONDecodeError:
+                pass
+    
+    # Strategy 4: Fix common JSON issues (trailing commas, etc.)
+        try:
+            fixed = re.sub(r',(\s*[}\]])', r'\1', cleaned)
+            fixed = fixed.replace("'", '"')
+            data = json.loads(fixed)
+            if isinstance(data, list):
+                return [item for item in data if isinstance(item, dict)]
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            objects = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response)
+            steps = []
+            for obj_str in objects:
+                try:
+                    obj = json.loads(obj_str)
+                    if isinstance(obj, dict) and "text" in obj:
+                        steps.append(obj)
+                except Exception:
+                    continue
+            if steps:
+                return steps
+        except Exception:
+            pass
+    
+        logger.warning("❌ All JSON extraction strategies failed")
+        return []
+
+
+    def _parse_text_to_steps_fallback(self, text: str, max_steps: int) -> List[Dict[str, Any]]:
+    
+        steps = []
+        lines = text.split('\n')
+    
+    # Multiple patterns to catch different step formats
+        step_patterns = [
+        r'^(?:Step\s*)?(\d+)[\.\):\-]\s*(.+)',  # "Step 1." or "1." or "1:"
+        r'^\s*[-*•]\s*(.+)',  # Bullet points
+        r'^\s*\[(\d+)\]\s*(.+)',  # "[1] Step text"
+        ]
+    
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 10:
+                continue
+        
+            matched = False
+            for pattern in step_patterns:
+                match = re.match(pattern, line, re.IGNORECASE)
+                if match:
+                    if len(match.groups()) == 2:
+                        step_num, text = match.groups()
+                        if text and len(text.strip()) > 5:
+                            steps.append({
+                            "step_number": int(step_num) if step_num.isdigit() else len(steps) + 1,
+                            "text": text.strip(),
+                            "type": "action"
+                            })
+                            matched = True
+                            break
+                    else:
+                        text = match.group(1)
+                        if text and len(text.strip()) > 5:
+                            steps.append({
+                            "step_number": len(steps) + 1,
+                            "text": text.strip(),
+                            "type": "action"
+                            })
+                            matched = True
+                            break
+        
+        # If no pattern matched but line is substantial, add it
+            if not matched and len(line) > 20 and len(steps) < max_steps:
+                steps.append({
+                    "step_number": len(steps) + 1,
+                    "text": line,
+                    "type": "info"
+                })
+        
+            if len(steps) >= max_steps:
+                break
+    
+        return steps
+
+
+    def _validate_and_normalize_steps_enhanced(self,steps: List[Dict[str, Any]],max_steps: int) -> List[Dict[str, Any]]:
+        
+        validated = []
+    
+        for idx, step in enumerate(steps[:max_steps], 1):
+            if not isinstance(step, dict):
+                logger.debug(f"Skipping non-dict step at index {idx}")
+                continue
+        
+        # Extract and validate text
+            text = step.get("text", "").strip()
+            if not text or len(text) < 5:
+                logger.debug(f"Skipping step {idx} with insufficient text")
+                continue
+        
+        # Build normalized step
+            normalized = {
+            "step_number": step.get("step_number", idx),
+            "text": text,
+            "type": step.get("type", "action")
+        }
+        
+        # Handle image field (URL-based) - multiple possible formats
+            if "image" in step:
+                if isinstance(step["image"], dict) and "url" in step["image"]:
+                    normalized["image"] = {
+                    "url": step["image"]["url"],
+                    "alt": step["image"].get("alt", "Step illustration"),
+                    "caption": step["image"].get("caption", "")
+                }
+                elif isinstance(step["image"], str) and step["image"].startswith("http"):
+                    normalized["image"] = {
+                        "url": step["image"],
+                        "alt": "Step illustration",
+                        "caption": ""
+                    }
+            elif "image_url" in step and isinstance(step["image_url"], str):
+                normalized["image"] = {
+                    "url": step["image_url"],
+                    "alt": "Step illustration",
+                    "caption": ""
+                }
+        
+        # Handle image_prompt field
+            if "image_prompt" in step and isinstance(step["image_prompt"], str):
+                prompt = step["image_prompt"].strip()
+                if prompt:
+                    normalized["image_prompt"] = prompt
+        
+            validated.append(normalized)
+    
+    # Ensure at least one step exists
+        if not validated:
+            validated.append({
+            "step_number": 1,
+            "text": "Please refer to the provided context for detailed information.",
+            "type": "info"
+            })
+    
+        return validated
+
+
+    def _ensure_image_prompts_for_openwebui(self, steps: List[Dict[str, Any]],query_type: str) -> List[Dict[str, Any]]:
+
+        for step in steps:
+        # Skip if already has image_prompt
+            if "image_prompt" in step and step["image_prompt"]:
+                continue
+        
+            text = step.get("text", "")
+            step_type = step.get("type", "action")
+            text_lower = text.lower()
+        
+        # Get appropriate style for this query type
+            style = self.image_styles.get(query_type, self.image_styles["instructional"])
+        
+        # Generate contextual image prompt based on content keywords
+            if "login" in text_lower or "sign in" in text_lower:
+                prompt = f"Screenshot of login interface with username and password fields clearly visible. {style}"
+        
+            elif any(word in text_lower for word in ["click", "select", "choose", "press", "tap"]):
+            # Extract what to click if possible
+                button_match = re.search(r'(?:click|select|choose|press|tap)\s+(?:the\s+)?["\']?([^"\'.,]+)["\']?', text_lower)
+                target = button_match.group(1) if button_match else "the button"
+                prompt = f"UI screenshot with '{target}' highlighted and clearly indicated. {style}"
+        
+            elif "navigate" in text_lower or "go to" in text_lower or "open" in text_lower:
+                location_match = re.search(r'(?:navigate to|go to|open)\s+(?:the\s+)?["\']?([^"\'.,]+)["\']?', text_lower)
+                location = location_match.group(1) if location_match else "the target location"
+                prompt = f"Screenshot showing navigation path to '{location}' with menu items visible. {style}"
+        
+            elif "configure" in text_lower or "setting" in text_lower or "option" in text_lower:
+                prompt = f"Configuration panel screenshot showing relevant settings and options. {style}"
+        
+            elif "verify" in text_lower or "check" in text_lower or "confirm" in text_lower:
+                prompt = f"Screenshot showing verification or confirmation screen with results visible. {style}"
+        
+            elif "download" in text_lower or "upload" in text_lower:
+                action = "download" if "download" in text_lower else "upload"
+                prompt = f"Screenshot showing {action} interface with file selection dialog. {style}"
+        
+            elif "create" in text_lower or "add" in text_lower or "new" in text_lower:
+                prompt = f"Screenshot showing creation or addition interface with relevant fields. {style}"
+        
+            elif "delete" in text_lower or "remove" in text_lower:
+                rompt = f"Screenshot showing deletion confirmation dialog or remove option. {style}"
+        
+            elif "search" in text_lower or "find" in text_lower:
+                prompt = f"Screenshot showing search interface with search box and filters visible. {style}"
+        
+            elif "connect" in text_lower or "link" in text_lower or "integrate" in text_lower:
+                prompt = f"Diagram showing connection or integration process with clear flow arrows. {style}"
+        
+            elif "error" in text_lower or "warning" in text_lower or "alert" in text_lower:
+                prompt = f"Screenshot showing error message or warning dialog with details visible. {style}"
+        
+            elif "dashboard" in text_lower or "overview" in text_lower:
+                prompt = f"Screenshot of dashboard or overview page with key metrics visible. {style}"
+        
+            elif "report" in text_lower or "export" in text_lower:
+                prompt = f"Screenshot showing report generation or export interface. {style}"
+        
+            elif step_type == "note":
+                prompt = f"Warning or information icon with important notice highlighted. {style}"
+        
+            elif step_type == "info":
+                prompt = f"Informational diagram or illustration explaining the concept. {style}"
+        
+            else:
+            # Generic prompt based on the step text (first 80 chars)
+                context = text[:80].rstrip('.,!?')
+                prompt = f"Visual guide illustrating: {context}. {style}"
+        
+        # Ensure prompt is not too long (max 200 chars for practicality)
+            if len(prompt) > 200:
+                prompt = prompt[:197] + "..."
+        
+            step["image_prompt"] = prompt
+    
+        return steps
+
+
+    def _generate_emergency_fallback_steps(self,query: str,context: List[str],max_steps: int) -> List[Dict[str, Any]]:
+    
+    
+        logger.warning("⚠️ Using emergency fallback step generation")
+    
+        steps = []
+    
+    # Try to extract sentences from context
+        if context:
+            text_source = " ".join(context[:2])
+            sentences = [s.strip() for s in text_source.split(".") if len(s.strip()) > 10]
+        
+            for i, sentence in enumerate(sentences[:max_steps], 1):
+            # Generate contextual image prompt
+                sentence_lower = sentence.lower()
+                if "login" in sentence_lower:
+                    img_prompt = "Screenshot showing login interface"
+                elif any(word in sentence_lower for word in ["click", "select"]):
+                    img_prompt = "UI screenshot highlighting the relevant button"
+                elif "navigate" in sentence_lower:
+                    img_prompt = "Screenshot showing navigation menu"
+                else:
+                    img_prompt = f"Visual guide for: {sentence[:60]}"
+            
+                steps.append({
+                "step_number": i,
+                "text": sentence + ".",
+                "type": "info",
+                "image_prompt": img_prompt
+            })
+    
+    # If no context or too few steps, create from query
+        if not steps:
+            query_words = query.split()
+            if len(query_words) > 5:
+                steps.append({
+                "step_number": 1,
+                "text": f"Review the requirements: {query}",
+                "type": "info",
+                "image_prompt": f"Overview diagram for: {query[:60]}"
+            })
+                steps.append({
+                "step_number": 2,
+                "text": "Gather necessary information and resources.",
+                "type": "action",
+                "image_prompt": "Checklist illustration showing required items"
+                })
+                steps.append({
+                "step_number": 3,
+                "text": "Follow the documented procedure carefully.",
+                "type": "action",
+                "image_prompt": "Step-by-step workflow diagram"
+                })
+            else:
+                steps.append({
+                "step_number": 1,
+                "text": f"To accomplish: {query}",
+                "type": "info",
+                "image_prompt": f"Illustration for: {query[:60]}"
+            })
+    
+    # Ensure we have at least one step
+        if not steps:
+            steps.append({
+            "step_number": 1,
+            "text": "Refer to the documentation for detailed instructions.",
+            "type": "info",
+            "image_prompt": "Documentation reference icon with book illustration"
+            })
+    
+        return steps[:max_steps]
 
     async def generate_summary(self, text: str, max_sentences: int = 3, max_chars: int = 600) -> str:
         """Generate concise, informative summary"""

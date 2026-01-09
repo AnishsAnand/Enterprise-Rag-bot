@@ -438,96 +438,348 @@ class WebScraperService:
         return links
 
     def _extract_images(self, base_url: str, soup: BeautifulSoup) -> List[Dict[str, Any]]:
-        """
-        Extract images with de-duplication, context classification, CSS background support,
-        and a 'text' field describing the image for semantic matching in vector databases.
-        
-        This method is optimized for RAG systems using Milvus/ChromaDB.
-        """
+
         images: List[Dict[str, Any]] = []
         seen_urls: set = set()
+    
+        logger.info(f"🖼️  Starting image extraction from: {base_url}")
 
         def _add_image(rec: Dict[str, Any]):
-            """Helper to add unique images"""
+        
             if not rec or not rec.get("url"):
                 return
+        
             url = rec["url"]
+        
+        # Skip duplicates
             if url in seen_urls:
                 return
+        
+        # Validate image URL
             if not self._is_valid_image_url(url):
+                logger.debug(f"Invalid image URL filtered: {url[:80]}")
                 return
-            seen_urls.add(url)
-            images.append(rec)
+        
+        # ✅ CRITICAL: Ensure absolute URL
+            try:
+                from urllib.parse import urljoin, urlparse
+                absolute_url = urljoin(base_url, url)
+                parsed = urlparse(absolute_url)
+            
+            # Must have scheme and netloc
+                if not parsed.scheme or not parsed.netloc:
+                    logger.debug(f"Invalid URL structure: {url}")
+                    return
+            
+            # Update record with absolute URL
+                rec["url"] = absolute_url
+                rec["source_url"] = base_url
+            
+                seen_urls.add(absolute_url)
+                images.append(rec)
+            
+                logger.debug(f"✅ Added image: {absolute_url[:80]}")
+            
+            except Exception as e:
+                logger.debug(f"Failed to process URL {url}: {e}")
+                return
 
-        # Extract from <img> tags
+    # =========================================================================
+    # 1. Extract from <img> tags (most common)
+    # =========================================================================
         for img in soup.find_all("img"):
-            rec = self._process_image_tag(base_url, img, seen_urls=None)
+            rec = self._process_image_tag_enhanced(base_url, img)
             if rec:
+            # Enrich with context
                 rec = self._enrich_image_with_context(rec, img, soup, base_url)
                 _add_image(rec)
 
-        # Extract from <figure> tags
+    # =========================================================================
+    # 2. Extract from <figure> tags (often important images with captions)
+    # =========================================================================
         for figure in soup.find_all("figure"):
             img = figure.find("img")
             if not img:
                 continue
-            rec = self._process_image_tag(base_url, img, seen_urls=None)
+        
+            rec = self._process_image_tag_enhanced(base_url, img)
             if rec:
+            # Extract caption from figcaption
                 caption_tag = figure.find("figcaption")
                 if caption_tag:
-                    rec["caption"] = caption_tag.get_text(strip=True)
+                    caption_text = caption_tag.get_text(strip=True)
+                    rec["caption"] = caption_text
+                # Prepend caption to context text
+                    existing_text = rec.get("text", "")
+                    rec["text"] = f"{caption_text} | {existing_text}" if existing_text else caption_text
+            
                 rec = self._enrich_image_with_context(rec, img, soup, base_url)
                 _add_image(rec)
 
-        # Extract CSS background images
+    # =========================================================================
+    # 3. Extract from <picture> elements (responsive images)
+    # =========================================================================
+        for picture in soup.find_all("picture"):
+        # Try to get the largest/best quality source
+            sources = picture.find_all("source")
+            best_url = None
+        
+            for source in sources:
+                srcset = source.get("srcset", "")
+                if srcset:
+                # Parse srcset and get last (usually largest)
+                    candidates = []
+                    for item in srcset.split(","):
+                        parts = item.strip().split()
+                        if parts:
+                            candidates.append(parts[0])
+                    if candidates:
+                        best_url = candidates[-1]
+                        break
+        
+        # Fallback to img tag inside picture
+            if not best_url:
+                img = picture.find("img")
+                if img:
+                    best_url = img.get("src") or img.get("data-src")
+        
+            if best_url:
+                rec = {
+                "url": urljoin(base_url, best_url),
+                "alt": picture.find("img").get("alt", "") if picture.find("img") else "",
+                "type": "responsive",
+                "class": ""
+                }
+                rec = self._enrich_image_with_context(rec, picture, soup, base_url)
+                _add_image(rec)
+
+    # =========================================================================
+    # 4. Extract CSS background images (sometimes important visuals)
+    # =========================================================================
         for element in soup.find_all(attrs={"style": True}):
             style = element.get("style", "")
             if "background-image" in style:
-                matches = re.findall(r'background-image:\s*url\(["\']?([^"\']+)["\']?\)', style, flags=re.IGNORECASE)
+                matches = re.findall(
+                r'background-image:\s*url\(["\']?([^"\']+)["\']?\)', 
+                style, 
+                flags=re.IGNORECASE
+                )
                 for match in matches:
                     full_url = urljoin(base_url, match)
-                    rec = {"url": full_url, "alt": "background image", "type": "background", "class": ""}
+                    rec = {
+                    "url": full_url,
+                    "alt": "background image",
+                    "type": "background",
+                    "class": ""
+                    }
                     rec = self._enrich_image_with_context(rec, element, soup, base_url)
                     _add_image(rec)
 
-        return images[:40]  # Limit to 40 images per page
+    # =========================================================================
+    # 5. Quality filtering and ranking
+    # =========================================================================
+        filtered = self._filter_and_rank_images(images)
+    
+        logger.info(
+        f"✅ Extracted {len(filtered)} quality images from {base_url} "
+        f"(filtered from {len(images)} total)"
+    )
+    
+    # Log sample for debugging
+        if filtered:
+            logger.debug(f"Sample image: {filtered[0].get('url', 'N/A')[:80]}")
+    
+        return filtered[:40]   # Limit to 40 images per page
+    
+    
 
-    def _process_image_tag(self, base_url: str, img: Tag, seen_urls: Optional[set]) -> Optional[Dict[str, Any]]:
-        """Process a single image tag and extract metadata"""
-        img_url = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or img.get("data-srcset")
-        if not img_url and img.get("srcset"):
-            srcset = img.get("srcset")
-            candidates = [c.strip().split(" ")[0] for c in srcset.split(",") if c.strip()]
-            if candidates:
-                img_url = candidates[-1]
+    def _process_image_tag_enhanced(self, base_url: str, img: Tag) -> Optional[Dict[str, Any]]:
+
+        img_url = None
+    
+    # Priority order for finding image URL
+        url_attributes = [
+        "src",              # Standard
+        "data-src",         # Lazy loading
+        "data-lazy-src",    # Lazy loading variant
+        "data-original",    # Lazy loading variant
+        "data-srcset",      # Responsive variant
+        "srcset"            # Responsive standard
+        ]
+    
+    # Try each attribute
+        for attr in url_attributes:
+            value = img.get(attr)
+            if value:
+            # Handle srcset (comma-separated list)
+                if "srcset" in attr.lower():
+                    candidates = []
+                    for item in str(value).split(","):
+                        parts = item.strip().split()
+                        if parts:
+                            candidates.append(parts[0])
+                    if candidates:
+                        img_url = candidates[-1]  # Get largest
+                        break
+                else:
+                    img_url = value
+                    break
+    
         if not img_url:
             return None
 
-        full_url = urljoin(base_url, img_url)
-        if seen_urls is not None and full_url in seen_urls:
-            return None
-
+    # Extract metadata
         alt_text = (img.get("alt") or "").strip()
         title = (img.get("title") or "").strip()
         img_class = " ".join(img.get("class", [])) if img.get("class") else ""
+    
+    # Get dimensions
+        width = img.get("width")
+        height = img.get("height")
 
-        # Classify image type
-        img_type = "content"
-        lc = img_class.lower()
-        la = alt_text.lower() if alt_text else ""
-        if any(k in lc for k in ("logo", "icon", "avatar")):
-            img_type = "logo/icon"
-        elif any(k in lc for k in ("banner", "hero")):
-            img_type = "banner"
-        elif any(k in la for k in ("diagram", "chart", "graph")):
-            img_type = "diagram"
+    # Classify image type
+        img_type = self._classify_image_type(img_class, alt_text, img_url)
 
         return {
-            "url": full_url,
-            "alt": alt_text or title,
-            "type": img_type,
-            "class": img_class,
+        "url": img_url,  # Will be converted to absolute in _add_image
+        "alt": alt_text or title or "",
+        "type": img_type,
+        "class": img_class,
+        "width": width,
+        "height": height,
         }
+
+    
+    def _classify_image_type(self, img_class: str, alt_text: str, url: str) -> str:
+        lc = img_class.lower()
+        la = alt_text.lower() if alt_text else ""
+        lu = url.lower()
+    
+    # Technical/instructional (highest priority for RAG)
+        if any(k in la for k in ("diagram", "chart", "graph", "flow", "architecture", "topology")):
+            return "diagram"
+        if any(k in la for k in ("screenshot", "screen shot", "interface", "ui", "panel", "dashboard")):
+            return "screenshot"
+        if any(k in lu for k in ("diagram", "chart", "graph", "screenshot", "tutorial")):
+            return "diagram"
+    
+    # Visual content
+        if any(k in la for k in ("illustration", "infographic", "drawing", "visual")):
+            return "illustration"
+        if any(k in la for k in ("photo", "image", "picture")):
+            return "photo"
+    
+    # Branding/decorative (lower priority)
+        if any(k in lc for k in ("logo", "icon", "avatar", "brand")):
+            return "logo"
+        if any(k in lc for k in ("banner", "hero", "header", "promo")):
+            return "banner"
+    
+        return "content"
+
+    
+
+    def _generate_image_description(self, alt: str, img_type: str, rec: Dict[str, Any]) -> str:
+
+    # Use alt text if descriptive enough
+        if alt and len(alt) > 15:
+            return alt
+    
+    # Generate based on type
+        type_descriptions = {
+        "diagram": "Technical diagram or flowchart showing system architecture or process flow",
+        "screenshot": "Screenshot of user interface or application screen",
+        "illustration": "Illustration or visual graphic explaining a concept",
+        "photo": "Photograph or real-world image",
+        "logo": "Logo or branding icon",
+        "banner": "Banner or promotional header image",
+        "content": "Content image providing visual context"
+        }
+    
+        base_desc = type_descriptions.get(img_type, "Visual content image")
+    
+    # Enhance with URL hints
+        url = rec.get("url", "")
+        if "login" in url.lower():
+            return f"{base_desc} - Login or authentication related"
+        if "dashboard" in url.lower():
+            return f"{base_desc} - Dashboard or overview screen"
+        if "config" in url.lower() or "settings" in url.lower():
+            return f"{base_desc} - Configuration or settings interface"
+    
+        return base_desc
+    
+    def _filter_and_rank_images(self, images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+
+        scored_images = []
+    
+        for img in images:
+            score = 0
+        
+        # Factor 1: Type (0-40 points)
+            type_scores = {
+            "diagram": 40,
+            "screenshot": 35,
+            "illustration": 30,
+            "photo": 20,
+            "content": 15,
+            "banner": 5,
+            "logo": 0
+        }
+            score += type_scores.get(img.get("type", "content"), 15)
+        
+        # Factor 2: Alt text (0-25 points)
+            alt = img.get("alt", "")
+            if alt:
+                alt_len = len(alt)
+                if alt_len > 50:
+                    score += 25
+                elif alt_len > 20:
+                    score += 15
+                elif alt_len > 5:
+                    score += 10
+        
+        # Factor 3: Context (0-20 points)
+            text = img.get("text", "")
+            if text:
+                text_len = len(text)
+                if text_len > 200:
+                    score += 20
+                elif text_len > 100:
+                    score += 15
+                elif text_len > 50:
+                    score += 10
+        
+        # Factor 4: Dimensions (0-10 points)
+            try:
+                width = int(img.get("width", 0))
+                height = int(img.get("height", 0))
+                if width > 600 and height > 400:
+                    score += 10
+                elif width > 300 and height > 200:
+                    score += 5
+            except (ValueError, TypeError):
+                pass
+        
+        # Factor 5: URL quality (0-5 points)
+            url = img.get("url", "")
+            if any(kw in url.lower() for kw in ["screenshot", "diagram", "tutorial", "guide", "doc"]):
+                score += 5
+        
+            img["quality_score"] = score
+            scored_images.append(img)
+    
+    # Sort by score
+        scored_images.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+    
+    # Log top images for debugging
+        if scored_images:
+            logger.debug(
+                f"Top image: {scored_images[0].get('url', 'N/A')[:60]} "
+                f"(score: {scored_images[0].get('quality_score', 0)})"
+            )
+    
+        return scored_images
 
     def _enrich_image_with_context(self, rec: Dict[str, Any], tag_node: Tag, soup: BeautifulSoup, base_url: str) -> Dict[str, Any]:
         """
@@ -624,17 +876,31 @@ class WebScraperService:
         return rec
 
     def _is_valid_image_url(self, url: str) -> bool:
-        """Validate if URL is a proper image"""
-        if not url:
+ 
+        if not url or not isinstance(url, str):
             return False
+    
         lower = url.lower()
+    
+    # Filter data URIs
         if lower.startswith("data:"):
             return False
-        if any(skip in lower for skip in ("1x1", "pixel", "transparent", "spacer", "blank")):
+    
+    # Filter tracking pixels
+        if any(skip in lower for skip in ("1x1", "pixel", "transparent", "spacer", "blank", "empty")):
             return False
-        if (lower.endswith(".svg") or lower.endswith(".gif")) and ("icon" in lower or "logo" in lower):
+    
+    # Filter decorative icons
+        if (lower.endswith(".svg") or lower.endswith(".gif")):
+            if any(skip in lower for skip in ("icon", "logo", "sprite", "emoji")):
+                return False
+    
+    # Must have valid extension
+        valid_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg")
+        if not any(ext in lower for ext in valid_exts):
             return False
-        return any(ext in lower for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"))
+    
+        return True
 
     def _extract_tables(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
         """Extract tables from HTML"""

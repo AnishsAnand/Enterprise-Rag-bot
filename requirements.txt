@@ -47,7 +47,6 @@ langchain-openai==0.0.2
 langchain-community==0.0.10
 langgraph==0.0.20
 setuptools<81
-
 # PostgreSQL Vector Database Dependencies
 asyncpg>=0.29.0                    # PostgreSQL async driver
 psycopg2-binary>=2.9.9            # PostgreSQL sync driver (for migrations)

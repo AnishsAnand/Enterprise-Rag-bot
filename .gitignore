@@ -36,3 +36,7 @@ open-webui-data/
 redis_data/
 outputs/
 minio_data/
+
+test_connection.py
+test_real_images.py
+test_postgres.py 
