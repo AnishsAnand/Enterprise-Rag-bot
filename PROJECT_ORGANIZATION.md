@@ -28,17 +28,19 @@ Enterprise-Rag-bot/
 │
 ├── 🔧 misc/                        # Miscellaneous support files
 │   ├── README.md                  # Misc files documentation
-│   ├── docker/                    # Docker configurations
+│   ├── docker/                    # Docker Compose configurations
 │   │   ├── docker-compose.yml
-│   │   ├── docker-compose.openwebui.yml
-│   │   └── Dockerfile
-│   ├── config/                    # Configuration files
-│   │   ├── default.conf
-│   │   ├── supervisord.conf
-│   │   └── env.openwebui.template
+│   │   └── docker-compose.openwebui.yml
 │   └── scripts/                   # Utility scripts
 │       ├── start_with_openwebui.sh
 │       └── createcluster.ts
+│
+├── 🐳 docker/                      # Active service configs (used by Dockerfile)
+│   ├── supervisord.conf           # Process manager config
+│   ├── admin_default.conf         # Nginx for admin frontend (port 4200)
+│   ├── user_default.conf          # Nginx for user frontend (port 4201)
+│   ├── supervisord-user.conf      # User-only backend config
+│   └── env.openwebui.template     # Environment template
 │
 ├── 🐍 app/                         # Backend application (Python/FastAPI)
 │   ├── agents/                    # Multi-agent system
@@ -80,10 +82,10 @@ Enterprise-Rag-bot/
 |----------|-------|----------|
 | Documentation | 39 files | `metadata/` |
 | Test Files | 11 files | `tests/` |
-| Docker Files | 3 files | `misc/docker/` |
-| Config Files | 3 files | `misc/config/` |
+| Docker Compose | 2 files | `misc/docker/` |
+| Service Configs | 5 files | `docker/` |
 | Scripts | 2 files | `misc/scripts/` |
-| **Total Organized** | **58 files** | **3 new directories** |
+| **Total Organized** | **59 files** | **Organized directories** |
 
 ### Directory Purposes
 
@@ -121,12 +123,19 @@ Enterprise-Rag-bot/
 - ✅ Separate from production code
 
 #### 🔧 `misc/` - Support Files
-**Purpose**: Configuration, deployment, and utility files
+**Purpose**: Docker Compose configurations and utility scripts
 
 **Subdirectories**:
-- `docker/` - Container orchestration
-- `config/` - Service configurations
+- `docker/` - Docker Compose files for orchestration
 - `scripts/` - Automation utilities
+
+#### 🐳 `docker/` - Service Configs
+**Purpose**: Active configuration files used by the main Dockerfile
+
+**Contents**:
+- Supervisord process manager configs
+- Nginx configs for admin/user frontends
+- Environment templates
 
 **Benefits**:
 - ✅ Clean root directory
@@ -198,7 +207,7 @@ Enterprise-Rag-bot/
 | Find documentation | [`metadata/INDEX.md`](metadata/INDEX.md) |
 | Run tests | [`tests/README.md`](tests/README.md) |
 | Deploy with Docker | [`misc/docker/`](misc/docker/) |
-| Configure services | [`misc/config/`](misc/config/) |
+| Configure services | [`docker/`](docker/) |
 | Use utility scripts | [`misc/scripts/`](misc/scripts/) |
 | Understand architecture | [`metadata/ARCHITECTURE.md`](metadata/ARCHITECTURE.md) |
 | Learn about agents | [`metadata/agents/README.md`](metadata/agents/README.md) |

@@ -3,7 +3,7 @@ import asyncio, uuid, logging
 from typing import Dict, Any, Optional
 from datetime import datetime
 from app.services.ai_service import ai_service
-from app.services.milvus_service import milvus_service
+from app.services.postgres_service import postgres_service
 from app.services.scraper_service import scraper_service
 from app.services.file_service import file_service
 from app.services.image_service import image_service
@@ -34,7 +34,7 @@ class OrchestratorService:
 
     async def _handle_pdf_generation(self, task_id: str, query: str) -> Dict[str, Any]:
         """Generate a PDF document based on RAG knowledge."""
-        results = await milvus_service.search_documents(query, n_results=10)
+        results = await postgres_service.search_documents(query, n_results=10)
         context = [r["content"] for r in results if r.get("content")]
         ai_summary = await ai_service.generate_summary("\n".join(context))
         file_bytes = await file_service.generate_pdf(ai_summary, title=f"Report - {query}")
@@ -69,7 +69,7 @@ class OrchestratorService:
 
         url = urls[0]
         result = await scraper_service.scrape_url(url, {"extract_text": True, "extract_images": True})
-        stored = await milvus_service.store_documents(result["content"]["rag_documents"])
+        stored = await postgres_service.store_documents(result["content"]["rag_documents"])
         return {
             "type": "scrape",
             "task_id": task_id,

@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from app.api.routes import rag_widget
 from app.api.routes.auth import router as auth_router
 from app.core.database import init_db
-from app.services.milvus_service import milvus_service
+from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 
 # ActionBot import (we will instantiate using the existing ai_service)
@@ -297,7 +297,7 @@ async def lifespan(app_inst: FastAPI):
 
     # --- Milvus
     try:
-        await milvus_service.initialize()
+        await postgres_service.initialize()
         logger.info("✅ Milvus connected successfully")
     except Exception as e:
         logger.exception("Milvus initialization failed (continuing): %s", e)
@@ -343,7 +343,7 @@ async def lifespan(app_inst: FastAPI):
     except Exception as e:
         logger.warning("⚠️ Error shutting down ActionAgentManager: %s", e)
     try:
-        await milvus_service.close()
+        await postgres_service.close()
         logger.info("✅ Milvus connection closed")
     except Exception as e:
         logger.warning("⚠️ Error closing Milvus: %s", e)
@@ -404,7 +404,7 @@ async def health_check():
         ok = True
         doc_count = 0
         try:
-            stats = await milvus_service.get_collection_stats()
+            stats = await postgres_service.get_collection_stats()
             doc_count = stats.get("document_count", 0) if isinstance(stats, dict) else 0
         except Exception:
             ok = False

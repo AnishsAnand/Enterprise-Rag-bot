@@ -428,8 +428,8 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(auth_router)
 
 if hasattr(rag_widget, "router"):
-    app.include_router(rag_widget.router)
-    logger.info("✅ RAG widget router included")
+    app.include_router(rag_widget.router, prefix="/api")
+    logger.info("✅ RAG widget router included at /api")
 else:
     logger.warning("⚠️ rag_widget module has no 'router' attribute")
 
@@ -835,6 +835,15 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
             status_code=500,
             detail="An error occurred processing your request. Please try again."
         )
+
+
+# ------------------------ Metrics Endpoint ------------------------
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    from fastapi.responses import Response
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 # ------------------------ Health Check ------------------------

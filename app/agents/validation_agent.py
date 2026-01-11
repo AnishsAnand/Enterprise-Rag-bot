@@ -350,7 +350,7 @@ Instructions:
 1. If user mentions SPECIFIC data center(s), return them comma-separated:
    - Single: "delhi" → LOCATION: Delhi
    - Multiple: "delhi and bengaluru" → LOCATION: Delhi, Bengaluru
-2. If user says "all", "all clusters", "list all", "show all", etc. → return "all"
+2. If user says "all", "all dc", "all datacenters", "all locations", "in all", etc. → return "all"
 3. If no specific location mentioned and no "all" → return "none"
 
 Examples:
@@ -360,6 +360,9 @@ Examples:
 - "show all" → LOCATION: all
 - "list clusters" → LOCATION: none
 - "clusters in mumbai and chennai" → LOCATION: Mumbai-BKC, Chennai-AMB
+- "list container registry in all dc" → LOCATION: all
+- "show kafka in all locations" → LOCATION: all
+- "vms in all datacenters" → LOCATION: all
 
 Respond with ONLY ONE of these formats:
 - LOCATION: Delhi
@@ -412,15 +415,21 @@ Available Data Centers (from API):
 User's Response: "{user_text}"
 
 Instructions:
-1. If user says "all" or "all of them" → return ALL IDs
-2. If user mentions MULTIPLE locations (comma-separated or "and"), match ALL of them:
-   - "Delhi, Bengaluru" → match both Delhi (11) and Bengaluru (12)
-   - "delhi and mumbai" → match Delhi (11) and Mumbai-BKC (162)
-3. Match user input to the correct data center (handle typos, abbreviations, spaces/hyphens):
-   - "delhi" → Delhi (ID: 11)
-   - "chennai amb" → Chennai-AMB (ID: 204)
-   - "mumbai bkc" or "mumbai" → Mumbai-BKC (ID: 162)
-   - "bengaluru" or "bangalore" or "blr" → Bengaluru (ID: 12)
+1. CRITICAL: If the user's response does NOT contain any location/city/datacenter name, return {{"matched": false}}
+   - "list clusters" → NO location mentioned → {{"matched": false}}
+   - "show me clusters" → NO location mentioned → {{"matched": false}}
+   - "what clusters are there" → NO location mentioned → {{"matched": false}}
+2. If user says "all" or "all of them" or "every" or "everywhere" → return ALL IDs
+3. If user mentions MULTIPLE locations (comma-separated or "and"), match ALL of them:
+   - "Delhi, Bengaluru" → match both Delhi and Bengaluru
+   - "delhi and mumbai" → match Delhi and Mumbai-BKC
+4. Match user input to the correct data center (handle typos, abbreviations, spaces/hyphens):
+   - "delhi" → Delhi
+   - "chennai amb" → Chennai-AMB
+   - "mumbai bkc" or "mumbai" → Mumbai-BKC
+   - "bengaluru" or "bangalore" or "blr" → Bengaluru
+
+IMPORTANT: Only return matched=true if the user EXPLICITLY mentions a location name. Generic queries like "list clusters" or "show me" do NOT match any location.
 
 Respond in JSON format ONLY:
 {{
@@ -436,7 +445,7 @@ For multiple locations:
   "matched_names": ["Delhi", "Bengaluru"]
 }}
 
-If no match:
+If NO location is mentioned in user's response:
 {{
   "matched": false
 }}"""
@@ -530,11 +539,12 @@ If no match:
         """
         user_lower = user_text.lower().strip()
         
-        # Check for "all"
-        if user_lower in ["all", "all of them", "all datacenters", "all endpoints"]:
+        # Check for "all" - be more flexible
+        all_keywords = ["all", "all of them", "all datacenters", "all endpoints", "all dc", "all locations", "everywhere"]
+        if any(keyword in user_lower for keyword in all_keywords):
             matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
             matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
-            logger.info(f"✅ Pattern matched 'all' to {len(matched_ids)} endpoints")
+            logger.info(f"✅ Pattern matched 'all' keywords to {len(matched_ids)} endpoints")
             return {
                 "matched": True,
                 "all": True,
@@ -621,6 +631,14 @@ If no match:
                 }
 
             # STEP 3: USE INTELLIGENT TOOLS for parameter collection
+            
+            # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
+            # This must be checked BEFORE missing_params check because cluster creation
+            # has its own internal workflow that doesn't rely on schema-defined required params
+            if state.operation == "create" and state.resource_type == "k8s_cluster":
+                logger.info("🎯 Routing to customer cluster creation workflow")
+                return await self._handle_cluster_creation(input_text, state)
+            
             if state.missing_params:
                 # SPECIAL HANDLING FOR ENDPOINT LISTING (no user input needed - just fetch and display)
                 if state.operation == "list" and state.resource_type == "endpoint":
@@ -639,11 +657,6 @@ If no match:
                         "output": "Fetching available endpoints...",
                         "ready_to_execute": True
                     }
-                
-                # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
-                if state.operation == "create" and state.resource_type == "k8s_cluster":
-                    logger.info("🎯 Routing to customer cluster creation workflow")
-                    return await self._handle_cluster_creation(input_text, state)
                 
                 # SPECIAL HANDLING FOR OTHER CREATE OPERATIONS
                 # For create, we need to collect params in order: name → endpoint → other params
@@ -763,6 +776,30 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             # LLM extracted a location!
                             extracted_location = extraction_result.get("location", "")
                             logger.info(f"🤖 LLM extracted location: '{extracted_location}'")
+                            
+                            # SPECIAL CASE: If location is "all", immediately match all endpoints
+                            if extracted_location.lower().strip() == "all":
+                                logger.info(f"🌍 User requested ALL data centers!")
+                                matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
+                                matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
+                                
+                                # Add to state
+                                state.add_parameter("endpoints", matched_ids, is_valid=True)
+                                state.add_parameter("endpoint_names", matched_names, is_valid=True)
+                                
+                                # Persist state after parameter collection
+                                conversation_state_manager.update_session(state)
+                                
+                                # Check if ready to execute now that we've collected endpoints
+                                if state.is_ready_to_execute():
+                                    logger.info("✅ All parameters collected, ready to execute")
+                                    return {
+                                        "agent_name": self.agent_name,
+                                        "success": True,
+                                        "output": f"Great! Fetching data from all {len(matched_ids)} data centers...",
+                                        "ready_to_execute": True
+                                    }
+                            
                             text_to_match = extracted_location
                         else:
                             # No location in original query, use current input for matching
@@ -815,9 +852,12 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             # Multiple matches - ask for clarification
                             clarification = match_result.get("clarification_needed", "")
                             
-                            # Set status to COLLECTING_PARAMS
+                            # Set status to AWAITING_SELECTION - we need user to pick one
                             from app.agents.state.conversation_state import ConversationStatus
-                            state.status = ConversationStatus.COLLECTING_PARAMS
+                            state.status = ConversationStatus.AWAITING_SELECTION
+                            
+                            # Persist state so it's available for next request
+                            conversation_state_manager.update_session(state)
                             
                             return {
                                 "agent_name": self.agent_name,
@@ -833,10 +873,13 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                 options_list = "\n".join([f"- {opt['name']}" for opt in available_options])
                                 prompt = f"I found {len(available_options)} available data centers:\n{options_list}\n\nWhich one would you like? You can also say 'all'."
 
-                            # CRITICAL: Set status to COLLECTING_PARAMS so orchestrator knows to continue conversation
+                            # CRITICAL: Set status to AWAITING_SELECTION so orchestrator knows we're waiting for user selection
                             from app.agents.state.conversation_state import ConversationStatus
-                            state.status = ConversationStatus.COLLECTING_PARAMS
-                            logger.info(f"🔄 Set conversation status to COLLECTING_PARAMS for session {state.session_id}")
+                            state.status = ConversationStatus.AWAITING_SELECTION
+                            logger.info(f"🔄 Set conversation status to AWAITING_SELECTION for session {state.session_id}")
+                            
+                            # Persist state so it's available for next request
+                            conversation_state_manager.update_session(state)
 
                             return {
                                 "agent_name": self.agent_name,

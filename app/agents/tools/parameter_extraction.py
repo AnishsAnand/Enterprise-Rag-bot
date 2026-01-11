@@ -4,6 +4,7 @@ Parameter Extraction Tools - Reusable utilities for extracting and matching para
 
 import logging
 import json
+import re
 from typing import List, Dict, Any, Optional
 
 from app.services.ai_service import ai_service
@@ -41,52 +42,116 @@ class ParameterExtractor:
         try:
             logger.info(f"🔍 Matching user input: '{user_input}' against {len(available_options)} options")
             
-            # Format options for LLM
+            # Format options for LLM - INCLUDE IDs so LLM knows the correct ID to return
             formatted_options = "\n".join([
-                f"- {opt.get('name', opt.get('itemName', str(opt)))}" 
+                f"- ID: {opt.get('id')}, Name: {opt.get('name', opt.get('itemName', str(opt)))}" 
                 for opt in available_options
             ])
             
-            prompt = f"""The user was shown these options:
+            prompt = f"""You are an intelligent matching system. Match the user's input to the best option from the list.
+
+Available Options:
 {formatted_options}
 
-The user responded with: "{user_input}"
+User Input: "{user_input}"
 
-Match the user's response to the available options. Handle:
-- Exact matches (case-insensitive)
-- Partial matches (e.g., "delhi" matches "Delhi")
-- Multiple selections (e.g., "delhi, bengaluru" or "delhi and mumbai")
-- "all" means select all options
-- Typos and aliases
+CRITICAL MATCHING RULES:
+1. **Abbreviations**: Match abbreviations intelligently
+   - "Ind South" → "India South(Bengaluru)"
+   - "Ind North" → "India North(Delhi)"
+   - "Ind Central" → "India Central(GCCMumbai)" or "India Central(Mumbai-BK)"
+   - "Delhi" → "India North(Delhi)" or "India North(GCCDelhi)"
+   - "Bengaluru" or "Bangalore" or "BLR" → "India South(Bengaluru)"
+   - "Mumbai" or "Mum" → "India Central(Mumbai-BK)" or "India Central(GCCMumbai)" or "India East(Mumbai-DC3)"
+   - "Chennai" → "India South(Chennai-AMB)"
 
-Respond with ONLY valid JSON in this format:
-{{"matched": true, "matched_item": {{"id": ..., "name": "..."}}, "matched_ids": [...], "matched_names": [...]}}
+2. **Partial Word Matching**: Match any part of the option name
+   - "South" matches any option containing "South"
+   - "North" matches any option containing "North"
+   - "Bengaluru" matches "India South(Bengaluru)"
+   - "Delhi" matches "India North(Delhi)" or "India North(GCCDelhi)"
 
-OR if no match:
-{{"matched": false, "no_match": true}}
+3. **Case-Insensitive**: "ind south" = "Ind South" = "IND SOUTH"
 
-If "all" was requested:
-{{"matched": true, "all": true, "matched_ids": [...all ids...], "matched_names": [...all names...]}}
+4. **Word Order**: "South India" should match "India South"
 
-If multiple matches:
-{{"matched": true, "multiple": true, "matched_ids": [...], "matched_names": [...]}}
+5. **Common Aliases**:
+   - "BLR" = "Bengaluru" = "Bangalore"
+   - "DEL" = "Delhi"
+   - "MUM" = "Mumbai"
+   - "CHN" = "Chennai"
+
+6. **Multiple Selections**: Handle comma-separated or "and" separated inputs
+   - "delhi, bengaluru" → match both
+   - "delhi and mumbai" → match both
+
+7. **"all"**: If user says "all", select all options
+
+EXAMPLES:
+- User: "Ind South" → Match: "India South(Bengaluru)" (ID from list)
+- User: "Bengaluru" → Match: "India South(Bengaluru)" (ID from list)
+- User: "South" → Match: "India South(Bengaluru)" or "India South(Chennai-AMB)" (pick most common)
+- User: "delhi" → Match: "India North(Delhi)" (ID from list)
+- User: "mumbai" → Match: "India Central(Mumbai-BK)" (ID from list)
+
+YOU MUST:
+- Always return a match if there's ANY reasonable connection
+- Use the EXACT ID from the options list above
+- Return the FULL option name (not abbreviated)
+- If multiple options match, pick the most common/obvious one
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{{"matched": true, "matched_item": {{"id": <exact_id_from_list>, "name": "<full_name_from_list>"}}}}
+
+OR if truly no match:
+{{"matched": false}}
 """
             
+            # Use slightly higher temperature for more creative/intelligent matching
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=prompt,
-                temperature=0.0,
+                temperature=0.2,  # Slightly higher for better abbreviation handling
                 max_tokens=500
             )
             
-            # Clean response (remove markdown if present)
+            # Clean response (remove markdown, code blocks, explanations)
             response_text = llm_response.strip()
-            if response_text.startswith("```"):
-                response_text = response_text.split("\n", 1)[1]
-                if response_text.endswith("```"):
-                    response_text = response_text.rsplit("\n", 1)[0]
             
-            # Parse JSON
-            result = json.loads(response_text)
+            # Remove markdown code blocks
+            if response_text.startswith("```json"):
+                response_text = response_text.replace("```json", "").replace("```", "").strip()
+            elif response_text.startswith("```"):
+                response_text = response_text.split("```")[1].strip()
+                if response_text.startswith("json"):
+                    response_text = response_text[4:].strip()
+            
+            # Extract JSON if there's extra text
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(0)
+            
+            # Parse JSON with retry logic
+            result = None
+            try:
+                result = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                logger.warning(f"⚠️ First JSON parse failed: {e}, trying to extract JSON...")
+                # Try to find JSON object in the response
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', llm_response, re.DOTALL)
+                if json_match:
+                    try:
+                        result = json.loads(json_match.group(0))
+                        logger.info(f"✅ Successfully extracted JSON from response")
+                    except json.JSONDecodeError:
+                        logger.error(f"❌ Failed to parse JSON even after extraction: {llm_response[:200]}")
+                        return json.dumps({"matched": False, "error": "Invalid JSON response from LLM"}, indent=2)
+                else:
+                    logger.error(f"❌ No JSON found in response: {llm_response[:200]}")
+                    return json.dumps({"matched": False, "error": "No JSON found in LLM response"}, indent=2)
+            
+            if result is None:
+                logger.error(f"❌ Failed to parse JSON: {llm_response[:200]}")
+                return json.dumps({"matched": False, "error": "Failed to parse LLM response"}, indent=2)
             
             if result.get("matched"):
                 if result.get("all"):

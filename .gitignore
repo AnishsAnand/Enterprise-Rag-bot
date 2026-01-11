@@ -45,6 +45,20 @@ query
 temp/
 nginx/
 etcd_data/
+postgres_data/
+
+# Runtime directories
+logs/
+uploads/
+outputs/
+backups/
+
+# Build artifacts (should not be committed)
+angular-frontend/dist/
+user-frontend/dist/
+
+# Docker volumes
+*_data/
 backups/
 logs/
 ragbot.db 
@@ -53,3 +67,4 @@ public/
 ssl/
 styles/
 backend/
+app/config/resource_schema.json

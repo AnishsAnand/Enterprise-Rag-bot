@@ -21,6 +21,9 @@ class AgentManager:
     """
     Central manager for the multi-agent system.
     Handles agent initialization, coordination, and lifecycle management.
+    
+    Agent Flow:
+        User → Orchestrator → IntentAgent → ValidationAgent → ExecutionAgent → ResourceAgents → API
     """
     
     def __init__(self):

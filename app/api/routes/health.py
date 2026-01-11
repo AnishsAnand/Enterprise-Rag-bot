@@ -60,11 +60,12 @@ async def readiness_check():
     return JSONResponse(content=status, status_code=status_code)
 
 
-@router.get("/metrics")
+@router.get("/health/metrics")
 async def metrics_summary():
     """
     Quick metrics summary for monitoring systems.
     Returns key performance indicators.
+    Note: Prometheus metrics are at /metrics (root level)
     """
     health_data = await health_service.get_full_health_status()
     

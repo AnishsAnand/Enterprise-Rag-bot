@@ -724,31 +724,50 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     """Determine if query should be routed to agent manager."""
     from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
     
+    query_lower = query.lower().strip()
+    query_words = query_lower.split()
+    
     # Check if this is a continuation of an existing conversation
     existing_state = conversation_state_manager.get_session(session_id)
     
-    # Fallback: Check for recent active sessions if no state found
-    if not existing_state and len(query.split()) <= 3:
-        logger.info(f"🔍 No state for session {session_id}, checking for recent active sessions...")
+    # SHORT RESPONSES that are likely answers to agent questions
+    # These should ALWAYS route to agent if there's an active conversation
+    short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
+    is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
+    
+    # Check for recent active sessions - for short answers, be more aggressive
+    if not existing_state:
         recent_state = conversation_state_manager.get_most_recent_active_session()
-        if recent_state and recent_state.status == ConversationStatus.COLLECTING_PARAMS:
-            logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
+        if recent_state:
+            # For short answers, route to agent if there's ANY recent active session
+            if is_short_answer and recent_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+                logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
+                return True
+            # Also check if the recent state is waiting for endpoint selection
+            if recent_state.status == ConversationStatus.COLLECTING_PARAMS:
+                logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
+                return True
+    
+    # If existing conversation in parameter collection or awaiting selection state
+    if existing_state:
+        if existing_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+            logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
+            return True
+        # For short answers, also continue if conversation was recently active
+        if is_short_answer and existing_state.status in [ConversationStatus.COMPLETED, ConversationStatus.EXECUTING]:
+            # Check if this might be a follow-up filter request
+            logger.info(f"🔄 Short answer with recent completed conversation -> routing to agent")
             return True
     
-    # If existing conversation in parameter collection state
-    if existing_state and existing_state.status == ConversationStatus.COLLECTING_PARAMS:
-        logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
-        return True
-    
     # Check for resource/cluster operation keywords
-    query_lower = query.lower()
-    query_words = query_lower.split()
-    
     action_keywords = ["create", "make", "build", "deploy", "provision", "delete", 
-                      "remove", "update", "modify", "list", "show", "get", "view", "display"]
+                      "remove", "update", "modify", "list", "show", "get", "view", "display",
+                      "filter", "only", "just"]
     resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule", 
                         "load balancer", "database", "storage", "volume", "endpoint", 
-                        "endpoints", "datacenter", "datacenters"]
+                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka", 
+                        "gitlab", "registry", "postgres", "documentdb", "vm", "vms",
+                        "virtual machine", "version", "k8s version"]
     
     has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
     has_resource = any(keyword in query_lower for keyword in resource_keywords)
@@ -756,6 +775,13 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     # If keywords match, route to agent
     if has_action and has_resource:
         logger.info(f"✅ Action + Resource keywords detected")
+        return True
+    
+    # Check for filter/refinement queries on previous results
+    filter_keywords = ["only", "just", "filter", "show me", "28", "1.28", "version", "active", "running"]
+    is_filter_query = any(kw in query_lower for kw in filter_keywords)
+    if is_filter_query and existing_state:
+        logger.info(f"🔍 Filter query detected with existing state -> routing to agent")
         return True
     
     # Use LLM to understand intent if keywords don't match
@@ -867,11 +893,15 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
         ai_service=ai_service
     )
     
+    # Get user roles from request or default to admin for full access
+    # In production, this should come from authentication/authorization
+    user_roles = getattr(request, 'user_roles', None) or ["admin", "developer", "viewer"]
+    
     agent_result = await agent_manager.process_request(
         user_input=query,
         session_id=session_id,
-        user_id="widget_user",
-        user_roles=["viewer", "user"]
+        user_id=request.user_id or "widget_user",
+        user_roles=user_roles
     )
     
     logger.info(f"✅ Agent processing complete: routing={agent_result.get('routing')}, "

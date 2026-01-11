@@ -9,7 +9,8 @@ import {
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { firstValueFrom, timeout, catchError, throwError } from 'rxjs';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatInputModule } from '@angular/material/input';
@@ -430,18 +431,41 @@ export class RagWidgetComponent implements OnInit, AfterViewChecked {
     this.isTyping = true;
 
     try {
-      const response: any = await this.http
-        .post<any>(`${this.apiUrl}/rag-widget/widget/query`, {
+      // Use firstValueFrom instead of deprecated toPromise()
+      // Add 60s timeout to handle slow LLM responses
+      const response: any = await firstValueFrom(
+        this.http.post<any>(`${this.apiUrl}/rag-widget/widget/query`, {
           query: trimmed,
           max_results: 8,
           include_sources: true,
-        })
-        .toPromise();
+        }).pipe(
+          timeout(60000), // 60 second timeout for slow AI responses
+          catchError((err: HttpErrorResponse) => {
+            console.error('HTTP Error:', err);
+            return throwError(() => err);
+          })
+        )
+      );
+
+      // Debug log to see the actual response
+      console.log('Backend response:', response);
+
+      // Handle the answer with multiple fallbacks
+      let answerContent = 'No response received.';
+      if (response) {
+        if (response.answer && typeof response.answer === 'string' && response.answer.trim()) {
+          answerContent = response.answer;
+        } else if (response.summary && typeof response.summary === 'string' && response.summary.trim()) {
+          answerContent = response.summary;
+        } else if (response.expanded_context && typeof response.expanded_context === 'string') {
+          answerContent = response.expanded_context.substring(0, 500) + '...';
+        }
+      }
 
       const botMessage: ChatMessage = {
         id: Date.now().toString() + '_bot',
         type: 'bot',
-        content: response?.answer || 'No response received.',
+        content: answerContent,
         timestamp: new Date(),
         images: response?.images || [],
         steps: response?.steps || [],
@@ -450,12 +474,13 @@ export class RagWidgetComponent implements OnInit, AfterViewChecked {
         expanded_context: response?.expanded_context || '',
       };
       this.chatHistory.push(botMessage);
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Chat query error:', error);
+      const errorMessage = error?.message || error?.statusText || 'Unknown error';
       this.chatHistory.push({
         id: Date.now().toString() + '_error',
         type: 'bot',
-        content:
-          'Error while processing your question. Check if backend is running or try again later.',
+        content: `Error: ${errorMessage}. Check if backend is running or try again later.`,
         timestamp: new Date(),
       });
     } finally {

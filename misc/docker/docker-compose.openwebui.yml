@@ -1,0 +1,278 @@
+version: '3.8'
+
+# Docker Compose configuration for Open WebUI + Enterprise RAG Bot integration
+# This file sets up both services to work together seamlessly
+
+services:
+  # ============================================================================
+  # Open WebUI - Modern chat interface
+  # ============================================================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: enterprise-rag-openwebui
+    ports:
+      - "3000:8080"
+    environment:
+      # Connection to Enterprise RAG Bot backend
+      # - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8001/api/v1
+
+      # Connection to locally run backend
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8001/api/v1
+      - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-change-this-secure-key}
+      
+      # Feature flags
+      - ENABLE_RAG=true
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+      - ENABLE_WEB_SEARCH=false
+      
+      # Authentication
+      - WEBUI_AUTH=true
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-generate-a-secure-random-secret-key-here}
+      
+      # Default configuration
+      - DEFAULT_MODELS=Vayu Maya
+      - DEFAULT_USER_ROLE=user
+      
+      # Optional: Langfuse for analytics
+      # - ENABLE_LANGFUSE=true
+      # - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      # - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      
+      # Optional: Custom branding
+      - WEBUI_NAME=Vayu Maya - AI Cloud Assistant
+      # - WEBUI_LOGO_URL=https://your-domain.com/logo.png
+      
+    volumes:
+      - open-webui-data:/app/backend/data
+    restart: always
+    depends_on:
+      - enterprise-rag-bot
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================================
+  # Enterprise RAG Bot - Your existing backend
+  # ============================================================================
+  enterprise-rag-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: enterprise-rag-bot
+    ports:
+      - "8001:8001"
+    environment:
+      # Database
+      - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/ragbot}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      
+      # AI/ML Services
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MILVUS_HOST=${MILVUS_HOST:-milvus}
+      - MILVUS_PORT=${MILVUS_PORT:-19530}
+      
+      # Authentication
+      - API_AUTH_TOKEN=${API_AUTH_TOKEN}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-jwt-secret}
+      
+      # CORS for Open WebUI
+      - CORS_ORIGINS=http://localhost:3000,http://enterprise-rag-openwebui:8080,http://localhost:4201
+      
+      # Application Port
+      - PORT=8001
+      - HOST=0.0.0.0
+      
+      # Open WebUI compatibility
+      - ENABLE_OPENAI_COMPATIBLE_API=true
+      
+    volumes:
+      - ./app:/app/app
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+      - milvus
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================================================
+  # PostgreSQL - Database for conversations and user data
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: enterprise-rag-postgres
+    environment:
+      - POSTGRES_DB=ragbot
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rag-network
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Redis - Caching and session management
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: enterprise-rag-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - rag-network
+    restart: always
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================================
+  # Milvus - Vector database for RAG
+  # ============================================================================
+  milvus:
+    image: milvusdb/milvus:latest
+    container_name: enterprise-rag-milvus
+    environment:
+      - ETCD_ENDPOINTS=etcd:2379
+      - MINIO_ADDRESS=minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus-data:/var/lib/milvus
+    networks:
+      - rag-network
+    depends_on:
+      - etcd
+      - minio
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  # ============================================================================
+  # Etcd - Metadata storage for Milvus
+  # ============================================================================
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: enterprise-rag-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - rag-network
+    restart: always
+
+  # ============================================================================
+  # MinIO - Object storage for Milvus
+  # ============================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: enterprise-rag-minio
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - rag-network
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+# ============================================================================
+# Volumes for data persistence
+# ============================================================================
+volumes:
+  open-webui-data:
+    driver: local
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  milvus-data:
+    driver: local
+  etcd-data:
+    driver: local
+  minio-data:
+    driver: local
+
+# ============================================================================
+# Network configuration
+# ============================================================================
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ============================================================================
+# Usage Instructions:
+# ============================================================================
+# 
+# 1. Create a .env file with required variables:
+#    cp .env.example .env
+#    # Edit .env with your configuration
+#
+# 2. Start all services:
+#    docker-compose -f docker-compose.openwebui.yml up -d
+#
+# 3. Check logs:
+#    docker-compose -f docker-compose.openwebui.yml logs -f
+#
+# 4. Access services:
+#    - Open WebUI: http://localhost:3000
+#    - RAG Bot API: http://localhost:8000
+#    - API Docs: http://localhost:8000/docs
+#    - MinIO Console: http://localhost:9001
+#
+# 5. Stop services:
+#    docker-compose -f docker-compose.openwebui.yml down
+#
+# 6. Stop and remove volumes (CAUTION: deletes all data):
+#    docker-compose -f docker-compose.openwebui.yml down -v
+#
+# ============================================================================
+

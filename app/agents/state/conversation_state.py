@@ -16,6 +16,7 @@ class ConversationStatus(Enum):
     """Status of the conversation flow."""
     INITIATED = "initiated"
     COLLECTING_PARAMS = "collecting_params"
+    AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options (e.g., endpoints)
     VALIDATING = "validating"
     READY_TO_EXECUTE = "ready_to_execute"
     EXECUTING = "executing"
@@ -101,8 +102,8 @@ class ConversationState:
         
         logger.info(
             f"📋 Intent set: {self.intent} | "
-            f"Required: {len(self.required_params)} | "
-            f"Optional: {len(self.optional_params)}"
+            f"Required: {self.required_params} | "
+            f"Missing: {self.missing_params}"
         )
     
     def add_parameter(self, param_name: str, param_value: Any, is_valid: bool = True) -> None:

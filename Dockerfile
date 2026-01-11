@@ -1,86 +1,52 @@
-# Multi-stage build for production Enterprise RAG Bot 
 
-# ============================================================================
-# Stage 1: Builder
-# ============================================================================
-FROM python:3.11-slim as builder
-
-WORKDIR /build
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements
-COPY requirements.txt .
-
-# Create virtual environment
-RUN python -m venv /build/venv
-ENV PATH="/build/venv/bin:$PATH"
-
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
-
-# ============================================================================
-# Stage 2: Runtime
-# ============================================================================
-FROM python:3.11-slim
-
-# Build argument for environment (can be passed during build)
-ARG BUILD_ENV=production
-ENV ENV=${BUILD_ENV}
+FROM python:3.11-slim AS base
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+ENV PATH="/root/.local/bin:$PATH"
 
-# Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    curl \
-    ca-certificates \
-    tzdata \
-    tini \
+    curl wget git nginx supervisor build-essential netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy virtual environment from builder
-COPY --from=builder /build/venv /app/venv
-
-# Set environment variables
-ENV PATH="/app/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app \
-    PYTHONIOENCODING=utf-8 \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
-
-# Copy application code
-COPY app /app/app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 
+COPY app ./app
+COPY docker /docker
 
-# Create necessary directories with proper permissions
-RUN mkdir -p /app/uploads /app/logs /app/outputs /app/temp && \
-    chmod -R 755 /app/uploads /app/logs /app/outputs /app/temp
+FROM node:20 AS admin-frontend-build
+WORKDIR /angular-frontend
+COPY angular-frontend/package*.json ./
+RUN npm install --force
+COPY angular-frontend/ .
+RUN npm run build --prod
 
-# Create non-root user for security
-RUN groupadd -r appuser && \
-    useradd -r -g appuser -u 1000 -d /app -s /sbin/nologin appuser && \
-    chown -R appuser:appuser /app
+FROM node:20 AS user-frontend-build
+WORKDIR /user-frontend
+COPY user-frontend/package*.json ./
+RUN npm install --force
+COPY user-frontend/ .
+RUN npm run build --prod
 
-# Switch to non-root user
-USER appuser
+FROM base AS final
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
-    CMD curl -sf http://localhost:8000/health || exit 1
+COPY --from=admin-frontend-build /angular-frontend/dist/enterprise-rag-frontend /var/www/admin
+COPY --from=user-frontend-build /user-frontend/dist/user-frontend /var/www/user
 
-# Use tini as init system for proper signal handling
-ENTRYPOINT ["/usr/bin/tini", "--"]
+COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/admin_default.conf /etc/nginx/conf.d/admin_default.conf
+COPY docker/user_default.conf /etc/nginx/conf.d/user_default.conf
 
-# Default command (can be overridden in docker-compose)
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+RUN mkdir -p /var/log /var/run/supervisor /app/logs /app/uploads /app/outputs /app/backups \
+    && chmod -R 755 /var/log /var/run/supervisor /app/logs /app/uploads /app/outputs /app/backups
+
+
+RUN chown -R root:root /var/www /app
+
+RUN which supervisord && which nginx && which uvicorn
+
+EXPOSE 4200 4201 8000 8001
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

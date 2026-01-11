@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime
 
-from app.services.chroma_service import chroma_service
+from app.services.postgres_service import postgres_service
 from app.services.scraper_service import scraper_service
 from app.services.ai_service import ai_service
 
@@ -23,7 +23,7 @@ async def get_system_status():
     """Get comprehensive system status"""
     try:
        
-        chroma_stats = await chroma_service.get_collection_stats()
+        milvus_stats = await postgres_service.get_collection_stats()
         
         ai_status = {
             'openrouter': bool(ai_service.openrouter_client),
@@ -35,12 +35,12 @@ async def get_system_status():
             'timestamp': datetime.now().isoformat(),
             'services': {
                 'scraper': 'active',
-                'chroma_db': 'active',
+                'milvus_db': 'active',
                 'ai_services': ai_status
             },
             'statistics': {
-                'documents_stored': chroma_stats['document_count'],
-                'collection_name': chroma_stats['collection_name']
+                'documents_stored': milvus_stats['document_count'],
+                'collection_name': milvus_stats['collection_name']
             },
             'system_health': 'healthy'
         }
@@ -92,10 +92,10 @@ async def create_backup():
     try:
         backup_data = {
             'timestamp': datetime.now().isoformat(),
-            'chroma_stats': await chroma_service.get_collection_stats(),
+            'milvus_stats': await postgres_service.get_collection_stats(),
             'system_config': {
                 'version': '1.0.0',
-                'services': ['scraper', 'rag', 'chroma']
+                'services': ['scraper', 'rag', 'milvus']
             }
         }
         
@@ -120,12 +120,12 @@ async def create_backup():
 async def get_system_metrics():
     """Get detailed system metrics"""
     try:
-        chroma_stats = await chroma_service.get_collection_stats()
+        milvus_stats = await postgres_service.get_collection_stats()
         
         metrics = {
             'documents': {
-                'total_count': chroma_stats['document_count'],
-                'collection_name': chroma_stats['collection_name']
+                'total_count': milvus_stats['document_count'],
+                'collection_name': milvus_stats['collection_name']
             },
             'system': {
                 'uptime': 'N/A',  

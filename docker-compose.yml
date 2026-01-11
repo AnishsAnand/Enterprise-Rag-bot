@@ -1,0 +1,333 @@
+# docker-compose.yml (Infrastructure services only)
+# Backend runs locally, infrastructure runs in Docker
+# Includes: Milvus, PostgreSQL, Redis, etcd, MinIO, Prometheus, Grafana, Open WebUI
+
+services:
+  # ============================================================================
+  # PostgreSQL - Session persistence database
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ragbot-postgres
+    environment:
+      POSTGRES_USER: ragbot
+      POSTGRES_PASSWORD: ragbot_secret_2024
+      POSTGRES_DB: ragbot_sessions
+      TZ: "Asia/Kolkata"
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ragbot -d ragbot_sessions"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # Redis - Caching and session management
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: ragbot-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # Milvus - Vector database for RAG
+  # ============================================================================
+  milvus:
+    image: milvusdb/milvus:v2.4.10
+    container_name: milvus
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: "http://etcd:2379"
+      MINIO_ADDRESS: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      TZ: "Asia/Kolkata"
+      LOG_LEVEL: "warn"
+    ports:
+      - "19530:19530"   # gRPC API
+      - "9091:9091"     # Metrics endpoint
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9091/metrics"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # etcd - Metadata storage for Milvus
+  # ============================================================================
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.15
+    container_name: etcd
+    command:
+      - etcd
+      - --name=default
+      - --data-dir=/etcd
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-cluster=default=http://etcd:2380
+      - --initial-cluster-state=new
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd_data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # MinIO - Object storage for Milvus vector data
+  # ============================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      TZ: "Asia/Kolkata"
+      MINIO_PROMETHEUS_AUTH_TYPE: "public"
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # MinIO Initialization - Create required buckets
+  # ============================================================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        echo '⏳ Waiting for MinIO to be healthy...';
+        i=0;
+        while [ $$i -lt 12 ]; do
+          curl -fs http://minio:9000/minio/health/live && break || sleep 5;
+          i=$$((i+1));
+        done;
+        mc alias set myminio http://minio:9000 minioadmin minioadmin &&
+        mc mb -p myminio/milvus-bucket || true &&
+        echo '✅ MinIO bucket initialized successfully';
+      "
+    restart: "no"
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # Open WebUI - Modern chat interface
+  # Connects to local backend at host.docker.internal:8001
+  # ============================================================================
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: ragbot-openwebui
+    ports:
+      - "3000:8080"
+    environment:
+      # Connection to local RAG Bot backend (running outside Docker)
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8001/api/v1
+      - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-vayu-maya-secure-key-2024}
+      
+      # Feature flags
+      - ENABLE_RAG=true
+      - ENABLE_OLLAMA_API=false
+      - ENABLE_OPENAI_API=true
+      - ENABLE_WEB_SEARCH=false
+      
+      # Authentication
+      - WEBUI_AUTH=true
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-vayu-maya-webui-secret-2024}
+      
+      # Default configuration
+      - DEFAULT_MODELS=Vayu Maya
+      - DEFAULT_USER_ROLE=user
+      
+      # Custom branding
+      - WEBUI_NAME=Vayu Maya - AI Cloud Assistant
+      
+      # Timezone
+      - TZ=Asia/Kolkata
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - openwebui_data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # Prometheus - Metrics collection and monitoring
+  # Scrapes local backend at host.docker.internal:8000 and :8001
+  # ============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ragbot-prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # ============================================================================
+  # Grafana - Metrics visualization
+  # ============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ragbot-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-vayu-grafana-2024}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - TZ=Asia/Kolkata
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+# ============================================================================
+# Networks
+# ============================================================================
+networks:
+  rag-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ============================================================================
+# Docker Named Volumes
+# ============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  milvus_data:
+    driver: local
+  etcd_data:
+    driver: local
+  minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  openwebui_data:
+    driver: local
+
+# ============================================================================
+# Usage:
+# ============================================================================
+# Start infrastructure:  docker-compose up -d
+# Stop infrastructure:   docker-compose down
+# View logs:             docker-compose logs -f
+#
+# Then run backend locally:
+#   cd /home/unixlogin/Vayu/Enterprise-Rag-bot
+#   source .venv/bin/activate
+#   uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+#   uvicorn app.user_main:app --host 0.0.0.0 --port 8001 --reload &
+#
+# ============================================================================
+# Access Points:
+# ============================================================================
+#   - Open WebUI:      http://localhost:3000
+#   - Prometheus:      http://localhost:9090
+#   - Grafana:         http://localhost:3001 (admin/vayu-grafana-2024)
+#   - MinIO Console:   http://localhost:9001 (minioadmin/minioadmin)
+#   - Milvus:          localhost:19530
+#   - PostgreSQL:      localhost:5435 (ragbot/ragbot_secret_2024)
+#   - Redis:           localhost:6379
+#
+#   Local backend (run manually):
+#   - Admin API:       http://localhost:8000
+#   - User API:        http://localhost:8001
+# ============================================================================

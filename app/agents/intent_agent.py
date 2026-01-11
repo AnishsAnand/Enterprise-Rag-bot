@@ -47,7 +47,7 @@ class IntentAgent(BaseAgent):
 """ + resources_info + """
 
 **Your tasks:**
-1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, etc.)
+1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, kafka, gitlab, container_registry, jenkins, postgres, documentdb, etc.)
 2. **Identify the operation** (create, read, update, delete, list)
 3. **Extract parameters** from the user's message
 4. **Return structured JSON** with your findings
@@ -55,7 +55,7 @@ class IntentAgent(BaseAgent):
 **Output Format:**
 Always respond with a JSON object containing:
 - intent_detected: boolean (true/false)
-- resource_type: string (k8s_cluster, firewall, etc.)
+- resource_type: string (k8s_cluster, firewall, kafka, gitlab, container_registry, jenkins, postgres, documentdb, etc.)
 - operation: string (create, read, update, delete, list)
 - extracted_params: object with extracted parameters
 - confidence: number (0.0 to 1.0)
@@ -85,6 +85,100 @@ User: "Tell me about clusters in Mumbai and Chennai"
 User: "What are the available clusters?" or "What k8s clusters do we have?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Kafka Service Examples:**
+
+User: "List Kafka services" or "Show me Kafka" or "What Kafka services do we have?"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+User: "Show Kafka in Mumbai" or "List Kafka services in Delhi"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+User: "How many Kafka services?" or "Count Kafka instances"
+→ intent_detected: true, resource_type: kafka, operation: list, extracted_params: empty
+
+**GitLab Service Examples:**
+
+User: "List GitLab services" or "Show me GitLab" or "What GitLab services do we have?"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
+User: "Show GitLab in Chennai" or "List GitLab services in Bengaluru"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
+User: "How many GitLab instances?" or "Count GitLab services"
+→ intent_detected: true, resource_type: gitlab, operation: list, extracted_params: empty
+
+**Container Registry Service Examples:**
+
+User: "List container registries" or "Show me container registry" or "What registries do we have?"
+→ intent_detected: true, resource_type: container_registry, operation: list, extracted_params: empty
+
+User: "Show docker registry in Mumbai" or "List registries in Delhi"
+→ intent_detected: true, resource_type: container_registry, operation: list, extracted_params: empty
+
+User: "How many container registries?" or "Count registry services"
+→ intent_detected: true, resource_type: container_registry, operation: list, extracted_params: empty
+
+**Jenkins Service Examples:**
+
+User: "List Jenkins services" or "Show me Jenkins" or "What Jenkins instances do we have?"
+→ intent_detected: true, resource_type: jenkins, operation: list, extracted_params: empty
+
+User: "Show Jenkins in Chennai" or "List CI/CD services in Bengaluru"
+→ intent_detected: true, resource_type: jenkins, operation: list, extracted_params: empty
+
+User: "How many Jenkins servers?" or "Count Jenkins instances"
+→ intent_detected: true, resource_type: jenkins, operation: list, extracted_params: empty
+
+**PostgreSQL Service Examples:**
+
+User: "List PostgreSQL services" or "Show me Postgres" or "What Postgres databases do we have?"
+→ intent_detected: true, resource_type: postgres, operation: list, extracted_params: empty
+
+User: "Show Postgres in Mumbai" or "List PostgreSQL services in Delhi"
+→ intent_detected: true, resource_type: postgres, operation: list, extracted_params: empty
+
+User: "How many Postgres instances?" or "Count PostgreSQL databases"
+→ intent_detected: true, resource_type: postgres, operation: list, extracted_params: empty
+
+**DocumentDB Service Examples:**
+
+User: "List DocumentDB services" or "Show me DocumentDB" or "What MongoDB services do we have?"
+→ intent_detected: true, resource_type: documentdb, operation: list, extracted_params: empty
+
+User: "Show DocumentDB in Chennai" or "List NoSQL databases in Bengaluru"
+→ intent_detected: true, resource_type: documentdb, operation: list, extracted_params: empty
+
+User: "How many DocumentDB instances?" or "Count MongoDB services"
+→ intent_detected: true, resource_type: documentdb, operation: list, extracted_params: empty
+
+**Virtual Machine (VM) Examples:**
+
+User: "List VMs" or "Show me virtual machines" or "What VMs do we have?"
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: empty
+
+User: "Show all servers" or "List instances" or "What virtual machines are running?"
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: empty
+
+User: "How many VMs?" or "Count virtual machines" or "Show me all instances"
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: empty
+
+User: "List VMs in Mumbai" or "Show virtual machines in Delhi endpoint"
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: {{endpoint: Mumbai}}
+
+User: "Show VMs in zone XYZ" or "List virtual machines in department ABC"
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: {{zone: XYZ}} or {{department: ABC}}
+
+**Firewall Examples:**
+
+User: "List firewalls" or "Show me firewalls" or "What firewalls do we have?"
+→ intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
+
+User: "Show firewalls in Mumbai" or "List network firewalls in Delhi"
+→ intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
+
+User: "How many firewalls?" or "Count firewalls" or "Show all Vayu firewalls"
+→ intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -106,14 +200,24 @@ User: "List all available data centers" or "Show available locations"
 → intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
 
 **Important Notes:**
-- For "list" operation on k8s_cluster, "endpoints" parameter is required (data center selection)
+- For "list" operation on k8s_cluster, kafka, gitlab, container_registry, jenkins, postgres, documentdb, firewall: "endpoints" parameter is required (data center selection)
+- For "list" operation on vm: NO parameters required (lists all VMs), but can optionally extract endpoint, zone, or department for filtering
 - For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
-- Do NOT extract location names (like "Mumbai", "Delhi") - the ValidationAgent will handle matching locations to endpoint IDs
+- Do NOT extract location names (like "Mumbai", "Delhi") for cluster/service/firewall operations - the ValidationAgent will handle matching locations to endpoint IDs
+- For VM operations, you CAN extract location/zone/department names as they are used as filters, not required parameters
 - Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
 - ANY query asking about viewing/counting/listing actual resources (not concepts) should be detected as a list operation
 - "What are the clusters?" = list operation (showing actual clusters)
 - "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)
 - Endpoint aliases: datacenter, dc, data center, location, datacenters, data centers, locations, endpoints, dcs
+- Kafka aliases: kafka, kafka service, kafka services, apache kafka
+- GitLab aliases: gitlab, gitlab service, gitlab services, git lab
+- Container Registry aliases: container registry, registry, registries, docker registry, image registry
+- Jenkins aliases: jenkins, jenkins service, jenkins services, ci cd, continuous integration
+- PostgreSQL aliases: postgres, postgresql, postgres service, postgresql database, pg
+- DocumentDB aliases: documentdb, document db, mongodb, mongo, nosql database
+- VM aliases: vm, vms, virtual machine, virtual machines, instance, instances, server, servers
+- Firewall aliases: firewall, firewalls, fw, vayu firewall, network firewall
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
         
@@ -264,9 +368,18 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 resource_type = intent_data.get("resource_type")
                 operation = intent_data.get("operation")
                 
-                if resource_type and operation:
+                # Handle multi-resource: if resource_type is a list, convert to string
+                # For param lookup, use the first resource type
+                if isinstance(resource_type, list):
+                    logger.info(f"🔧 Multi-resource detected: {resource_type}")
+                    # For parameter schema, use the first resource
+                    lookup_resource_type = resource_type[0] if resource_type else None
+                else:
+                    lookup_resource_type = resource_type
+                
+                if lookup_resource_type and operation:
                     operation_config = api_executor_service.get_operation_config(
-                        resource_type, operation
+                        lookup_resource_type, operation
                     )
                     
                     if operation_config:
@@ -276,8 +389,10 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                         
                         logger.info(
                             f"✅ Intent detected: {operation} {resource_type} | "
-                            f"Required params: {len(intent_data['required_params'])}"
+                            f"Required params: {intent_data['required_params']}"
                         )
+                    else:
+                        logger.warning(f"⚠️ No operation config found for {lookup_resource_type}.{operation}")
             
             return result
             

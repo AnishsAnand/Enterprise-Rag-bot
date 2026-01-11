@@ -1,25 +1,29 @@
 # Miscellaneous Files Directory
 
-This directory contains various configuration files, Docker setups, and utility scripts that support the Enterprise RAG Bot project.
+This directory contains Docker Compose configurations and utility scripts that support the Enterprise RAG Bot project.
 
 ## 📂 Directory Structure
 
 ```
 misc/
-├── docker/          # Docker and container configuration
-├── config/          # Configuration files
+├── docker/          # Docker Compose configurations
 ├── scripts/         # Utility scripts
 └── README.md        # This file
 ```
 
+> **Note**: The main Dockerfile and service configs are in the project root:
+> - `Dockerfile` - Main container build
+> - `docker/` - Nginx and supervisord configs
+> - `docker-compose.yml` - Primary orchestration
+
 ## 🐳 Docker (`docker/`)
 
-Docker-related files for containerization and deployment.
+Docker Compose configurations for different deployment scenarios.
 
 ### Files
 
 - **`docker-compose.yml`** - Main Docker Compose configuration
-  - Defines all services (backend, frontend, Milvus, etc.)
+  - Defines all services (backend, frontend, Milvus, PostgreSQL, etc.)
   - Network configuration
   - Volume mappings
   - Environment variables
@@ -27,18 +31,12 @@ Docker-related files for containerization and deployment.
 - **`docker-compose.openwebui.yml`** - OpenWebUI-specific Docker Compose
   - OpenWebUI service configuration
   - Integration with main services
-  - Additional dependencies
-
-- **`Dockerfile`** - Docker image definition
-  - Base image setup
-  - Dependencies installation
-  - Application configuration
-  - Entry point definition
+  - Additional dependencies (Redis)
 
 ### Usage
 
 ```bash
-# Start all services
+# Start all services (from project root)
 docker-compose -f misc/docker/docker-compose.yml up -d
 
 # Start with OpenWebUI
@@ -49,44 +47,6 @@ docker-compose -f misc/docker/docker-compose.yml down
 
 # View logs
 docker-compose -f misc/docker/docker-compose.yml logs -f
-```
-
-## ⚙️ Configuration (`config/`)
-
-Configuration files for various services and components.
-
-### Files
-
-- **`default.conf`** - Nginx/web server configuration
-  - Reverse proxy settings
-  - Static file serving
-  - Port mappings
-  - SSL/TLS configuration (if applicable)
-
-- **`supervisord.conf`** - Supervisor process manager configuration
-  - Process definitions
-  - Auto-restart policies
-  - Log management
-  - Service dependencies
-
-- **`env.openwebui.template`** - OpenWebUI environment template
-  - Environment variable template
-  - Configuration placeholders
-  - Setup instructions
-  - API key placeholders
-
-### Usage
-
-```bash
-# Copy template and configure
-cp misc/config/env.openwebui.template .env.openwebui
-# Edit .env.openwebui with your values
-
-# Use supervisor configuration
-supervisord -c misc/config/supervisord.conf
-
-# Use nginx configuration
-nginx -c /path/to/misc/config/default.conf
 ```
 
 ## 🔧 Scripts (`scripts/`)
@@ -122,70 +82,26 @@ ts-node misc/scripts/createcluster.ts
 deno run --allow-net misc/scripts/createcluster.ts
 ```
 
-## 📋 File Details
+## 🔗 Integration with Main Project
 
-### Docker Files
+These files support the main application located in:
+- **Backend**: `app/`
+- **Frontend**: `user-frontend/`, `angular-frontend/`
+- **Configs**: `docker/` (root level)
+- **Documentation**: `metadata/`
+- **Tests**: `tests/`
 
-#### docker-compose.yml
-Main orchestration file defining:
-- Backend API service
-- Frontend service
-- Milvus vector database
-- MinIO object storage
-- etcd for coordination
-- Network configuration
+## 📋 Configuration Reference
 
-#### docker-compose.openwebui.yml
-Extended configuration for:
-- OpenWebUI service
-- Additional dependencies
-- Integration settings
+All active configuration files are in the **root `docker/`** folder:
 
-#### Dockerfile
-Image build instructions for:
-- Python environment setup
-- Dependency installation
-- Application code copying
-- Port exposure
-
-### Configuration Files
-
-#### default.conf
-Web server configuration for:
-- Request routing
-- Static file serving
-- Proxy settings
-- CORS configuration
-
-#### supervisord.conf
-Process management for:
-- Backend service
-- Frontend service
-- Worker processes
-- Log rotation
-
-#### env.openwebui.template
-Environment template for:
-- API endpoints
-- Authentication tokens
-- Service URLs
-- Feature flags
-
-### Script Files
-
-#### start_with_openwebui.sh
-Startup script that:
-- Checks dependencies
-- Sets environment variables
-- Starts services in order
-- Monitors health
-
-#### createcluster.ts
-Cluster utility that:
-- Validates input
-- Makes API calls
-- Handles errors
-- Reports status
+| File | Purpose |
+|------|---------|
+| `docker/supervisord.conf` | Process manager for running nginx + backends |
+| `docker/admin_default.conf` | Nginx config for admin frontend (port 4200) |
+| `docker/user_default.conf` | Nginx config for user frontend (port 4201) |
+| `docker/supervisord-user.conf` | User-only backend config (alternative) |
+| `docker/env.openwebui.template` | Environment template for OpenWebUI integration |
 
 ## 🚀 Quick Start
 
@@ -193,7 +109,7 @@ Cluster utility that:
 
 ```bash
 # 1. Navigate to project root
-cd /home/unixlogin/vayuMaya/Enterprise-Rag-bot
+cd /path/to/Enterprise-Rag-bot
 
 # 2. Start services
 docker-compose -f misc/docker/docker-compose.yml up -d
@@ -215,37 +131,6 @@ chmod +x misc/scripts/*.sh
 tail -f outputs/*.log
 ```
 
-## 🔗 Integration with Main Project
-
-These files support the main application located in:
-- **Backend**: `app/`
-- **Frontend**: `user-frontend/`
-- **Documentation**: `metadata/`
-- **Tests**: `tests/`
-
-## 📝 Maintenance
-
-### Adding New Files
-
-1. Place files in appropriate subdirectory:
-   - Docker files → `misc/docker/`
-   - Config files → `misc/config/`
-   - Scripts → `misc/scripts/`
-
-2. Update this README with:
-   - File description
-   - Usage instructions
-   - Dependencies
-
-3. Update main project documentation if needed
-
-### Updating Existing Files
-
-1. Test changes in development environment
-2. Update documentation
-3. Notify team of breaking changes
-4. Update version/changelog if applicable
-
 ## 🐛 Troubleshooting
 
 ### Docker Issues
@@ -261,13 +146,6 @@ docker-compose -f misc/docker/docker-compose.yml up -d
 # Check logs
 docker-compose -f misc/docker/docker-compose.yml logs [service-name]
 ```
-
-### Configuration Issues
-
-- Verify file paths in configuration
-- Check environment variables
-- Validate syntax (use linters)
-- Review service logs
 
 ### Script Issues
 
@@ -287,11 +165,9 @@ docker-compose -f misc/docker/docker-compose.yml logs [service-name]
 
 | Category | Files | Purpose |
 |----------|-------|---------|
-| Docker | 3 files | Container orchestration and deployment |
-| Config | 3 files | Service configuration and environment setup |
+| Docker Compose | 2 files | Container orchestration variants |
 | Scripts | 2 files | Automation and utility operations |
 
 ---
 
-*These miscellaneous files are essential for deployment, configuration, and operation of the Enterprise RAG Bot. Keep them organized and documented.*
-
+*These miscellaneous files are essential for deployment and operation of the Enterprise RAG Bot.*

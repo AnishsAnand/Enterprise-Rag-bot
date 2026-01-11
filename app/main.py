@@ -232,6 +232,14 @@ async def liveness_check():
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "admin"}
+
+# ===================== Prometheus Metrics Endpoint =====================
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint for monitoring."""
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    from fastapi.responses import Response
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 @app.get("/health/readiness")
 async def readiness_check():
     """

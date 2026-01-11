@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from datetime import datetime, timedelta
 
 from app.core.database import get_db
-from app.models.user import User
+from app.models.database_models import User
 from app.api.routes.auth import get_current_active_user
 
 router = APIRouter()

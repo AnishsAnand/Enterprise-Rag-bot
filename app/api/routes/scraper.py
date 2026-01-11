@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 import asyncio
 from datetime import datetime
 from app.services.scraper_service import scraper_service
-from app.services.chroma_service import chroma_service
+from app.services.postgres_service import postgres_service
 
 router = APIRouter()
 
@@ -49,18 +49,10 @@ async def scrape_single_url(request: ScrapeRequest):
         if result.get('status') != 'success':
             raise HTTPException(status_code=400, detail=result.get('error', 'Scraping failed'))
 
-        formatted_content = await scraper_service.process_to_format(
-            result['content'],
-            request.output_format
-        )
-        if isinstance(formatted_content, bytes):
-            formatted_content = formatted_content.decode('utf-8', errors='ignore')
-
         return {
             'status': 'success',
             'url': str(request.url),
             'content': result.get('content', {}),
-            'formatted_content': formatted_content,
             'method_used': result.get('method', 'unknown')
         }
 
@@ -128,7 +120,7 @@ async def bulk_scrape_task(urls: List[str], scrape_params: Dict[str, Any], outpu
 
     if store_in_rag and scraped_documents:
         try:
-            await chroma_service.add_documents(scraped_documents)
+            await postgres_service.add_documents(scraped_documents)
             print(f"[Bulk Scrape] Added {len(scraped_documents)} documents to RAG system")
         except Exception as e:
             print(f"[Bulk Scrape] Error storing documents: {str(e)}")
@@ -161,11 +153,11 @@ async def discover_urls(
 async def get_scraping_status():
     """Get current scraping status and RAG stats"""
     try:
-        chroma_stats = await chroma_service.get_collection_stats()
+        milvus_stats = await postgres_service.get_collection_stats()
         return {
             'status': 'active',
-            'documents_stored': chroma_stats.get('document_count', 0),
-            'collection_name': chroma_stats.get('collection_name', 'default')
+            'documents_stored': milvus_stats.get('document_count', 0),
+            'collection_name': milvus_stats.get('collection_name', 'default')
         }
 
     except Exception as e:

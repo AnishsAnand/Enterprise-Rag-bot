@@ -12,7 +12,7 @@ from datetime import datetime
 
 from app.agents import get_agent_manager
 from app.services.ai_service import ai_service
-from app.services.milvus_service import milvus_service
+from app.services.postgres_service import postgres_service
 
 logger = logging.getLogger(__name__)
 

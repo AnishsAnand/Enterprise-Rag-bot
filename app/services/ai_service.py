@@ -637,6 +637,11 @@ class AIService:
 
     async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings with automatic service connection"""
+        import time
+        from app.services.prometheus_metrics import metrics
+        
+        start_time = time.time()
+        
         if not texts:
             logger.warning("Empty texts provided for embedding generation")
             return []
@@ -689,6 +694,18 @@ class AIService:
                                     embeddings.append(emb)
                                 else:
                                     embeddings.append([0.0] * EMBEDDING_SIZE_FALLBACK)
+                            
+                            # Track successful embedding call
+                            duration = time.time() - start_time
+                            total_chars = sum(len(t) for t in cleaned_texts)
+                            metrics.track_llm_call(
+                                model=EMBEDDING_MODEL,
+                                operation='embedding',
+                                input_tokens=total_chars // 4,  # Approximate tokens
+                                output_tokens=0,
+                                duration=duration,
+                                success=True
+                            )
                             
                             logger.info(f"✅ Generated {len(embeddings)} embeddings via SDK (attempt {attempt})")
                             return embeddings
@@ -783,7 +800,10 @@ class AIService:
     def _llm_chat(self, prompt: str, max_tokens: int = 1500, 
               temperature: float = 0.2, system_message: str = None, 
               model: str = None) -> str:
-    
+        import time
+        from app.services.prometheus_metrics import metrics
+        
+        start_time = time.time()
         self._ensure_service_available()
     
         if system_message is None:
@@ -815,14 +835,55 @@ class AIService:
             if hasattr(resp, "choices") and resp.choices:
                 content = self._extract_message_content(resp.choices[0])
                 if content:
+                    # Track successful LLM call
+                    duration = time.time() - start_time
+                    input_tokens = getattr(resp.usage, 'prompt_tokens', 0) if hasattr(resp, 'usage') else len(prompt) // 4
+                    output_tokens = getattr(resp.usage, 'completion_tokens', 0) if hasattr(resp, 'usage') else len(content) // 4
+                    metrics.track_llm_call(
+                        model=model_to_use,
+                        operation='chat',
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        duration=duration,
+                        success=True
+                    )
                     return content
         
             logger.error(f"❌ Empty response from {model_to_use}")
+            # Track failed call (empty response)
+            duration = time.time() - start_time
+            metrics.track_llm_call(
+                model=model_to_use,
+                operation='chat',
+                duration=duration,
+                success=False,
+                error_type='empty_response'
+            )
             return ""
         
         except Exception as e:
             err_str = str(e)
             logger.error(f"❌ Model {model_to_use} failed: {err_str[:300]}")
+            
+            # Track failed call
+            duration = time.time() - start_time
+            error_type = 'api_error'
+            if "401" in err_str or "403" in err_str:
+                error_type = 'auth_error'
+            elif "500" in err_str or "502" in err_str:
+                error_type = 'server_error'
+            elif "timeout" in err_str.lower():
+                error_type = 'timeout'
+            elif "rate" in err_str.lower():
+                error_type = 'rate_limit'
+            
+            metrics.track_llm_call(
+                model=model_to_use,
+                operation='chat',
+                duration=duration,
+                success=False,
+                error_type=error_type
+            )
         
         # Mark as failed
             self.failed_models.add(model_to_use)

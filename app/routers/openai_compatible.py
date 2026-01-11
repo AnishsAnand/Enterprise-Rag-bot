@@ -470,10 +470,24 @@ async def chat_completions(
         user_id = request_data.user or "openwebui_user"
         
         # Create stable session ID for conversation continuity
-        conversation_hash = hashlib.md5(
-            json.dumps([m.dict() for m in request_data.messages[:-1]]).encode()
-        ).hexdigest()[:16]
-        session_id = create_stable_session_id(user_id, conversation_hash)
+        # Use the FIRST user message as the anchor for session ID (not the changing history)
+        # This ensures "list clusters" → "all" stays in the same session
+        first_user_message = None
+        for msg in request_data.messages:
+            if msg.role == "user":
+                first_user_message = msg.content.strip()[:100]  # First 100 chars
+                break
+        
+        if first_user_message:
+            # Session ID based on first user message - stays stable across conversation
+            session_anchor = hashlib.md5(f"{user_id}:{first_user_message}".encode()).hexdigest()[:16]
+        else:
+            # Fallback to conversation hash
+            session_anchor = hashlib.md5(
+                json.dumps([m.dict() for m in request_data.messages[:-1]]).encode()
+            ).hexdigest()[:16]
+        
+        session_id = create_stable_session_id(user_id, session_anchor)
         
         logger.info(
             f"[OpenWebUI] Chat request - ID: {completion_id}, "
