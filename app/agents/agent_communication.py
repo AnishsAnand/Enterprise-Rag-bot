@@ -58,7 +58,7 @@ class MessageBroker:
     async def receive_messages(self, agent_id: str) -> List[AgentMessage]:
         """Receive all messages for an agent"""
         messages = self.message_queue.get(agent_id, [])
-        self.message_queue[agent_id] = []  # Clear queue
+        self.message_queue[agent_id] = []  
         return messages
     
     def subscribe(self, agent_id: str, callback: Callable):
@@ -84,5 +84,5 @@ class MessageBroker:
         return [m.to_dict() for m in messages[-limit:]]
 
 
-# Global message broker instance
+
 message_broker = MessageBroker()
