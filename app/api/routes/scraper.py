@@ -107,13 +107,21 @@ async def bulk_scrape_task(urls: List[str], scrape_params: Dict[str, Any], outpu
                 continue
 
             if result.get('status') == 'success':
+                content_data = result.get('content', {})
+                # FIXED: Extract images from content and include at top level
+                images = content_data.get('images', [])
                 document = {
                     'url': url,
-                    'content': result['content'].get('text', ''),
+                    'content': content_data.get('text', ''),
+                    'title': content_data.get('title', ''),
                     'format': output_format,
                     'timestamp': datetime.now().isoformat(),
-                    'metadata': result['content']
+                    'source': 'web_scraping',
+                    'images': images,  # CRITICAL: Include images for storage
+                    'metadata': content_data
                 }
+                if images:
+                    print(f"[Bulk Scrape] Found {len(images)} images for {url}")
                 scraped_documents.append(document)
 
         await asyncio.sleep(2)

@@ -171,12 +171,8 @@ class ResponseFormatter:
             
             response = answer
             
-            # Add sources if available
-            if sources:
-                response += "\n\n**Sources:**\n"
-                for i, source in enumerate(sources[:3], 1):
-                    title = source.get("title", source.get("url", "Unknown"))
-                    response += f"{i}. {title}\n"
+            # Sources section removed per user request
+            # Sources are still available in the API response metadata if needed
             
             # Add confidence if low
             if confidence < 0.5:

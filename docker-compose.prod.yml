@@ -119,9 +119,12 @@ services:
       ENABLE_OLLAMA_API: "false"
       WEBUI_AUTH: "true"
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-in-production}
-      WEBUI_NAME: ${WEBUI_NAME:-Enterprise RAG Chat}
+      WEBUI_NAME: ${WEBUI_NAME:-Vayu Maya - AI Cloud Assistant}
+      # Custom logo
+      WEBUI_LOGO_URL: "/static/logo.jpg"
     volumes:
       - openwebui_data:/app/backend/data
+      - ./logo.jpg:/app/backend/static/logo.jpg:ro
     ports:
       - "${WEBUI_PORT:-3000}:8080"
     networks:

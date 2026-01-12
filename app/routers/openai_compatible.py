@@ -733,19 +733,19 @@ async def list_models():
     List available models (OpenAI-compatible).
     
     Returns two models:
-    - enterprise-rag-bot: Standard RAG with rich formatting
-    - enterprise-rag-bot-rag: Alias for compatibility
+    - Vayu Maya: Standard RAG with rich formatting
+    - Vayu Maya-rag: Alias for compatibility
     """
     return ModelListResponse(
         object="list",
         data=[
             ModelInfo(
-                id="enterprise-rag-bot",
+                id="Vayu Maya",
                 created=int(datetime.utcnow().timestamp()),
                 owned_by="Tata Communications"
             ),
             ModelInfo(
-                id="enterprise-rag-bot-rag",
+                id="Vayu Maya-v1",
                 created=int(datetime.utcnow().timestamp()),
                 owned_by="Tata Communications"
             )

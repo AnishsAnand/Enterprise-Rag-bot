@@ -198,12 +198,8 @@ Always be helpful, accurate, and transparent about the source of your informatio
             sources = result.get("sources", [])
             confidence = result.get("confidence", 0.0)
             
-            # Add source citations if available
-            if sources and answer:
-                answer += "\n\n**Sources:**"
-                for i, source in enumerate(sources[:3], 1):
-                    source_title = source.get("title", source.get("url", "Unknown"))
-                    answer += f"\n{i}. {source_title}"
+            # Sources section removed from display per user request
+            # Sources are still tracked in metadata for debugging
             
             logger.info(f"✅ RAGAgent completed with {len(sources)} sources, confidence: {confidence}")
             

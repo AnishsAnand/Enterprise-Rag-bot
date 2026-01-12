@@ -165,7 +165,7 @@ class WebScraperService:
                             "title": content.get("title") or "",
                             "format": "text/html",
                             "source": "web_scraping",
-                            "timestamp": datetime.now(),
+                            "timestamp": datetime.now().isoformat(),  # FIXED: Use ISO string for JSON serialization
                             "images": content.get("images", []),
                         }
                         content["rag_documents"] = [rag_doc]
