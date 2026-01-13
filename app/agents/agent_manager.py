@@ -49,7 +49,7 @@ class AgentManager:
     def initialize(self) -> None:
         """Initialize all agents and wire them together."""
         try:
-            logger.info("🚀 Initializing multi-agent system...")
+            logger.info("Initializing multi-agent system...")
             
             # Initialize specialized agents
             self.intent_agent = IntentAgent()
