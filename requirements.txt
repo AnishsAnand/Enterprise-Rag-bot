@@ -84,6 +84,8 @@ python-multipart>=0.0.6
 # Utilities
 aiofiles>=23.2.0
 python-magic>=0.4.27
+prometheus-client
+
 
 # REMOVE Milvus dependencies (comment out or delete):
 # pymilvus>=2.3.0                  # NOT NEEDED ANYMORE
