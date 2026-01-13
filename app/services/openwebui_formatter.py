@@ -751,6 +751,7 @@ def format_agent_response_for_openwebui(
         # Cluster listing
         if isinstance(data, dict) and "data" in data:
             clusters = data["data"]
+            total_clusters = len(clusters)
             sections.append("\n\n## 📊 Cluster Details\n")
             
             by_endpoint = {}
@@ -763,12 +764,16 @@ def format_agent_response_for_openwebui(
                 sections.append("\n| Cluster Name | Status | Nodes | K8s Version |")
                 sections.append("\n|-------------|--------|-------|-------------|")
                 
+                # Show ALL clusters - no truncation
                 for cl in cluster_list:
                     status = "✅" if cl.get("status") == "Healthy" else "⚠️"
                     name = cl.get("clusterName", "N/A")
                     nodes = cl.get("nodescount", 0)
                     version = cl.get("kubernetesVersion", "N/A")
                     sections.append(f"\n| {name} | {status} | {nodes} | {version} |")
+            
+            # Show total count
+            sections.append(f"\n\n---\n📋 **Total: {total_clusters} clusters**")
         
         # Endpoint listing
         elif isinstance(data, dict) and "endpoints" in data:

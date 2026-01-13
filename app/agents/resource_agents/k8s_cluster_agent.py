@@ -90,8 +90,14 @@ class K8sClusterAgent(BaseResourceAgent):
         """
         List K8s clusters with intelligent filtering and formatting.
         
+        Supports filtering by:
+        - endpoints: Datacenter/location IDs
+        - businessUnits: Department/BU IDs  
+        - environments: Environment IDs
+        - zones: Zone IDs
+        
         Args:
-            params: Parameters (endpoints, endpoint_names, filters)
+            params: Parameters (endpoints, endpoint_names, filters, businessUnits, environments, zones)
             context: Context (user_query for intelligent formatting)
             
         Returns:
@@ -101,9 +107,27 @@ class K8sClusterAgent(BaseResourceAgent):
             # Get endpoint IDs
             endpoint_ids = params.get("endpoints", [])
             
+            # Get BU/Environment/Zone filters from params
+            business_units = params.get("businessUnits", [])
+            environments = params.get("environments", [])
+            zones = params.get("zones", [])
+            
             # Check if user explicitly wants all endpoints
             user_query = context.get("user_query", "").lower()
             wants_all = "all" in user_query or "every" in user_query or "all endpoints" in user_query
+            
+            # Check if user wants to filter by BU/Environment/Zone
+            filter_request = self._detect_filter_request(user_query)
+            if filter_request and not (business_units or environments or zones):
+                # User asked to filter but hasn't selected options yet - show them the list
+                logger.info(f"🔍 Filter request detected: {filter_request}")
+                filter_options = await self._get_filter_options(filter_request)
+                if filter_options and filter_options.get("needs_selection"):
+                    # Store options in response metadata for orchestrator to save to state
+                    filter_options["set_filter_state"] = True
+                    filter_options["filter_options_for_state"] = filter_options.get("options", [])
+                    filter_options["filter_type_for_state"] = filter_request
+                    return filter_options  # Returns formatted response with selectable options
             
             if not endpoint_ids and not wants_all:
                 # No specific endpoints and user didn't ask for all - fetch all endpoints
@@ -125,6 +149,12 @@ class K8sClusterAgent(BaseResourceAgent):
                 }
             
             logger.info(f"🔍 Listing clusters for endpoints: {endpoint_ids}")
+            if business_units:
+                logger.info(f"🏢 Filtering by BU IDs: {business_units}")
+            if environments:
+                logger.info(f"🌍 Filtering by Environment IDs: {environments}")
+            if zones:
+                logger.info(f"📍 Filtering by Zone IDs: {zones}")
             
             # Get engagement_id (required for URL parameter)
             engagement_id = await api_executor_service.get_engagement_id()
@@ -135,15 +165,26 @@ class K8sClusterAgent(BaseResourceAgent):
                     "response": "Unable to retrieve engagement information."
                 }
             
+            # Build API payload with filters
+            api_payload = {
+                "engagement_id": engagement_id,
+                "endpoints": endpoint_ids
+            }
+            
+            # Add optional BU/Environment/Zone filters to payload
+            if business_units:
+                api_payload["businessUnits"] = business_units
+            if environments:
+                api_payload["environments"] = environments
+            if zones:
+                api_payload["zones"] = zones
+            
             # Call API (note: schema expects "endpoints" not "endpoint_ids")
-            # engagement_id is a URL parameter, endpoints goes in body
+            # engagement_id is a URL parameter, other params go in body
             result = await api_executor_service.execute_operation(
                 resource_type="k8s_cluster",
                 operation="list",
-                params={
-                    "engagement_id": engagement_id,
-                    "endpoints": endpoint_ids
-                },
+                params=api_payload,
                 user_roles=context.get("user_roles", [])
             )
             
@@ -396,4 +437,291 @@ class K8sClusterAgent(BaseResourceAgent):
                     return " ".join(words[start:end])
         
         return None
+    
+    def _detect_filter_request(self, user_query: str) -> Optional[str]:
+        """
+        Detect if user is asking to filter clusters by BU/Environment/Zone.
+        
+        Args:
+            user_query: User's query (lowercase)
+            
+        Returns:
+            Filter type: "bu", "environment", "zone", or None
+        """
+        query_lower = user_query.lower()
+        
+        # Keywords indicating filter intent
+        filter_keywords = ["filter", "by", "in", "for", "from"]
+        has_filter_intent = any(kw in query_lower for kw in filter_keywords)
+        
+        if not has_filter_intent:
+            return None
+        
+        # Check what type of filter
+        bu_keywords = ["bu", "business unit", "business units", "department", "dept"]
+        env_keywords = ["environment", "environments", "env"]
+        zone_keywords = ["zone", "zones", "network", "segment"]
+        
+        for kw in bu_keywords:
+            if kw in query_lower:
+                return "bu"
+        
+        for kw in env_keywords:
+            if kw in query_lower:
+                return "environment"
+        
+        for kw in zone_keywords:
+            if kw in query_lower:
+                return "zone"
+        
+        return None
+    
+    async def _get_filter_options(self, filter_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Get available filter options (BU/Environment/Zone) for user to select.
+        
+        IMPORTANT: Each option includes endpoint_id so we can make API calls without
+        asking the user for endpoint separately.
+        
+        Args:
+            filter_type: "bu", "environment", or "zone"
+            
+        Returns:
+            Response dict with formatted options for user selection, or None on error
+        """
+        try:
+            # Fetch department details
+            dept_result = await api_executor_service.get_department_details()
+            
+            if not dept_result.get("success"):
+                logger.warning("⚠️ Could not fetch department details for filtering")
+                return None
+            
+            dept_list = dept_result.get("departmentList", [])
+            if not dept_list:
+                logger.warning("⚠️ No departments found for filtering")
+                return None
+            
+            # Build options list based on filter type
+            # CRITICAL: Every option MUST include endpoint_id for the API call
+            options = []
+            
+            if filter_type == "bu":
+                # List all Business Units
+                for dept in dept_list:
+                    dept_name = dept.get("departmentName", "Unknown")
+                    dept_id = dept.get("departmentId")
+                    endpoint_id = dept.get("endpointId")  # CRITICAL: Include endpoint
+                    endpoint_name = dept.get("endpointName", "Unknown Location")
+                    env_count = dept.get("noOfEnvironments", 0)
+                    
+                    if dept_id and endpoint_id:
+                        options.append({
+                            "id": dept_id,
+                            "name": dept_name,
+                            "endpoint_id": endpoint_id,  # For API call
+                            "endpoint_name": endpoint_name,
+                            "location": endpoint_name,
+                            "environments": env_count
+                        })
+                
+                # Format response
+                response = "## 🏢 Available Business Units\n\n"
+                response += "Select one or more to filter clusters:\n\n"
+                response += "| # | Business Unit | Location | Environments |\n"
+                response += "|---|--------------|----------|-------------|\n"
+                
+                for idx, opt in enumerate(options, 1):
+                    response += f"| {idx} | {opt['name']} | {opt['location']} | {opt['environments']} |\n"
+                
+                response += "\n\n💡 **Reply with the name or number** of the Business Unit(s) you want to filter by."
+                response += "\nExample: `1` or `qatest332` or `1, 3` for multiple selections."
+                
+            elif filter_type == "environment":
+                # List all Environments (grouped by BU)
+                for dept in dept_list:
+                    dept_name = dept.get("departmentName", "Unknown")
+                    endpoint_id = dept.get("endpointId")  # From parent BU
+                    endpoint_name = dept.get("endpointName", "Unknown Location")
+                    
+                    for env in dept.get("environmentList", []):
+                        env_name = env.get("environmentName", "Unknown")
+                        env_id = env.get("environmentId")
+                        zone_count = env.get("noOfZones", 0)
+                        
+                        if env_id and endpoint_id:
+                            options.append({
+                                "id": env_id,
+                                "name": env_name,
+                                "endpoint_id": endpoint_id,  # From parent BU
+                                "endpoint_name": endpoint_name,
+                                "bu": dept_name,
+                                "location": endpoint_name,
+                                "zones": zone_count
+                            })
+                
+                # Format response
+                response = "## 🌍 Available Environments\n\n"
+                response += "Select one or more to filter clusters:\n\n"
+                response += "| # | Environment | Business Unit | Location | Zones |\n"
+                response += "|---|------------|--------------|----------|-------|\n"
+                
+                for idx, opt in enumerate(options, 1):
+                    response += f"| {idx} | {opt['name']} | {opt['bu']} | {opt['location']} | {opt['zones']} |\n"
+                
+                response += "\n\n💡 **Reply with the name or number** of the Environment(s) you want to filter by."
+                response += "\nExample: `2` or `production` or `1, 4` for multiple selections."
+                
+            elif filter_type == "zone":
+                # List all Zones (grouped by Environment and BU)
+                for dept in dept_list:
+                    dept_name = dept.get("departmentName", "Unknown")
+                    endpoint_name = dept.get("endpointName", "Unknown Location")
+                    endpoint_id = dept.get("endpointId")
+                    
+                    for env in dept.get("environmentList", []):
+                        env_name = env.get("environmentName", "Unknown")
+                        env_id = env.get("environmentId")
+                        
+                        for zone in env.get("zoneList", []):
+                            zone_name = zone.get("zoneName", "Unknown")
+                            zone_id = zone.get("zoneId")
+                            
+                            if zone_id and endpoint_id:
+                                options.append({
+                                    "id": zone_id,
+                                    "name": zone_name,
+                                    "endpoint_id": endpoint_id,  # From parent BU
+                                    "endpoint_name": endpoint_name,
+                                    "environment": env_name,
+                                    "environment_id": env_id,
+                                    "bu": dept_name,
+                                    "location": endpoint_name
+                                })
+                
+                # Format response
+                response = "## 📍 Available Zones\n\n"
+                response += "Select one or more to filter clusters:\n\n"
+                response += "| # | Zone | Environment | Business Unit | Location |\n"
+                response += "|---|------|------------|--------------|----------|\n"
+                
+                for idx, opt in enumerate(options, 1):
+                    response += f"| {idx} | {opt['name']} | {opt['environment']} | {opt['bu']} | {opt['location']} |\n"
+                
+                response += "\n\n💡 **Reply with the name or number** of the Zone(s) you want to filter by."
+                response += "\nExample: `3` or `production-zone` or `2, 5` for multiple selections."
+            
+            else:
+                return None
+            
+            if not options:
+                return {
+                    "success": True,
+                    "response": f"No {filter_type}s found for your engagement.",
+                    "needs_selection": False
+                }
+            
+            logger.info(f"📋 Showing {len(options)} {filter_type} options for selection")
+            
+            return {
+                "success": True,
+                "response": response,
+                "needs_selection": True,
+                "filter_type": filter_type,
+                "options": options,
+                "metadata": {
+                    "filter_type": filter_type,
+                    "option_count": len(options),
+                    "resource_type": "k8s_cluster",
+                    "awaiting_filter_selection": True,  # Special flag for filter selection
+                    "skip_endpoint_prompt": True  # Tell validation to NOT ask for endpoint
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting filter options: {str(e)}")
+            return None
+    
+    def parse_filter_selection(
+        self,
+        user_input: str,
+        options: List[Dict[str, Any]],
+        filter_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Parse user's selection from filter options.
+        
+        Handles:
+        - Numbers: "9" → selects option at index 8
+        - Names: "qatest332" → matches by name
+        - Multiple: "1, 3" or "1 and 3" → selects multiple
+        
+        Args:
+            user_input: User's response (e.g., "9", "qatest332", "1, 3")
+            options: List of options that were shown to user
+            filter_type: "bu", "environment", or "zone"
+            
+        Returns:
+            Dict with selected options info including endpoint_ids, or None if no match
+        """
+        if not options:
+            return None
+        
+        user_input = user_input.strip()
+        selected = []
+        
+        # Try to parse as comma/and separated numbers or names
+        import re
+        parts = re.split(r'[,;]|\band\b', user_input)
+        parts = [p.strip() for p in parts if p.strip()]
+        
+        for part in parts:
+            # Try as number first
+            try:
+                idx = int(part) - 1  # Convert to 0-based index
+                if 0 <= idx < len(options):
+                    selected.append(options[idx])
+                    continue
+            except ValueError:
+                pass
+            
+            # Try as name match (case-insensitive, partial match)
+            part_lower = part.lower()
+            for opt in options:
+                opt_name = (opt.get("name") or "").lower()
+                if part_lower in opt_name or opt_name in part_lower:
+                    if opt not in selected:
+                        selected.append(opt)
+                    break
+        
+        if not selected:
+            logger.info(f"❌ No match found for filter selection: '{user_input}'")
+            return None
+        
+        # Extract the filter IDs and endpoint IDs from selected options
+        filter_ids = [opt["id"] for opt in selected]
+        endpoint_ids = list(set(opt["endpoint_id"] for opt in selected))  # Dedupe endpoints
+        endpoint_names = list(set(opt.get("endpoint_name", opt.get("location", "")) for opt in selected))
+        selected_names = [opt["name"] for opt in selected]
+        
+        logger.info(f"✅ Parsed filter selection: {selected_names} (filter_ids={filter_ids}, endpoints={endpoint_ids})")
+        
+        # Determine the filter key based on filter_type
+        filter_key_map = {
+            "bu": "businessUnits",
+            "environment": "environments",
+            "zone": "zones"
+        }
+        filter_key = filter_key_map.get(filter_type, "businessUnits")
+        
+        return {
+            "matched": True,
+            "filter_type": filter_type,
+            "filter_key": filter_key,
+            "filter_ids": filter_ids,
+            "endpoint_ids": endpoint_ids,
+            "endpoint_names": endpoint_names,
+            "selected_names": selected_names,
+            "selected_options": selected
+        }
 

@@ -116,7 +116,7 @@ class LLMFormatterService:
         # Add count notice if truncated
         count_notice = ""
         if is_truncated and actual_count > 0:
-            count_notice = f"\n\n**IMPORTANT: The data below is truncated for processing. The ACTUAL total count is {actual_count} items. Always report this exact count in your summary.**"
+            count_notice = f"\n\n**IMPORTANT: The data below is truncated for processing. The ACTUAL total count is {actual_count} items. Always report this exact count in your summary. Also, at the END of your response, add a note: '📌 _Some results were truncated. Let me know if you'd like to see the complete list or filter by specific criteria._'**"
         
         return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
 

@@ -735,12 +735,19 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
     is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
     
+    # Active conversation statuses that need routing to agent
+    active_statuses = [
+        ConversationStatus.COLLECTING_PARAMS, 
+        ConversationStatus.AWAITING_SELECTION,
+        ConversationStatus.AWAITING_FILTER_SELECTION  # New: for BU/Env/Zone filter selection
+    ]
+    
     # Check for recent active sessions - for short answers, be more aggressive
     if not existing_state:
         recent_state = conversation_state_manager.get_most_recent_active_session()
         if recent_state:
             # For short answers, route to agent if there's ANY recent active session
-            if is_short_answer and recent_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+            if is_short_answer and recent_state.status in active_statuses:
                 logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
                 return True
             # Also check if the recent state is waiting for endpoint selection
@@ -750,7 +757,7 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     
     # If existing conversation in parameter collection or awaiting selection state
     if existing_state:
-        if existing_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+        if existing_state.status in active_statuses:
             logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
             return True
         # For short answers, also continue if conversation was recently active

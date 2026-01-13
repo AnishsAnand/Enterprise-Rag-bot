@@ -50,9 +50,7 @@ class WebScraperService:
         """
         # Try multiple locations in order of preference
         candidate_dirs = [
-            os.getenv("SCRAPER_OUTPUT_DIR", "/app/outputs"),  # Docker environment
-            os.path.join(os.getcwd(), "outputs"),             # Local development
-            os.path.join(tempfile.gettempdir(), "scraper_outputs")  # System temp fallback
+            os.getenv("SCRAPER_OUTPUT_DIR", "/app/outputs")
         ]
         
         self.output_dir = None

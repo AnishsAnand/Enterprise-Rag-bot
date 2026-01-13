@@ -344,6 +344,26 @@ All operations are routed through specialized resource agents for proper handlin
                 }
             )
             
+            # Check if this is a filter selection response (needs user to select BU/Env/Zone)
+            if execution_result.get("set_filter_state"):
+                logger.info(f"🔄 Filter selection required - storing options in state")
+                
+                # Store filter options in state for later retrieval
+                state.pending_filter_options = execution_result.get("filter_options_for_state", [])
+                state.pending_filter_type = execution_result.get("filter_type_for_state", "bu")
+                state.status = ConversationStatus.AWAITING_FILTER_SELECTION
+                
+                # Persist state
+                conversation_state_manager.update_session(state)
+                
+                return {
+                    "agent_name": self.agent_name,
+                    "success": True,
+                    "output": execution_result.get("response", ""),
+                    "execution_result": execution_result,
+                    "metadata": execution_result.get("metadata", {})
+                }
+            
             # Update conversation state with result
             state.set_execution_result(execution_result)
             

@@ -331,7 +331,8 @@
         "parameters": {
           "list": {
             "required": ["endpoints"],
-            "optional": []
+            "optional": ["businessUnits", "environments", "zones"],
+            "description": "Filter clusters by BU/Environment/Zone. Payload format: {\"endpoints\": [12], \"businessUnits\": [4854]} or {\"endpoints\": [12], \"environments\": [5273]} or {\"endpoints\": [12], \"zones\": [16756]}"
           },
           "get_ipc_engagement": {
             "required": ["engagement_id"],

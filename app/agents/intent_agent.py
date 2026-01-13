@@ -85,6 +85,23 @@ User: "Tell me about clusters in Mumbai and Chennai"
 User: "What are the available clusters?" or "What k8s clusters do we have?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Cluster Filtering by BU/Environment/Zone Examples:**
+
+User: "List clusters in business unit XYZ" or "Show clusters for BU ABC"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "Filter clusters by department TATA" or "Show clusters in department test"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "List clusters in environment production" or "Show clusters for env staging"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "Filter clusters by zone XYZ" or "Show clusters in zone test"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "What clusters are in the TATA COMMUNICATIONS business unit?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
 **Kafka Service Examples:**
 
 User: "List Kafka services" or "Show me Kafka" or "What Kafka services do we have?"
@@ -203,9 +220,11 @@ User: "List all available data centers" or "Show available locations"
 - For "list" operation on k8s_cluster, kafka, gitlab, container_registry, jenkins, postgres, documentdb, firewall: "endpoints" parameter is required (data center selection)
 - For "list" operation on vm: NO parameters required (lists all VMs), but can optionally extract endpoint, zone, or department for filtering
 - For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
+- k8s_cluster list supports FILTERING by BU/Environment/Zone - if user asks to "filter by BU", "filter by environment", or "filter by zone", still detect as k8s_cluster list operation. The K8sClusterAgent will handle the filtering intelligently by matching names to IDs.
 - Do NOT extract location names (like "Mumbai", "Delhi") for cluster/service/firewall operations - the ValidationAgent will handle matching locations to endpoint IDs
+- Do NOT extract BU/Environment/Zone names for filtering - the K8sClusterAgent will extract and match them from the user query
 - For VM operations, you CAN extract location/zone/department names as they are used as filters, not required parameters
-- Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
+- Just detect the intent and operation; ValidationAgent/K8sClusterAgent will intelligently match locations/filters from the user query
 - ANY query asking about viewing/counting/listing actual resources (not concepts) should be detected as a list operation
 - "What are the clusters?" = list operation (showing actual clusters)
 - "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)

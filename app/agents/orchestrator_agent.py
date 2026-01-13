@@ -326,6 +326,14 @@ Always confirm destructive operations (delete, update) before executing."""
                 "reason": "Processing user selection from available options"
             }
         
+        # Check if we're awaiting filter selection (BU/Environment/Zone)
+        if state.status == ConversationStatus.AWAITING_FILTER_SELECTION:
+            logger.info(f"🔄 Session in AWAITING_FILTER_SELECTION status, routing to filter_selection handler")
+            return {
+                "route": "filter_selection",
+                "reason": "Processing user filter selection (BU/Environment/Zone)"
+            }
+        
         # Check if ready to execute
         if state.status == ConversationStatus.READY_TO_EXECUTE:
             return {
@@ -545,8 +553,10 @@ Respond with ONLY ONE of these:
                                             "user_roles": user_roles or []
                                         })
                                         
-                                        if exec_result.get("success"):
-                                            state.set_execution_result(exec_result.get("execution_result", {}))
+                                        # Check if awaiting filter selection - don't mark as completed
+                                        if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
+                                            if exec_result.get("success"):
+                                                state.set_execution_result(exec_result.get("execution_result", {}))
                                         
                                         return {
                                             "success": True,
@@ -583,8 +593,10 @@ Respond with ONLY ONE of these:
                                     "user_roles": user_roles or []
                                 })
                                 
-                                if exec_result.get("success"):
-                                    state.set_execution_result(exec_result.get("execution_result", {}))
+                                # Check if awaiting filter selection - don't mark as completed
+                                if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
+                                    if exec_result.get("success"):
+                                        state.set_execution_result(exec_result.get("execution_result", {}))
                                 
                                 return {
                                     "success": True,
@@ -647,8 +659,17 @@ Respond with ONLY ONE of these:
                                 "user_roles": user_roles or []
                             })
                             
-                            # Update state with execution result
-                            if exec_result.get("success"):
+                            # Check if execution is awaiting filter selection (BU/Env/Zone)
+                            # In this case, DON'T mark as completed - state is already set to AWAITING_FILTER_SELECTION
+                            exec_metadata = exec_result.get("metadata", {})
+                            is_awaiting_filter = exec_metadata.get("awaiting_filter_selection") or \
+                                                 state.status == ConversationStatus.AWAITING_FILTER_SELECTION
+                            
+                            if is_awaiting_filter:
+                                logger.info("🔄 Execution returned filter options - keeping AWAITING_FILTER_SELECTION status")
+                                # Don't call set_execution_result - it would mark as COMPLETED
+                                # State is already updated by ExecutionAgent
+                            elif exec_result.get("success"):
                                 state.set_execution_result(exec_result.get("execution_result", {}))
                             
                             return {
@@ -698,14 +719,16 @@ Respond with ONLY ONE of these:
                         "user_roles": user_roles or []
                     })
                     
-                    # Update state with execution result
-                    if result.get("success"):
-                        state.set_execution_result(result.get("execution_result", {}))
-                    else:
-                        state.set_execution_result({
-                            "success": False,
-                            "error": result.get("error", "Execution failed")
-                        })
+                    # Check if awaiting filter selection - don't mark as completed
+                    if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
+                        # Update state with execution result
+                        if result.get("success"):
+                            state.set_execution_result(result.get("execution_result", {}))
+                        else:
+                            state.set_execution_result({
+                                "success": False,
+                                "error": result.get("error", "Execution failed")
+                            })
                     
                     return {
                         "success": True,
@@ -741,6 +764,10 @@ Respond with ONLY ONE of these:
                         "routing": route
                     }
             
+            elif route == "filter_selection":
+                # Process user's filter selection (BU/Environment/Zone)
+                return await self._handle_filter_selection(user_input, state, user_roles)
+            
             else:
                 return {
                     "success": False,
@@ -755,4 +782,143 @@ Respond with ONLY ONE of these:
                 "error": str(e),
                 "response": f"Error executing routing: {str(e)}",
                 "routing": route
+            }
+    
+    async def _handle_filter_selection(
+        self,
+        user_input: str,
+        state: ConversationState,
+        user_roles: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Handle user's selection from BU/Environment/Zone filter options.
+        
+        This is called when state.status == AWAITING_FILTER_SELECTION.
+        User input could be:
+        - A number: "9" → select option at index 8
+        - A name: "qatest332" → match by name
+        - Multiple: "1, 3" or "1 and 3"
+        
+        Args:
+            user_input: User's response
+            state: Conversation state with pending_filter_options
+            user_roles: User's roles
+            
+        Returns:
+            Dict with result (either proceed to execution or ask again)
+        """
+        try:
+            logger.info(f"🔍 Processing filter selection: '{user_input}'")
+            
+            # Get the pending filter options from state
+            options = state.pending_filter_options
+            filter_type = state.pending_filter_type
+            
+            if not options or not filter_type:
+                logger.error("❌ No pending filter options found in state")
+                # Clear the state and start fresh
+                state.status = ConversationStatus.INITIATED
+                state.pending_filter_options = None
+                state.pending_filter_type = None
+                conversation_state_manager.update_session(state)
+                return {
+                    "success": False,
+                    "response": "I lost track of the filter options. Could you please ask again?",
+                    "routing": "filter_selection"
+                }
+            
+            # Use K8sClusterAgent to parse the selection
+            from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
+            cluster_agent = K8sClusterAgent()
+            
+            selection_result = cluster_agent.parse_filter_selection(
+                user_input=user_input,
+                options=options,
+                filter_type=filter_type
+            )
+            
+            if not selection_result or not selection_result.get("matched"):
+                # Could not parse selection - ask user again
+                logger.warning(f"⚠️ Could not match selection '{user_input}' to any option")
+                
+                # Build a helpful message
+                response = f"I couldn't match '{user_input}' to any option.\n\n"
+                response += "Please reply with:\n"
+                response += "- A **number** from the table (e.g., `3`)\n"
+                response += "- A **name** from the list (e.g., `qatest332`)\n"
+                response += "- **Multiple selections** separated by commas (e.g., `1, 3, 5`)\n"
+                
+                return {
+                    "success": True,
+                    "response": response,
+                    "routing": "filter_selection"
+                }
+            
+            # Successfully parsed selection!
+            filter_ids = selection_result["filter_ids"]
+            endpoint_ids = selection_result["endpoint_ids"]
+            endpoint_names = selection_result["endpoint_names"]
+            selected_names = selection_result["selected_names"]
+            filter_key = selection_result["filter_key"]  # "businessUnits", "environments", or "zones"
+            
+            logger.info(f"✅ Filter selection: {selected_names} (endpoints: {endpoint_ids}, {filter_key}: {filter_ids})")
+            
+            # Clear filter selection state
+            state.pending_filter_options = None
+            state.pending_filter_type = None
+            
+            # Add the collected parameters to state
+            state.add_parameter("endpoints", endpoint_ids, is_valid=True)
+            state.add_parameter("endpoint_names", endpoint_names, is_valid=True)
+            state.add_parameter(filter_key, filter_ids, is_valid=True)
+            
+            # Update status to executing
+            state.status = ConversationStatus.EXECUTING
+            state.handoff_to_agent("OrchestratorAgent", "ExecutionAgent", f"Filter selection complete: {selected_names}")
+            
+            # Persist state
+            conversation_state_manager.update_session(state)
+            
+            # Execute the cluster listing with the filters
+            if self.execution_agent:
+                exec_result = await self.execution_agent.execute("", {
+                    "session_id": state.session_id,
+                    "conversation_state": state.to_dict(),
+                    "user_roles": user_roles or []
+                })
+                
+                # Only mark as completed if not awaiting another filter selection
+                if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
+                    if exec_result.get("success"):
+                        state.set_execution_result(exec_result.get("execution_result", {}))
+                
+                return {
+                    "success": True,
+                    "response": exec_result.get("output", ""),
+                    "routing": "execution",
+                    "execution_result": exec_result.get("execution_result"),
+                    "metadata": {
+                        "collected_params": state.collected_params,
+                        "resource_type": state.resource_type,
+                        "operation": state.operation,
+                        "filter_applied": {
+                            "type": filter_type,
+                            "selected": selected_names
+                        }
+                    }
+                }
+            else:
+                return {
+                    "success": False,
+                    "response": "Execution agent not available",
+                    "routing": "filter_selection"
+                }
+            
+        except Exception as e:
+            logger.error(f"❌ Filter selection handling failed: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "response": f"Error processing your selection: {str(e)}",
+                "routing": "filter_selection"
             }
