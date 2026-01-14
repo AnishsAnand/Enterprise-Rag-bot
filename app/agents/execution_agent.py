@@ -1,8 +1,6 @@
 """
 Execution Agent - Executes validated CRUD operations via Resource Agents.
 Routes operations to specialized agents for domain-specific handling.
-
-REFACTORED: Uses resource agent pattern instead of massive elif chain.
 """
 
 from typing import Any, Dict, List, Optional

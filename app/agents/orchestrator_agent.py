@@ -186,7 +186,7 @@ Always confirm destructive operations (delete, update) before executing."""
     
     def _ask_clarifying_question(self, question: str) -> str:
         """Ask clarifying question."""
-        logger.info(f"❓ Clarifying question: {question}")
+        logger.info(f"Clarifying question: {question}")
         return f"CLARIFICATION_NEEDED: {question}"
     
     async def orchestrate(
@@ -215,7 +215,7 @@ Always confirm destructive operations (delete, update) before executing."""
         metrics.agent_active_sessions.labels(agent_name="OrchestratorAgent").inc()
         
         try:
-            logger.info(f"🎭 Orchestrating request for session {session_id}")
+            logger.info(f"Orchestrating request for session {session_id}")
             
             # Get or create conversation state
             state = conversation_state_manager.get_session(session_id)
@@ -234,10 +234,10 @@ Always confirm destructive operations (delete, update) before executing."""
             if state and state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
                 if is_metadata_request:
                     # Don't reset session for metadata requests, just continue
-                    logger.info(f"📋 Metadata request detected, preserving session state")
+                    logger.info(f"Metadata request detected, preserving session state")
                 else:
                     # Regular completed conversation - start fresh for new user query
-                    logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
+                    logger.info(f"Previous conversation {state.status.value}, starting fresh session")
                     conversation_state_manager.delete_session(session_id)
                     state = None
             
@@ -307,7 +307,7 @@ Always confirm destructive operations (delete, update) before executing."""
         if state.status == ConversationStatus.COLLECTING_PARAMS:
             # For cluster creation workflow, always route to validation (it has internal step tracking)
             if state.operation == "create" and state.resource_type == "k8s_cluster":
-                logger.info(f"🎯 Cluster creation in progress, routing to validation")
+                logger.info(f"Cluster creation in progress, routing to validation")
                 return {
                     "route": "validation",
                     "reason": "Continuing cluster creation workflow"
@@ -320,7 +320,7 @@ Always confirm destructive operations (delete, update) before executing."""
         
         # Check if we're awaiting user selection (e.g., which endpoint to use)
         if state.status == ConversationStatus.AWAITING_SELECTION:
-            logger.info(f"🔄 Session in AWAITING_SELECTION status, routing to validation to process user selection")
+            logger.info(f"Session in AWAITING_SELECTION status, routing to validation to process user selection")
             return {
                 "route": "validation",
                 "reason": "Processing user selection from available options"
@@ -344,7 +344,7 @@ Always confirm destructive operations (delete, update) before executing."""
         
         # If it's clearly a resource operation, skip LLM routing
         if has_action and has_resource:
-            logger.info(f"⚡ Fast-path routing: detected resource operation '{user_input}' → intent")
+            logger.info(f"Fast-path routing: detected resource operation '{user_input}' → intent")
             return {
                 "route": "intent",
                 "reason": "Fast-path routing: clear resource operation detected"
@@ -376,7 +376,7 @@ Respond with ONLY ONE of these:
 - ROUTE: DOCUMENTATION"""
 
         try:
-            logger.debug(f"🔍 Routing prompt for query: {user_input}")
+            logger.debug(f"Routing prompt for query: {user_input}")
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=routing_prompt,
                 max_tokens=100,  # Increased from 20 to 100 for more reliable responses
@@ -384,7 +384,7 @@ Respond with ONLY ONE of these:
                 timeout=15  # Add explicit timeout
             )
             
-            logger.info(f"🤖 LLM routing decision (length={len(llm_response)} chars): {llm_response}")
+            logger.info(f"LLM routing decision (length={len(llm_response)} chars): {llm_response}")
             
             # Check for empty or too short response
             if not llm_response or len(llm_response.strip()) < 5:
@@ -400,7 +400,7 @@ Respond with ONLY ONE of these:
                 has_resource = any(kw in query_lower for kw in resource_type_keywords)
                 
                 if has_action and has_resource:
-                    logger.info(f"🎯 Rule-based fallback: detected resource operation in '{user_input}'")
+                    logger.info(f"Rule-based fallback: detected resource operation in '{user_input}'")
                     return {
                         "route": "intent",
                         "reason": "Rule-based routing: resource operation detected (LLM response empty)"
@@ -410,13 +410,13 @@ Respond with ONLY ONE of these:
                 doc_patterns = ["how to", "how do", "how can", "what is", "explain", "why", 
                                "tutorial", "guide", "documentation", "help me", "tell me about"]
                 if any(pattern in query_lower for pattern in doc_patterns):
-                    logger.info(f"🎯 Rule-based fallback: detected documentation pattern in '{user_input}'")
+                    logger.info(f"Rule-based fallback: detected documentation pattern in '{user_input}'")
                     return {
                         "route": "rag",
                         "reason": "Rule-based routing: documentation question detected (LLM response empty)"
                     }
                 else:
-                    logger.info(f"🎯 Rule-based fallback: assuming resource operation for '{user_input}'")
+                    logger.info(f"Rule-based fallback: assuming resource operation for '{user_input}'")
                     return {
                         "route": "intent",
                         "reason": "Rule-based routing: resource operation assumed (LLM response empty)"
@@ -449,13 +449,13 @@ Respond with ONLY ONE of these:
             doc_patterns = ["how to", "how do", "how can", "what is", "what are", "explain", "why", 
                            "tutorial", "guide", "documentation", "help me", "tell me about"]
             if any(pattern in query_lower for pattern in doc_patterns):
-                logger.info(f"🎯 Rule-based fallback (exception): detected documentation pattern")
+                logger.info(f"Rule-based fallback (exception): detected documentation pattern")
                 return {
                     "route": "rag",
                     "reason": "Rule-based routing: documentation question detected (LLM error)"
                 }
             else:
-                logger.info(f"🎯 Rule-based fallback (exception): assuming resource operation")
+                logger.info(f"Rule-based fallback (exception): assuming resource operation")
                 return {
                     "route": "intent",
                     "reason": "Rule-based routing: resource operation assumed (LLM error)"
@@ -509,7 +509,7 @@ Respond with ONLY ONE of these:
                         if extracted_params:
                             state.add_parameters(extracted_params)
                         
-                        logger.info(f"📋 State after intent: required={state.required_params}, collected={list(state.collected_params.keys())}, missing={state.missing_params}")
+                        logger.info(f"State after intent: required={state.required_params}, collected={list(state.collected_params.keys())}, missing={state.missing_params}")
                         
                         # STEP 2: Check if we need more parameters OR if ready to execute
                         # SPECIAL CASE: Cluster creation has its own workflow and always needs validation
@@ -517,10 +517,10 @@ Respond with ONLY ONE of these:
                         if state.operation == "create" and state.resource_type == "k8s_cluster":
                             # Cluster creation uses a multi-step workflow, always route to validation
                             needs_validation = True
-                            logger.info("🎯 Cluster creation detected - routing to ValidationAgent for workflow")
+                            logger.info("Cluster creation detected - routing to ValidationAgent for workflow")
                         
                         if needs_validation:
-                            logger.info(f"🔄 Missing params detected: {state.missing_params}, routing to ValidationAgent")
+                            logger.info(f"Missing params detected: {state.missing_params}, routing to ValidationAgent")
                             state.status = ConversationStatus.COLLECTING_PARAMS
                             state.handoff_to_agent("IntentAgent", "ValidationAgent", "Need to collect missing parameters")
                             
@@ -533,7 +533,7 @@ Respond with ONLY ONE of these:
                                 
                                 # Check if validation made us ready to execute
                                 if validation_result.get("ready_to_execute") and validation_result.get("success"):
-                                    logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
+                                    logger.info("ValidationAgent says ready - routing to ExecutionAgent")
                                     
                                     state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
                                     state.status = ConversationStatus.EXECUTING
@@ -622,7 +622,7 @@ Respond with ONLY ONE of these:
                     
                     # CHECK: If user cancelled the workflow
                     if result.get("cancelled"):
-                        logger.info("🚫 User cancelled the workflow")
+                        logger.info("User cancelled the workflow")
                         return {
                             "success": True,
                             "response": result.get("output", "Workflow cancelled."),
@@ -633,7 +633,7 @@ Respond with ONLY ONE of these:
                     
                     # CHECK: If validation says "ready to execute", route to execution NOW!
                     if result.get("ready_to_execute") and result.get("success"):
-                        logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
+                        logger.info("ValidationAgent says ready - routing to ExecutionAgent")
                         
                         # Update state to executing
                         state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")

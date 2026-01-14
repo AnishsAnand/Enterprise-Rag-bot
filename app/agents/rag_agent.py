@@ -14,11 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class RAGAgent(BaseAgent):
-    """
-    Agent specialized in answering questions using the existing RAG system.
-    Leverages the existing rag_widget.widget_query implementation with Milvus.
-    """
-    
     def __init__(self):
         """
         Initialize RAG agent.
@@ -38,7 +33,6 @@ class RAGAgent(BaseAgent):
         self.setup_agent()
     
     def get_system_prompt(self) -> str:
-        """Return system prompt for RAG agent."""
         return """You are the RAG Agent, specialized in answering questions using documentation.
 
 **Your responsibilities:**
@@ -90,7 +84,6 @@ Is there anything else about cluster features or configuration I can help with?"
 Always be helpful, accurate, and transparent about the source of your information."""
     
     def get_tools(self) -> List[Tool]:
-        """Return tools for RAG agent."""
         return [
             Tool(
                 name="query_knowledge_base",
@@ -104,15 +97,6 @@ Always be helpful, accurate, and transparent about the source of your informatio
         ]
     
     def _query_knowledge_base(self, query: str) -> str:
-        """
-        Query knowledge base using the existing widget_query system.
-        
-        Args:
-            query: User's question
-            
-        Returns:
-            JSON string with RAG response
-        """
         try:
             # Import the existing widget_query function and models
             from app.api.routes.rag_widget import widget_query, WidgetQueryRequest
@@ -171,7 +155,7 @@ Always be helpful, accurate, and transparent about the source of your informatio
             Dict with RAG response
         """
         try:
-            logger.info(f"📚 RAGAgent answering: {input_text[:100]}...")
+            logger.info(f"RAGAgent answering: {input_text[:100]}...")
             
             # Import the existing widget_query function and models
             from app.api.routes.rag_widget import widget_query, WidgetQueryRequest
@@ -193,13 +177,9 @@ Always be helpful, accurate, and transparent about the source of your informatio
             background_tasks = BackgroundTasks()
             result = await widget_query(widget_req, background_tasks)
             
-            # Format response
             answer = result.get("answer", "")
             sources = result.get("sources", [])
             confidence = result.get("confidence", 0.0)
-            
-            # Sources section removed from display per user request
-            # Sources are still tracked in metadata for debugging
             
             logger.info(f"✅ RAGAgent completed with {len(sources)} sources, confidence: {confidence}")
             

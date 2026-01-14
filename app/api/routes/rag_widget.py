@@ -1,22 +1,25 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel, HttpUrl, Field
 from typing import List, Dict, Any, Optional
+
 import asyncio
 from datetime import datetime
 import mimetypes
 from io import BytesIO, StringIO
 import csv
+import os
+import logging
+import re
+import difflib
+import inspect
+import json
+import urllib.parse
+
 from PyPDF2 import PdfReader
 from docx import Document
 import openpyxl
 from bs4 import BeautifulSoup
-import os
-import logging
-import re
-import urllib.parse
-import difflib
-import inspect
-import json
+
 
 from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service

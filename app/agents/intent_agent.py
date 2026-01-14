@@ -16,11 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 class IntentAgent(BaseAgent):
-    """
-    Agent specialized in detecting user intent and extracting parameters.
-    Identifies resource type, operation, and extracts relevant parameters from user input.
-    """
-    
     def __init__(self):
         super().__init__(
             agent_name="IntentAgent",
@@ -235,7 +230,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         return "\n".join(info_lines) if info_lines else "No resources configured"
     
     def get_tools(self) -> List[Tool]:
-        """Return tools for intent agent."""
         return [
             Tool(
                 name="get_resource_schema",
@@ -264,7 +258,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         ]
     
     def _get_resource_schema(self, resource_type: str) -> str:
-        """Get schema for a resource type."""
         try:
             config = api_executor_service.get_resource_config(resource_type)
             if not config:
@@ -275,7 +268,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             return f"Error getting resource schema: {str(e)}"
     
     def _extract_parameters(self, input_json: str) -> str:
-        """Extract parameters from user input."""
         try:
             data = json.loads(input_json)
             user_text = data.get("user_text", "")
@@ -286,7 +278,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             if not config:
                 return json.dumps({"error": "Resource type not found"})
             
-            # Simple parameter extraction (can be enhanced with NER)
             extracted = {}
             
             # Extract common patterns
@@ -311,7 +302,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             return json.dumps({"error": str(e)})
     
     def _validate_operation(self, input_json: str) -> str:
-        """Validate if operation is supported for resource."""
         try:
             data = json.loads(input_json)
             resource_type = data.get("resource_type", "")
@@ -337,29 +327,17 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         input_text: str,
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Execute intent detection on user input.
-        
-        Args:
-            input_text: User's message
-            context: Additional context including session info
-            
-        Returns:
-            Dict with intent detection result
-        """
         try:
-            logger.info(f"🎯 IntentAgent analyzing: {input_text[:100]}...")
+            logger.info(f"IntentAgent analyzing: {input_text[:100]}...")
             
             # Call parent execute to use LLM
             result = await super().execute(input_text, context)
             
-            # Parse the LLM output as JSON
             output_text = result.get("output", "")
             
             # Try to extract JSON from output
             intent_data = self._parse_intent_output(output_text)
             
-            # Add intent data to result
             result["intent_detected"] = intent_data.get("intent_detected", False)
             result["intent_data"] = intent_data
             
@@ -371,7 +349,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 # Handle multi-resource: if resource_type is a list, convert to string
                 # For param lookup, use the first resource type
                 if isinstance(resource_type, list):
-                    logger.info(f"🔧 Multi-resource detected: {resource_type}")
+                    logger.info(f"Multi-resource detected: {resource_type}")
                     # For parameter schema, use the first resource
                     lookup_resource_type = resource_type[0] if resource_type else None
                 else:
