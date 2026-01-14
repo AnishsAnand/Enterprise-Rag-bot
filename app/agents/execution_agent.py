@@ -3,6 +3,7 @@ Execution Agent - Executes validated CRUD operations via Resource Agents.
 Routes operations to specialized agents for domain-specific handling.
 
 REFACTORED: Uses resource agent pattern instead of massive elif chain.
+PRODUCTION: Complete load balancer support via LoadBalancerAgent.
 """
 
 from typing import Any, Dict, List, Optional
@@ -23,7 +24,9 @@ from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
 from app.agents.resource_agents.managed_services_agent import ManagedServicesAgent
 from app.agents.resource_agents.virtual_machine_agent import VirtualMachineAgent
 from app.agents.resource_agents.network_agent import NetworkAgent
+from app.agents.resource_agents.load_balancer_agent import LoadBalancerAgent
 from app.agents.resource_agents.generic_resource_agent import GenericResourceAgent
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,11 @@ class ExecutionAgent(BaseAgent):
     """
     Agent specialized in executing validated CRUD operations.
     Routes ALL operations to specialized resource agents for clean, maintainable code.
+    
+    PRODUCTION NOTES:
+    - Load balancer operations handled by LoadBalancerAgent
+    - Firewall operations handled by NetworkAgent
+    - Clean separation of concerns
     """
     
     def __init__(self):
@@ -48,7 +56,8 @@ class ExecutionAgent(BaseAgent):
         self.k8s_agent = K8sClusterAgent()
         self.managed_services_agent = ManagedServicesAgent()
         self.vm_agent = VirtualMachineAgent()
-        self.network_agent = NetworkAgent()
+        self.network_agent = NetworkAgent()  # Handles firewalls only
+        self.load_balancer_agent = LoadBalancerAgent()  # NEW: Dedicated LB agent
         self.generic_agent = GenericResourceAgent()
         
         # Resource type to agent mapping - ALL resources go through agents
@@ -72,9 +81,13 @@ class ExecutionAgent(BaseAgent):
             "vm": self.vm_agent,
             "virtual_machine": self.vm_agent,
             
-            # Network
+            # Network - FIREWALLS ONLY
             "firewall": self.network_agent,
-            "load_balancer": self.network_agent,
+            
+            # Load Balancers - DEDICATED AGENT
+            "load_balancer": self.load_balancer_agent,
+            "lb": self.load_balancer_agent,
+            "loadbalancer": self.load_balancer_agent,
             
             # Generic (fallback for other resources)
             "endpoint": self.generic_agent,
@@ -84,6 +97,8 @@ class ExecutionAgent(BaseAgent):
         }
         
         logger.info(f"✅ ExecutionAgent initialized with {len(self.resource_agent_map)} resource agent mappings")
+        logger.info(f"🔧 Load balancer operations → LoadBalancerAgent")
+        logger.info(f"🔥 Firewall operations → NetworkAgent")
         
         # Setup agent
         self.setup_agent()
@@ -101,8 +116,14 @@ class ExecutionAgent(BaseAgent):
 - Kubernetes clusters (K8sClusterAgent)
 - Managed services: Kafka, GitLab, Jenkins, PostgreSQL, DocumentDB, Container Registry (ManagedServicesAgent)
 - Virtual machines (VirtualMachineAgent)
-- Network: Firewalls, Load Balancers (NetworkAgent)
+- Firewalls (NetworkAgent)
+- Load balancers (LoadBalancerAgent) - NEW: Dedicated agent for LB operations
 - Generic: Endpoints, Business Units, Environments, Zones (GenericResourceAgent)
+
+**Load Balancer Operations:**
+- list: List all load balancers (uses IPC engagement ID)
+- get_details: Get detailed configuration for specific LB
+- get_virtual_services: Get VIPs/listeners for specific LB
 
 All operations are routed through specialized resource agents for proper handling."""
     
@@ -226,9 +247,11 @@ All operations are routed through specialized resource agents for proper handlin
         """
         Execute operation via the appropriate resource agent.
         
+        PRODUCTION: Load balancer operations routed to LoadBalancerAgent.
+        
         Args:
-            resource_type: Type of resource (k8s_cluster, kafka, etc.)
-            operation: Operation to perform (list, create, etc.)
+            resource_type: Type of resource (k8s_cluster, kafka, load_balancer, etc.)
+            operation: Operation to perform (list, create, get_details, etc.)
             params: Operation parameters
             context: Execution context (session_id, user_id, user_roles, etc.)
             
@@ -241,17 +264,19 @@ All operations are routed through specialized resource agents for proper handlin
         logger.info(f"🎯 Routing {operation} {resource_type} to {resource_agent.agent_name}")
         
         # Pre-process: Convert endpoint names to IDs if needed
-        endpoint_names = params.get("endpoints") or params.get("endpoint_ids") or params.get("endpoint_names")
-        if endpoint_names and isinstance(endpoint_names, list):
-            if any(isinstance(e, str) and not e.isdigit() for e in endpoint_names):
-                converted_ids, error = await self._convert_endpoint_names_to_ids(endpoint_names)
-                if error and not converted_ids:
-                    return {"success": False, "error": error}
-                if converted_ids:
-                    params["endpoints"] = converted_ids
-                    # Store original names for display
-                    params["endpoint_names"] = endpoint_names
-                    logger.info(f"✅ Converted endpoints: {endpoint_names} -> {converted_ids}")
+        # NOTE: Load balancers don't use endpoint IDs in params (they use IPC engagement ID)
+        if resource_type not in ["load_balancer", "lb", "loadbalancer"]:
+            endpoint_names = params.get("endpoints") or params.get("endpoint_ids") or params.get("endpoint_names")
+            if endpoint_names and isinstance(endpoint_names, list):
+                if any(isinstance(e, str) and not e.isdigit() for e in endpoint_names):
+                    converted_ids, error = await self._convert_endpoint_names_to_ids(endpoint_names)
+                    if error and not converted_ids:
+                        return {"success": False, "error": error}
+                    if converted_ids:
+                        params["endpoints"] = converted_ids
+                        # Store original names for display
+                        params["endpoint_names"] = endpoint_names
+                        logger.info(f"✅ Converted endpoints: {endpoint_names} -> {converted_ids}")
         
         # Execute via resource agent
         try:
@@ -285,6 +310,7 @@ All operations are routed through specialized resource agents for proper handlin
         Execute the operation from conversation state.
         
         Routes ALL operations through resource agents for clean, maintainable code.
+        PRODUCTION: Load balancer operations fully supported via LoadBalancerAgent.
         
         Args:
             input_text: User's message (usually confirmation)
@@ -397,6 +423,8 @@ All operations are routed through specialized resource agents for proper handlin
         Example: "show gitlab and kafka in all endpoints"
         → Executes both gitlab.list and kafka.list in parallel
         
+        PRODUCTION: Supports load balancers in multi-resource queries.
+        
         Args:
             state: Conversation state with comma-separated resource_type
             user_roles: User roles for permission checking
@@ -423,9 +451,13 @@ All operations are routed through specialized resource agents for proper handlin
         logger.info(f"🔀 Executing {len(resource_types)} resource operations in parallel: {resource_types}")
         
         # Pre-convert endpoint names to IDs once (shared across all resources)
+        # NOTE: Load balancers don't use endpoint IDs, so skip for them
         endpoint_names = state.collected_params.get("endpoints") or state.collected_params.get("endpoint_ids")
         if endpoint_names and isinstance(endpoint_names, list):
-            if any(isinstance(e, str) and not e.isdigit() for e in endpoint_names):
+            # Check if any resource type needs endpoint conversion
+            needs_conversion = any(rt not in ["load_balancer", "lb", "loadbalancer"] for rt in resource_types)
+            
+            if needs_conversion and any(isinstance(e, str) and not e.isdigit() for e in endpoint_names):
                 converted_ids, error = await self._convert_endpoint_names_to_ids(endpoint_names)
                 if error and not converted_ids:
                     return {
@@ -567,7 +599,9 @@ All operations are routed through specialized resource agents for proper handlin
             "update": "updated",
             "delete": "deleted",
             "list": "retrieved",
-            "read": "retrieved"
+            "read": "retrieved",
+            "get_details": "retrieved details for",
+            "get_virtual_services": "retrieved virtual services for"
         }.get(state.operation, "processed")
         
         resource_name = state.resource_type.replace("_", " ")

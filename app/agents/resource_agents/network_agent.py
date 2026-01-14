@@ -1,6 +1,6 @@
 """
-Network Agent - Handles firewall and load balancer operations.
-PRODUCTION FIX: Comprehensive load balancer listing with proper error handling.
+Network Agent - Handles firewall operations only.
+PRODUCTION: Load balancer functionality moved to LoadBalancerAgent.
 """
 
 from typing import Any, Dict, List, Optional
@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class NetworkAgent(BaseResourceAgent):
-    """Agent for network operations (firewalls, load balancers)."""
+    """Agent for network operations (firewalls only)."""
     
     def __init__(self):
         super().__init__(
             agent_name="NetworkAgent",
-            agent_description="Specialized agent for network operations including firewalls and load balancers",
+            agent_description="Specialized agent for firewall operations",
             resource_type="network",
             temperature=0.2
         )
@@ -33,7 +33,7 @@ class NetworkAgent(BaseResourceAgent):
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Execute network operation with proper resource type routing.
+        Execute network operation for firewalls.
         
         Args:
             operation: Operation to perform (list, create, update, delete)
@@ -47,17 +47,16 @@ class NetworkAgent(BaseResourceAgent):
             resource_type = context.get("resource_type", "")
             logger.info(f"🔥 NetworkAgent executing: {operation} for {resource_type}")
             
+            # NetworkAgent now only handles firewall operations
+            if resource_type != "firewall":
+                return {
+                    "success": False,
+                    "error": f"NetworkAgent does not handle {resource_type}",
+                    "response": f"NetworkAgent only handles firewall operations. For {resource_type}, please use the appropriate agent."
+                }
+            
             if operation == "list":
-                # Route to appropriate handler based on resource type
-                if resource_type == "firewall":
-                    return await self._list_firewalls(params, context)
-                elif resource_type == "load_balancer":
-                    return await self._list_load_balancers(params, context)
-                else:
-                    return {
-                        "success": False,
-                        "response": f"Listing {resource_type} is not yet implemented."
-                    }
+                return await self._list_firewalls(params, context)
             else:
                 return {
                     "success": False,
@@ -72,146 +71,6 @@ class NetworkAgent(BaseResourceAgent):
                 "response": f"An error occurred while {operation}ing {context.get('resource_type', 'resource')}: {str(e)}"
             }
     
-    async def _list_load_balancers(
-    self,
-    params: Dict[str, Any],
-    context: Dict[str, Any]
-) -> Dict[str, Any]:
-
-        try:
-            user_roles = context.get("user_roles", [])
-            user_id = context.get("user_id")
-            user_query = context.get("user_query", "").lower()
-        
-            logger.info(f"⚖️ Listing load balancers for user: {user_id}")
-        
-        # CRITICAL: Get IPC engagement ID (required for load balancer API)
-            engagement_id = await self.get_engagement_id(user_roles=user_roles)
-            if not engagement_id:
-                return {
-                "success": False,
-                "error": "Failed to get engagement ID",
-                "response": "Unable to retrieve engagement information. Please try again or contact support."
-                }
-        
-        # Convert PAAS engagement ID to IPC engagement ID
-            ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
-                engagement_id=engagement_id,
-                user_id=user_id
-            )
-        
-            if not ipc_engagement_id:
-                return {
-                "success": False,
-                "error": "Failed to get IPC engagement ID",
-                "response": "Unable to retrieve IPC engagement information. Please try again or contact support."
-            }
-        
-            logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
-        
-        # CRITICAL: Single API call with IPC engagement ID
-        # This returns ALL load balancers from ALL endpoints
-            logger.info(f"📡 Calling load balancer API with IPC engagement ID: {ipc_engagement_id}")
-        
-            result = await api_executor_service.list_load_balancers(
-            ipc_engagement_id=ipc_engagement_id,
-            user_id=user_id
-            )
-        
-            if not result.get("success"):
-                return {
-                "success": False,
-                "error": result.get("error"),
-                "response": f"Failed to list load balancers: {result.get('error')}"
-            }
-        
-            load_balancers = result.get("data", [])
-            total_count = result.get("total", len(load_balancers))
-        
-            logger.info(f"✅ Found {total_count} load balancer(s) across all endpoints")
-        
-        # Apply intelligent filtering if user specified criteria
-            filter_criteria = self._extract_filter_criteria(user_query)
-            if filter_criteria and load_balancers:
-                logger.info(f"🔍 Applying filter criteria: {filter_criteria}")
-                load_balancers = await self.filter_with_llm(
-                load_balancers, 
-                filter_criteria, 
-                user_query
-                )
-                logger.info(f"✅ After filtering: {len(load_balancers)} load balancer(s)")
-        
-        # Format with LLM
-            formatted_response = await self.format_response_with_llm(
-            operation="list",
-            raw_data=load_balancers,
-            user_query=user_query,
-                context={
-                "ipc_engagement_id": ipc_engagement_id,
-                "total_count": len(load_balancers),
-                "resource_type": "load_balancer"
-                }
-            )
-        
-        # Handle empty results gracefully
-            if len(load_balancers) == 0:
-                formatted_response = (
-                f"⚖️ **No Load Balancers Found**\n\n"
-                f"Your engagement currently has no load balancers configured.\n\n"
-                f"**This is normal if:**\n"
-                f"- Your engagement is newly set up\n"
-                f"- You haven't created any load balancers yet\n"
-                f"- Load balancers are managed through a different system\n\n"
-                f"💡 **Tip:** To create a load balancer, use the cloud portal or contact your administrator."
-                )
-        
-            return {
-            "success": True,
-            "data": load_balancers,
-            "response": formatted_response,
-            "metadata": {
-                "count": len(load_balancers),
-                "ipc_engagement_id": ipc_engagement_id,
-                "resource_type": "load_balancer"
-                }
-            }
-        
-        except Exception as e:
-            logger.error(f"❌ Error listing load balancers: {str(e)}", exc_info=True)
-            raise
-    
-    
-    def _extract_filter_criteria(self, user_query: str) -> Optional[str]:
-
-        if not user_query:
-            return None
-    
-        query_lower = user_query.lower()
-    
-    # Common filter keywords for load balancers
-        filter_keywords = [
-        "active", "inactive", "enabled", "disabled",
-        "production", "staging", "development", "prod", "stage", "dev",
-        "ssl", "https", "http", "tcp", "udp",
-        "healthy", "unhealthy", "degraded",
-        "high", "low", "traffic", "load",
-        "public", "private", "internal", "external"
-        ]
-    
-    # Look for filter keywords in query
-        for keyword in filter_keywords:
-            if keyword in query_lower:
-                words = query_lower.split()
-                if keyword in words:
-                    idx = words.index(keyword)
-                    start = max(0, idx - 2)
-                    end = min(len(words), idx + 3)
-                    context = " ".join(words[start:end])
-                    logger.info(f"🔍 Extracted filter context: '{context}'")
-                    return context
-    
-        return None
-    
     async def _list_firewalls(
         self,
         params: Dict[str, Any],
@@ -221,15 +80,43 @@ class NetworkAgent(BaseResourceAgent):
         try:
             endpoint_ids = params.get("endpoints", [])
             user_id = context.get("user_id")
+            user_roles = context.get("user_roles", [])
+            user_query = context.get("user_query", "")
             
+            # Get IPC engagement ID if not provided
+            ipc_engagement_id = params.get("ipc_engagement_id")
+            if not ipc_engagement_id:
+                engagement_id = await self.get_engagement_id(user_roles=user_roles)
+                if not engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get engagement ID",
+                        "response": "Unable to retrieve engagement information."
+                    }
+                
+                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                    engagement_id=engagement_id,
+                    user_id=user_id
+                )
+                
+                if not ipc_engagement_id:
+                    return {
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "response": "Unable to retrieve IPC engagement information."
+                    }
+            
+            # Get endpoints if not provided
             if not endpoint_ids:
                 datacenters = await self.get_datacenters()
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             
             logger.info(f"🔍 Listing firewalls for endpoints: {endpoint_ids}")
             
+            # Call API executor service
             result = await api_executor_service.list_firewalls(
                 endpoint_ids=endpoint_ids,
+                ipc_engagement_id=ipc_engagement_id,
                 user_id=user_id
             )
             
@@ -244,13 +131,13 @@ class NetworkAgent(BaseResourceAgent):
             logger.info(f"✅ Found {len(firewalls)} firewalls")
             
             # Format with LLM
-            user_query = context.get("user_query", "")
             formatted_response = await self.format_response_with_llm(
                 operation="list",
                 raw_data=firewalls,
                 user_query=user_query,
                 context={
                     "endpoint_names": params.get("endpoint_names", []),
+                    "ipc_engagement_id": ipc_engagement_id,
                     "resource_type": "firewall"
                 }
             )
@@ -259,7 +146,10 @@ class NetworkAgent(BaseResourceAgent):
                 "success": True,
                 "data": firewalls,
                 "response": formatted_response,
-                "metadata": {"count": len(firewalls)}
+                "metadata": {
+                    "count": len(firewalls),
+                    "resource_type": "firewall"
+                }
             }
         except Exception as e:
             logger.error(f"❌ Error listing firewalls: {str(e)}", exc_info=True)
