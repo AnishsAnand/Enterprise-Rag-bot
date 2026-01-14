@@ -254,7 +254,7 @@
         }
       },
       "k8s_cluster": {
-        "operations": ["create", "update", "delete", "list"],
+        "operations": ["create", "update", "delete", "list", "read"],
         "api_endpoints": {
           "create": {
             "method": "POST", 
@@ -333,6 +333,11 @@
             "required": ["endpoints"],
             "optional": ["businessUnits", "environments", "zones"],
             "description": "Filter clusters by BU/Environment/Zone. Payload format: {\"endpoints\": [12], \"businessUnits\": [4854]} or {\"endpoints\": [12], \"environments\": [5273]} or {\"endpoints\": [12], \"zones\": [16756]}"
+          },
+          "read": {
+            "required": [],
+            "optional": ["cluster_name"],
+            "description": "Look up a specific cluster and find its Zone → Environment → BU hierarchy. Cluster name can be extracted from user query."
           },
           "get_ipc_engagement": {
             "required": ["engagement_id"],

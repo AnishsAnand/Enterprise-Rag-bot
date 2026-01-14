@@ -37,7 +37,7 @@ class K8sClusterAgent(BaseResourceAgent):
     
     def get_supported_operations(self) -> List[str]:
         """Get list of supported operations."""
-        return ["list", "create", "update", "delete", "scale"]
+        return ["list", "create", "update", "delete", "scale", "read"]
     
     async def execute_operation(
         self,
@@ -61,6 +61,8 @@ class K8sClusterAgent(BaseResourceAgent):
             
             if operation == "list":
                 return await self._list_clusters(params, context)
+            elif operation == "read":
+                return await self._read_cluster(params, context)
             elif operation == "create":
                 return await self._create_cluster(params, context)
             elif operation == "scale":
@@ -229,6 +231,441 @@ class K8sClusterAgent(BaseResourceAgent):
         except Exception as e:
             logger.error(f"❌ Error listing clusters: {str(e)}", exc_info=True)
             raise
+    
+    async def _read_cluster(
+        self,
+        params: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Read/lookup a specific cluster and find its Zone → Environment → BU hierarchy.
+        
+        This performs a reverse lookup: given a cluster name, find which zone/env/BU it belongs to.
+        
+        Args:
+            params: Parameters including cluster_name to look up
+            context: Context (session_id, user_query, etc.)
+            
+        Returns:
+            Dict with cluster details including zone/env/BU hierarchy
+        """
+        try:
+            user_query = context.get("user_query", "")
+            cluster_name = params.get("cluster_name") or self._extract_cluster_name(user_query)
+            
+            if not cluster_name:
+                return {
+                    "success": False,
+                    "error": "No cluster name provided",
+                    "response": "Please specify which cluster you want to look up. For example: 'Which zone is cluster my-cluster in?'"
+                }
+            
+            # Check if user is specifically asking about firewall
+            query_lower = user_query.lower()
+            wants_firewall = any(kw in query_lower for kw in ["firewall", "fw", "edge gateway"])
+            
+            logger.info(f"🔍 Looking up cluster: {cluster_name} (wants_firewall: {wants_firewall})")
+            
+            # Step 1: Get all endpoints
+            endpoints = await api_executor_service.get_endpoints()
+            if not endpoints:
+                return {
+                    "success": False,
+                    "error": "Failed to get endpoints",
+                    "response": "Unable to retrieve endpoint information."
+                }
+            
+            all_endpoint_ids = [ep.get("endpointId") for ep in endpoints if ep.get("endpointId")]
+            
+            # Step 2: Get engagement_id
+            engagement_id = await api_executor_service.get_engagement_id()
+            if not engagement_id:
+                return {
+                    "success": False,
+                    "error": "Failed to get engagement ID",
+                    "response": "Unable to retrieve engagement information."
+                }
+            
+            # Step 3: List all clusters to find the target cluster
+            api_payload = {
+                "engagement_id": engagement_id,
+                "endpoints": all_endpoint_ids
+            }
+            
+            result = await api_executor_service.execute_operation(
+                resource_type="k8s_cluster",
+                operation="list",
+                params=api_payload,
+                user_roles=context.get("user_roles", [])
+            )
+            
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "error": result.get("error"),
+                    "response": f"Failed to list clusters: {result.get('error')}"
+                }
+            
+            all_clusters = result.get("data", [])
+            
+            # Find the target cluster (case-insensitive partial match)
+            cluster_name_lower = cluster_name.lower()
+            matching_clusters = [
+                c for c in all_clusters 
+                if cluster_name_lower in c.get("clusterName", "").lower()
+            ]
+            
+            if not matching_clusters:
+                return {
+                    "success": False,
+                    "error": f"Cluster '{cluster_name}' not found",
+                    "response": f"I couldn't find a cluster named '{cluster_name}'. Please check the name and try again."
+                }
+            
+            # If multiple matches, try exact match first
+            exact_match = [c for c in matching_clusters if c.get("clusterName", "").lower() == cluster_name_lower]
+            target_cluster = exact_match[0] if exact_match else matching_clusters[0]
+            
+            logger.info(f"✅ Found cluster: {target_cluster.get('clusterName')}")
+            
+            # Step 4: Get department details for hierarchy lookup
+            dept_result = await api_executor_service.get_department_details()
+            
+            if not dept_result or not dept_result.get("success"):
+                # Return basic cluster info without hierarchy
+                return self._format_cluster_info_response(target_cluster, None, None)
+            
+            # Extract the department list from the response
+            dept_list = dept_result.get("departmentList", [])
+            
+            if not dept_list:
+                return self._format_cluster_info_response(target_cluster, None, None)
+            
+            # Step 5: Find the zone/env/BU hierarchy by filtering
+            hierarchy = await self._find_cluster_hierarchy(
+                target_cluster, 
+                dept_list,  # Pass the list, not the full response dict
+                engagement_id,
+                context
+            )
+            
+            # Step 6: Find firewall for this cluster's BU - ONLY if user asked for it
+            firewall_info = None
+            if wants_firewall and hierarchy:
+                logger.info(f"🔥 User requested firewall info, looking up for BU {hierarchy.get('bu_id')}")
+                firewall_info = await self._find_cluster_firewall(
+                    hierarchy.get("bu_id"),
+                    hierarchy.get("endpoint_id"),
+                    context
+                )
+            
+            return self._format_cluster_info_response(target_cluster, hierarchy, firewall_info, wants_firewall)
+            
+        except Exception as e:
+            logger.error(f"❌ Error reading cluster: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "response": f"An error occurred while looking up the cluster: {str(e)}"
+            }
+    
+    def _extract_cluster_name(self, query: str) -> Optional[str]:
+        """
+        Extract cluster name from user query.
+        
+        Handles patterns like:
+        - "which zone is cluster blr-paas in?"
+        - "what zone is blr-paas cluster in?"
+        - "find cluster my-cluster"
+        - "info about cluster test-cluster"
+        """
+        import re
+        
+        query_lower = query.lower()
+        
+        # Pattern 1: "cluster <name>" or "<name> cluster"
+        patterns = [
+            r"cluster[:\s]+([a-zA-Z0-9_-]+)",  # cluster: name or cluster name
+            r"([a-zA-Z0-9_-]+)\s+cluster",      # name cluster
+            r"is\s+([a-zA-Z0-9_-]+)\s+in",      # is <name> in
+            r"about\s+([a-zA-Z0-9_-]+)",        # about <name>
+            r"find\s+([a-zA-Z0-9_-]+)",         # find <name>
+            r"lookup\s+([a-zA-Z0-9_-]+)",       # lookup <name>
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, query_lower)
+            if match:
+                name = match.group(1)
+                # Filter out common words
+                if name not in ["the", "a", "an", "my", "our", "this", "that", "which", "what", "zone", "environment", "bu"]:
+                    return name
+        
+        return None
+    
+    async def _find_cluster_hierarchy(
+        self,
+        target_cluster: Dict[str, Any],
+        dept_details: List[Dict[str, Any]],
+        engagement_id: str,
+        context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find the Zone → Environment → BU hierarchy for a cluster.
+        
+        Strategy: For each zone in the hierarchy, check if filtering by that zone
+        returns the target cluster. If yes, we found the hierarchy.
+        """
+        target_cluster_id = target_cluster.get("clusterId")
+        target_cluster_name = target_cluster.get("clusterName", "")
+        target_endpoint = target_cluster.get("displayNameEndpoint", "")
+        target_endpoint_id = target_cluster.get("endpointId")  # May or may not exist
+        
+        logger.info(f"🔍 Finding hierarchy for cluster {target_cluster_name} (endpoint: {target_endpoint}, endpoint_id: {target_endpoint_id})")
+        
+        # Build a list of all zones with their hierarchy info
+        zones_to_check = []
+        
+        for dept in dept_details:
+            dept_name = dept.get("departmentName", "Unknown")
+            dept_id = dept.get("departmentId")
+            endpoint_id = dept.get("endpointId")
+            endpoint_name = dept.get("endpointName", "Unknown")
+            
+            for env in dept.get("environmentList", []):
+                env_name = env.get("environmentName", "Unknown")
+                env_id = env.get("environmentId")
+                
+                for zone in env.get("zoneList", []):
+                    zone_name = zone.get("zoneName", "Unknown")
+                    zone_id = zone.get("zoneId")
+                    
+                    if zone_id and endpoint_id:
+                        zones_to_check.append({
+                            "zone_id": zone_id,
+                            "zone_name": zone_name,
+                            "environment_id": env_id,
+                            "environment_name": env_name,
+                            "bu_id": dept_id,
+                            "bu_name": dept_name,
+                            "endpoint_id": endpoint_id,
+                            "endpoint_name": endpoint_name
+                        })
+        
+        logger.info(f"📋 Found {len(zones_to_check)} total zones across all BUs")
+        
+        # Filter zones to only those that might match the cluster's endpoint
+        # Use substring matching since endpoint names may differ (e.g., "Bengaluru" vs "Bengaluru (EP_V2_BL)")
+        target_endpoint_lower = target_endpoint.lower()
+        matching_endpoint_zones = []
+        
+        for zone_info in zones_to_check:
+            zone_endpoint_lower = zone_info["endpoint_name"].lower()
+            # Check if either name contains the other (handles partial matches)
+            if target_endpoint_lower in zone_endpoint_lower or zone_endpoint_lower in target_endpoint_lower:
+                matching_endpoint_zones.append(zone_info)
+        
+        logger.info(f"📋 {len(matching_endpoint_zones)} zones match endpoint '{target_endpoint}'")
+        
+        if not matching_endpoint_zones:
+            # If no endpoint match, try all zones as fallback
+            logger.warning(f"⚠️ No zones match endpoint '{target_endpoint}', checking all {len(zones_to_check)} zones")
+            matching_endpoint_zones = zones_to_check
+        
+        # Check each zone - filter clusters by zone and see if target cluster appears
+        for zone_info in matching_endpoint_zones:
+            api_payload = {
+                "engagement_id": engagement_id,
+                "endpoints": [zone_info["endpoint_id"]],
+                "zones": [zone_info["zone_id"]]
+            }
+            
+            try:
+                logger.debug(f"🔍 Checking zone: {zone_info['zone_name']} (ID: {zone_info['zone_id']})")
+                
+                result = await api_executor_service.execute_operation(
+                    resource_type="k8s_cluster",
+                    operation="list",
+                    params=api_payload,
+                    user_roles=context.get("user_roles", [])
+                )
+                
+                if result.get("success"):
+                    filtered_clusters = result.get("data", [])
+                    
+                    # Check if target cluster is in the filtered results
+                    for cluster in filtered_clusters:
+                        cluster_id = cluster.get("clusterId")
+                        cluster_name = cluster.get("clusterName", "").lower()
+                        
+                        if cluster_id == target_cluster_id or cluster_name == target_cluster_name.lower():
+                            logger.info(f"✅ Found hierarchy: Zone={zone_info['zone_name']}, Env={zone_info['environment_name']}, BU={zone_info['bu_name']}")
+                            return zone_info
+                            
+            except Exception as e:
+                logger.warning(f"⚠️ Error checking zone {zone_info['zone_name']}: {e}")
+                continue
+        
+        logger.info(f"⚠️ Could not determine hierarchy for cluster {target_cluster_name} after checking {len(matching_endpoint_zones)} zones")
+        return None
+    
+    async def _find_cluster_firewall(
+        self,
+        bu_id: int,
+        endpoint_id: int,
+        context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find the firewall associated with a cluster's Business Unit.
+        
+        Firewalls are linked to BUs (departments). We fetch firewalls for the endpoint
+        and find the one that matches the cluster's BU.
+        
+        Args:
+            bu_id: Business Unit (department) ID
+            endpoint_id: Endpoint ID
+            context: Context with user roles
+            
+        Returns:
+            Firewall info dict or None if not found
+        """
+        try:
+            if not bu_id or not endpoint_id:
+                return None
+            
+            logger.info(f"🔥 Looking for firewall for BU ID: {bu_id}, Endpoint ID: {endpoint_id}")
+            
+            # Use the direct list_firewalls method for better control
+            result = await api_executor_service.list_firewalls(
+                endpoint_ids=[endpoint_id]
+            )
+            
+            if not result.get("success"):
+                logger.warning(f"⚠️ Failed to fetch firewalls: {result.get('error')}")
+                return None
+            
+            firewalls = result.get("data", [])
+            logger.info(f"🔥 Found {len(firewalls)} firewalls for endpoint {endpoint_id}")
+            
+            # Find firewall that matches the BU
+            for fw in firewalls:
+                # Log firewall structure for debugging
+                fw_name = fw.get("displayName", "Unknown") if isinstance(fw, dict) else str(fw)[:50]
+                logger.debug(f"🔍 Checking firewall: {fw_name}")
+                
+                if not isinstance(fw, dict):
+                    logger.warning(f"⚠️ Unexpected firewall type: {type(fw)}")
+                    continue
+                    
+                departments = fw.get("department", [])
+                logger.debug(f"🔍 Firewall {fw_name} has {len(departments)} departments: {departments}")
+                
+                for dept in departments:
+                    dept_id = dept.get("id")
+                    # Compare as strings since API might return string IDs
+                    if str(dept_id) == str(bu_id):
+                        logger.info(f"✅ Found matching firewall: {fw.get('displayName')} for BU {dept.get('name')}")
+                        return {
+                            "id": fw.get("id"),
+                            "display_name": fw.get("displayName"),
+                            "technical_name": fw.get("technicalName"),
+                            "component": fw.get("component"),
+                            "component_type": fw.get("componentType"),
+                            "throughput": fw.get("basicDetails", {}).get("throughput"),
+                            "public_ips": fw.get("internetDetails", {}).get("publicIP"),
+                            "category": fw.get("config", {}).get("category"),
+                            "vdom_name": fw.get("config", {}).get("vdomName"),
+                            "iks_enabled": fw.get("basicDetails", {}).get("iksEnabled"),
+                            "hypervisor": fw.get("hypervisor"),
+                            "department_name": dept.get("name"),
+                            "department_id": dept.get("id")
+                        }
+            
+            logger.info(f"⚠️ No firewall found matching BU ID {bu_id}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error finding firewall: {str(e)}")
+            return None
+    
+    def _format_cluster_info_response(
+        self,
+        cluster: Dict[str, Any],
+        hierarchy: Optional[Dict[str, Any]],
+        firewall: Optional[Dict[str, Any]] = None,
+        show_firewall_section: bool = False
+    ) -> Dict[str, Any]:
+        """Format the cluster info response with hierarchy and optional firewall details."""
+        cluster_name = cluster.get("clusterName", "Unknown")
+        
+        response = f"## 📦 Cluster: {cluster_name}\n\n"
+        
+        # Basic cluster info
+        response += "### Cluster Details\n"
+        response += f"- **Status:** {cluster.get('status', 'Unknown')}\n"
+        response += f"- **Type:** {cluster.get('type', 'Unknown')}\n"
+        response += f"- **Nodes:** {cluster.get('nodescount', 'Unknown')}\n"
+        response += f"- **K8s Version:** {cluster.get('kubernetesVersion', 'Unknown')}\n"
+        response += f"- **Location:** {cluster.get('displayNameEndpoint', 'Unknown')}\n"
+        response += f"- **Backup Enabled:** {'Yes' if cluster.get('isIksBackupEnabled') else 'No'}\n"
+        response += f"- **Created:** {cluster.get('createdTime', 'Unknown')}\n"
+        response += f"- **Cluster ID:** {cluster.get('clusterId', 'Unknown')}\n\n"
+        
+        # Hierarchy info
+        if hierarchy:
+            response += "### 🗂️ Organization Hierarchy\n\n"
+            response += f"```\n"
+            response += f"📍 Zone: {hierarchy['zone_name']}\n"
+            response += f"   └── 🌍 Environment: {hierarchy['environment_name']}\n"
+            response += f"       └── 🏢 Business Unit: {hierarchy['bu_name']}\n"
+            response += f"           └── 📍 Location: {hierarchy['endpoint_name']}\n"
+            response += f"```\n\n"
+            
+            response += "| Level | Name | ID |\n"
+            response += "|-------|------|----|\n"
+            response += f"| Zone | {hierarchy['zone_name']} | {hierarchy['zone_id']} |\n"
+            response += f"| Environment | {hierarchy['environment_name']} | {hierarchy['environment_id']} |\n"
+            response += f"| Business Unit | {hierarchy['bu_name']} | {hierarchy['bu_id']} |\n"
+            response += f"| Location | {hierarchy['endpoint_name']} | {hierarchy['endpoint_id']} |\n"
+        else:
+            response += "### 🗂️ Organization Hierarchy\n\n"
+            response += "_Could not determine the zone/environment/business unit hierarchy for this cluster._\n"
+            response += "_The cluster may not be associated with a specific zone, or the hierarchy data is unavailable._\n"
+        
+        # Firewall info - ONLY shown if user specifically asked for it
+        if show_firewall_section:
+            if firewall:
+                response += "\n### 🔥 Associated Firewall\n\n"
+                response += f"- **Name:** {firewall.get('display_name', 'Unknown')}\n"
+                response += f"- **Technical Name:** {firewall.get('technical_name', 'Unknown')}\n"
+                response += f"- **Component:** {firewall.get('component', 'Unknown')}\n"
+                response += f"- **Category:** {firewall.get('category', 'Unknown')}\n"
+                response += f"- **Throughput:** {firewall.get('throughput', 'Unknown')}\n"
+                response += f"- **IKS Enabled:** {firewall.get('iks_enabled', 'Unknown')}\n"
+                if firewall.get('public_ips'):
+                    response += f"- **Public IPs:** `{firewall.get('public_ips')}`\n"
+                response += f"- **VDOM Name:** {firewall.get('vdom_name', 'Unknown')}\n"
+                response += f"- **Firewall ID:** {firewall.get('id', 'Unknown')}\n"
+            else:
+                # User asked for firewall but none was found
+                response += "\n### 🔥 Associated Firewall\n\n"
+                response += "_No firewall found associated with this cluster's business unit._\n"
+        
+        return {
+            "success": True,
+            "data": {
+                "cluster": cluster,
+                "hierarchy": hierarchy,
+                "firewall": firewall
+            },
+            "response": response,
+            "metadata": {
+                "cluster_name": cluster_name,
+                "has_hierarchy": hierarchy is not None,
+                "has_firewall": firewall is not None,
+                "resource_type": "k8s_cluster"
+            }
+        }
     
     async def _create_cluster(
         self,

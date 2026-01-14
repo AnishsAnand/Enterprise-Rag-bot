@@ -102,6 +102,39 @@ User: "Filter clusters by zone XYZ" or "Show clusters in zone test"
 User: "What clusters are in the TATA COMMUNICATIONS business unit?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Cluster Info/Lookup Examples (Reverse Mapping - Zone/Env/BU lookup):**
+
+User: "Which zone is cluster blr-paas in?" or "What zone is blr-paas cluster in?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "blr-paas"
+
+User: "Which environment is cluster my-cluster in?" or "What env does my-cluster belong to?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-cluster"
+
+User: "Which business unit is cluster prod-app in?" or "What BU does prod-app belong to?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "prod-app"
+
+User: "Tell me about cluster test-cluster" or "Info about cluster dev-cluster"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "test-cluster"
+
+User: "Find cluster staging-app" or "Lookup cluster production-web"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "staging-app"
+
+User: "Where is cluster my-app located?" or "What is the hierarchy for cluster test?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-app"
+
+**Cluster Firewall Lookup Examples (find firewall associated with a cluster):**
+
+User: "Which firewall is cluster blr-paas associated to?" or "What firewall is blr-paas using?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "blr-paas"
+
+User: "What firewall does cluster my-cluster use?" or "Show firewall for cluster test-app"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-cluster"
+
+User: "Find the edge gateway for cluster prod-cluster"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "prod-cluster"
+
+**NOTE:** When user asks about a firewall FOR a specific cluster, route to k8s_cluster read operation, NOT firewall read.
+
 **Kafka Service Examples:**
 
 User: "List Kafka services" or "Show me Kafka" or "What Kafka services do we have?"

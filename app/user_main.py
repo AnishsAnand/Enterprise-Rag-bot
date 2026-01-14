@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, WebSocket, WebSocketDisconnect
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +30,7 @@ import jwt
 from urllib.parse import urljoin
 from app.api.routes import rag_widget, agent_chat
 from app.api.routes.auth import router as auth_router
+from app.api.routes import chat_persistence
 from app.routers import openai_compatible
 from app.core.database import init_db
 from app.services.postgres_service import postgres_service
@@ -443,6 +444,10 @@ else:
 app.include_router(openai_compatible.router)
 logger.info("✅ OpenAI-compatible router included for OpenWebUI integration")
 
+# Chat persistence API for frontend integration (chats, models, history)
+app.include_router(chat_persistence.router)
+logger.info("✅ Chat persistence router included for frontend integration")
+
 # ------------------------ Request Models ------------------------
 class UserQueryRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500, description="User's search query")
@@ -844,6 +849,34 @@ async def prometheus_metrics():
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
     from fastapi.responses import Response
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# ------------------------ Socket.IO Stub (Silences 403 errors) ------------------------
+@app.websocket("/socket.io/")
+async def socketio_stub(websocket: WebSocket):
+    """
+    Stub endpoint for Socket.IO connections.
+    
+    Many frontends expect Socket.IO for real-time features. This stub accepts
+    the connection and keeps it alive, preventing 403 errors in logs.
+    
+    For full Socket.IO support, install python-socketio and configure properly.
+    """
+    await websocket.accept()
+    logger.info("Socket.IO stub: connection accepted")
+    try:
+        while True:
+            # Keep connection alive, echo back any messages
+            data = await websocket.receive_text()
+            # Socket.IO protocol: respond to ping with pong
+            if data == "2":  # Socket.IO ping
+                await websocket.send_text("3")  # Socket.IO pong
+            elif data.startswith("40"):  # Socket.IO connect
+                await websocket.send_text("40")  # Acknowledge connection
+    except WebSocketDisconnect:
+        logger.debug("Socket.IO stub: client disconnected")
+    except Exception as e:
+        logger.debug(f"Socket.IO stub: connection closed - {e}")
 
 
 # ------------------------ Health Check ------------------------
