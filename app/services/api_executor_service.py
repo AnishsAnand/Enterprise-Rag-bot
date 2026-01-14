@@ -78,7 +78,7 @@ class APIExecutorService:
     def _load_resource_schema(self) -> None:
         """Load resource schema from JSON file."""
         try:
-            with open(self.resource_schema_path, 'r') as f:
+            with open(self.resource_schema_path,"r", encoding="utf-8") as f:
                 self.resource_schema = json.load(f)
             logger.info(f"✅ Loaded resource schema with {len(self.resource_schema.get('resources', {}))} resources")
         except FileNotFoundError:
@@ -1231,6 +1231,185 @@ class APIExecutorService:
                 "success": False,
                 "error": str(e)
             }
+        
+    async def list_load_balancers(self,ipc_engagement_id: int,  user_id: str = None) -> Dict[str, Any]:
+ 
+        import time
+        start_time = time.time()
+    
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+        
+        # CRITICAL: The URL parameter is the endpoint_id, not engagement_id
+            endpoint_id = ipc_engagement_id  # Rename for clarity
+        
+        # Build the correct URL with endpoint_id in the path
+            url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{endpoint_id}"
+        
+            logger.info(f"⚖️ Fetching load balancers for endpoint {endpoint_id}")
+            logger.info(f"🌐 API Call: GET {url}")
+        
+        # Get auth headers
+            headers = await self._get_auth_headers(user_id=user_id)
+        
+        # Get HTTP client
+            client = await self._get_http_client()
+        
+        # Make GET request (no payload needed)
+            response = await client.get(
+            url,
+            headers=headers,
+            timeout=30.0
+            )
+        
+            logger.info(f"📥 Load balancer API response: {response.status_code}")
+        
+            if response.status_code == 200:
+                data = response.json()
+            
+            # CRITICAL FIX: Handle the nested response structure properly
+            # API returns: {"status": "success" | "failed", "data": [...] | null}
+                api_status = data.get("status", "").lower()
+            
+                if api_status == "success":
+                # Success case - load balancers exist
+                    load_balancers = data.get("data", [])
+                
+                # Handle nested data structure if present
+                    if isinstance(load_balancers, dict) and "data" in load_balancers:
+                        load_balancers = load_balancers["data"]
+                
+                # Ensure it's a list
+                    if not isinstance(load_balancers, list):
+                        load_balancers = [load_balancers] if load_balancers else []
+                
+                    logger.info(f"✅ Found {len(load_balancers)} load balancer(s) at endpoint {endpoint_id}")
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                        "success": True,
+                        "data": load_balancers,
+                        "total": len(load_balancers),
+                        "endpoint_id": endpoint_id,
+                        "duration_seconds": duration,
+                        "message": f"Found {len(load_balancers)} load balancer(s)"
+                        }
+            
+                elif api_status == "failed":
+                # CRITICAL FIX: "failed" status with HTTP 200 means NO load balancers
+                # This is NOT an error - it's a valid empty result
+                    logger.info(f"ℹ️ No load balancers found at endpoint {endpoint_id} (status=failed)")
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                    "success": True,  # THIS IS SUCCESS - no LBs is a valid state
+                    "data": [],
+                    "total": 0,
+                    "endpoint_id": endpoint_id,
+                    "duration_seconds": duration,
+                    "message": "No load balancers found at this endpoint"
+                    }
+            
+                else:
+                # Unknown status - treat as error
+                    error_msg = data.get("message", f"Unknown API status: {api_status}")
+                    logger.error(f"❌ Load balancer API returned unexpected status: {api_status}")
+                    return {
+                    "success": False,
+                    "error": error_msg,
+                    "status_code": response.status_code,
+                    "endpoint_id": endpoint_id
+                    }
+        
+            elif response.status_code == 404:
+            # CRITICAL: 404 means no load balancers at this endpoint (NOT an error)
+                logger.info(f"ℹ️ No load balancers found at endpoint {endpoint_id} (404)")
+                return {
+                "success": True,  # This is SUCCESS - no LBs is a valid state
+                "data": [],
+                "total": 0,
+                "endpoint_id": endpoint_id,
+                "message": "No load balancers found at this endpoint"
+                }
+        
+            else:
+            # Handle other error codes (500, 401, 403, etc.)
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    error_msg = response.text if response.text else error_msg
+            
+                logger.error(f"❌ Load balancer API failed: {error_msg}")
+                return {
+                "success": False,
+                "error": error_msg,
+                "status_code": response.status_code,
+                "endpoint_id": endpoint_id
+                }
+    
+        except Exception as e:
+            logger.error(f"❌ Exception in list_load_balancers for endpoint {ipc_engagement_id}: {e}", exc_info=True)
+            return {
+            "success": False,
+            "error": str(e),
+            "endpoint_id": ipc_engagement_id
+            }
+
+    async def _route_to_resource_agent(
+    self,
+    resource_type: str,
+    operation: str,
+    params: Dict[str, Any],
+    context: Dict[str, Any]
+) -> Dict[str, Any]:
+        
+        try:
+            logger.info(f"🎯 Routing {operation} {resource_type} to appropriate agent")
+        
+        # Route to specific resource agent
+            if resource_type == "k8s_cluster":
+                logger.info("🚢 Routing to K8sClusterAgent")
+                return await self.k8s_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "vm":
+                logger.info("🖥️ Routing to VMAgent")
+                return await self.vm_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "load_balancer": 
+                logger.info("⚖️ Routing to LoadBalancerAgent")
+                return await self.load_balancer_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "firewall":
+                logger.info("🔥 Routing to NetworkAgent (firewall)")
+                context["resource_type"] = "firewall"
+                return await self.network_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "business_unit":
+                logger.info("📁 Routing to BusinessUnitAgent")
+                return await self.business_unit_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "environment":
+                logger.info("🌍 Routing to EnvironmentAgent")
+                return await self.environment_agent.execute_operation(operation, params, context)
+        
+            elif resource_type == "zone":
+                logger.info("🗺️ Routing to ZoneAgent")
+                return await self.zone_agent.execute_operation(operation, params, context)
+        
+        # ... rest of routing logic ...
+        
+            else:
+                logger.warning(f"⚠️ No specific agent for {resource_type}, using generic execution")
+                return await self._generic_execution(resource_type, operation, params, context)
+            
+        except Exception as e:
+            logger.error(f"❌ Error routing to resource agent: {str(e)}", exc_info=True)
+            raise
     
     def get_resource_config(self, resource_type: str) -> Optional[Dict[str, Any]]:
         """

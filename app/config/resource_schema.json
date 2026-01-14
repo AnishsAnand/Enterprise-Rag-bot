@@ -1308,7 +1308,166 @@
               }
             ]
           }
+        },
+       "load_balancer": {
+  "operations": ["list"],
+  "aliases": [
+    "load balancer",
+    "load balancers",
+    "lb",
+    "lbs",
+    "loadbalancer",
+    "loadbalancers",
+    "vayu load balancer",
+    "network load balancer",
+    "application load balancer",
+    "alb",
+    "nlb"
+  ],
+  "api_endpoints": {
+    "list": {
+      "method": "GET",
+      "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}",
+      "description": "List ALL load balancers for the IPC engagement (returns load balancers from all endpoints in one call)",
+      "url_params": ["ipc_engagement_id"]
+    }
+  },
+  "parameters": {
+    "list": {
+      "required": ["ipc_engagement_id"],
+      "optional": []
+    }
+  },
+  "response_mapping": {
+    "load_balancers": "data",
+    "total": "data.length",
+    "lb_names": "data[*].name",
+    "lb_status": "data[*].status",
+    "virtual_ips": "data[*].virtual_ip"
+  },
+  "permissions": {
+    "list": ["admin", "developer", "viewer"]
+  },
+  "response_fields": {
+    "common_fields": [
+      "name",
+      "id",
+      "status",
+      "endpoint",
+      "virtual_ip",
+      "protocol",
+      "port",
+      "backend_pools",
+      "health_check_status",
+      "ssl_enabled",
+      "algorithm",
+      "session_persistence"
+    ],
+    "description": "Load balancer configuration includes VIP, backend pools, health checks, SSL settings, and load balancing algorithm"
+  },
+  "workflow": {
+    "list_load_balancers": {
+      "description": "List load balancers for the engagement using IPC engagement ID",
+      "steps": [
+        {
+          "step": 1,
+          "action": "get_paas_engagement",
+          "resource": "engagement",
+          "operation": "get",
+          "cache": true,
+          "cache_duration": 3600,
+          "note": "Get PAAS engagement_id"
+        },
+        {
+          "step": 2,
+          "action": "convert_to_ipc_engagement",
+          "resource": "k8s_cluster",
+          "operation": "get_ipc_engagement",
+          "depends_on": ["engagement_id"],
+          "cache": true,
+          "cache_duration": 3600,
+          "note": "Convert PAAS engagement_id to IPC engagement_id (REQUIRED for LB API)"
+        },
+        {
+          "step": 3,
+          "action": "list_load_balancers",
+          "method": "GET",
+          "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}",
+          "url_params": {
+            "ipc_engagement_id": "{{ipc_engagement_id}}"
+          },
+          "note": "CRITICAL: Single API call with IPC engagement ID returns ALL load balancers from all endpoints"
+        },
+        {
+          "step": 4,
+          "action": "format_response",
+          "description": "Format load balancer data using LLM",
+          "display_result": true,
+          "display_format": "intelligent",
+          "note": "Use LLM formatter to present data in user-friendly format with emojis and grouping"
+        }
+      ],
+      "example_queries": [
+        "list all load balancers",
+        "show me load balancers",
+        "what load balancers are active?",
+        "list LBs",
+        "show load balancers with SSL",
+        "get load balancer configuration",
+        "which load balancers are handling HTTPS traffic?",
+        "show load balancers in production"
+      ]
+    }
+  },
+  "formatting_instructions": {
+    "list": {
+      "summary": "Show total count and highlight key load balancers with ⚖️ emoji",
+      "table_columns": [
+        "name",
+        "status",
+        "endpoint",
+        "virtual_ip",
+        "protocol",
+        "port",
+        "backend_pool_count",
+        "ssl_enabled"
+      ],
+      "highlights": [
+        "Load balancer status (active/inactive/degraded)",
+        "SSL/TLS configuration and certificate expiry",
+        "Backend pool health status (all healthy/some down/all down)",
+        "Virtual IP addresses",
+        "Protocol and port information (HTTP/HTTPS/TCP/UDP)",
+        "Load balancing algorithm (round-robin, least-connections, etc.)",
+        "Session persistence/affinity settings",
+        "Total backend pool members and their individual health"
+      ],
+      "status_indicators": {
+        "backend_pool_health": {
+          "all_healthy": "🟢 Healthy (all backends up)",
+          "degraded": "🟡 Degraded (some backends down)",
+          "critical": "🔴 Critical (all backends down)"
         }
       }
     }
+  },
+  "notes": [
+    "CRITICAL: Use IPC engagement ID, NOT endpoint iteration",
+    "API returns ALL load balancers from ALL endpoints in a single call",
+    "Similar to business_unit API pattern - one call with IPC engagement ID",
+    "API uses GET method with IPC engagement ID in URL path",
+    "No request body needed - only ipc_engagement_id in URL",
+    "Response includes endpoint information for each load balancer",
+    "404 or status='failed' means no load balancers exist (not an error)",
+    "Health check status indicates backend pool availability",
+    "SSL/TLS settings are critical for secure traffic handling",
+    "Virtual IP (VIP) is the public-facing address clients connect to"
+  ],
+  "api_pattern": "Same as business_unit - single call with IPC engagement ID returns all resources"
+}
   }
+}
+    }
+
+
+

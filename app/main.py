@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 from app.core.config import settings
-from app.api.routes import scraper, rag, admin, support, rag_widget, agent_chat, health
+from app.api.routes import scraper, rag, support, rag_widget, agent_chat, health
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.api.routes.auth import router as auth_router
@@ -151,7 +151,6 @@ app.include_router(health.router)  # Add health check routes
 app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
 app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
-app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
 app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
 

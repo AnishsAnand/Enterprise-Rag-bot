@@ -226,6 +226,121 @@ class ResponseFormatter:
         except Exception as e:
             logger.error(f"Error in auto_format: {e}")
             return response_text
+        
+    @staticmethod
+    def format_load_balancer_list(data: Dict[str, Any]) -> str:
+
+        try:
+            if not data.get("success"):
+                return f"❌ Failed to retrieve load balancers: {data.get('error', 'Unknown error')}"
+        
+            load_balancers = data.get("data", [])
+            if not load_balancers:
+                return "⚖️ No load balancers found."
+        
+            total = data.get("metadata", {}).get("count", len(load_balancers))
+            endpoints_queried = data.get("metadata", {}).get("endpoints_queried", 0)
+        
+            response = f"✅ Found **{total} load balancer(s)** across **{endpoints_queried} datacenter(s)**\n\n"
+        
+        # Group by endpoint
+            by_endpoint = {}
+            for lb in load_balancers:
+                endpoint = lb.get("_endpoint_name", "Unknown")
+                if endpoint not in by_endpoint:
+                    by_endpoint[endpoint] = []
+                by_endpoint[endpoint].append(lb)
+        
+        # Display load balancers by endpoint
+            for endpoint, endpoint_lbs in by_endpoint.items():
+                response += f"### 📍 {endpoint}\n\n"
+            
+                for lb in endpoint_lbs[:10]:  # Show first 10 per endpoint
+                    name = lb.get("name", lb.get("loadBalancerName", "Unknown"))
+                    status = lb.get("status", "Unknown")
+                    vip = lb.get("virtual_ip", lb.get("virtualIp", "N/A"))
+                    protocol = lb.get("protocol", "N/A")
+                    port = lb.get("port", "N/A")
+                    ssl_enabled = lb.get("ssl_enabled", lb.get("sslEnabled", False))
+                
+                # Status emoji
+                    if status.lower() in ["active", "running", "healthy"]:
+                        status_emoji = "✅"
+                    elif status.lower() in ["degraded", "warning"]:
+                        status_emoji = "⚠️"
+                    else:
+                        status_emoji = "❌"
+                
+                # SSL emoji
+                    ssl_emoji = " 🔒" if ssl_enabled else ""
+                
+                    response += f"{status_emoji} **{name}**{ssl_emoji}\n"
+                    response += f"   - VIP: {vip}\n"
+                    response += f"   - Protocol: {protocol} (Port {port})\n"
+                    response += f"   - Status: {status}\n\n"
+            
+                if len(endpoint_lbs) > 10:
+                    response += f"   ... and {len(endpoint_lbs) - 10} more load balancer(s)\n\n"
+        
+        # Add failed endpoints if any
+            failed = data.get("metadata", {}).get("endpoint_details", {}).get("failed", [])
+            if failed:
+                response += "\n⚠️ **Failed to query some endpoints:**\n"
+                for fail in failed:
+                    response += f"   - {fail.get('name', 'Unknown')}: {fail.get('error', 'Unknown error')}\n"
+        
+            return response
+        
+        except Exception as e:
+            logger.error(f"Error formatting load balancer list: {e}")
+        # Fallback to basic format
+            return f"✅ Found load balancers:\n```json\n{json.dumps(data, indent=2)}\n```"
+    
+    @staticmethod
+    def auto_format(response_text: str) -> str:
+        """
+        Automatically detect and format JSON responses.
+        
+        Args:
+            response_text: Raw response text (might contain JSON)
+            
+        Returns:
+            Formatted text
+        """
+        try:
+            # Try to parse as JSON
+            data = json.loads(response_text)
+            
+            # Detect response type and format accordingly
+            if isinstance(data, dict):
+                # Check for cluster list
+                if "clusters" in data or ("data" in data and isinstance(data.get("data"), dict) and "data" in data["data"]):
+                    return ResponseFormatter.format_cluster_list(data)
+                
+                elif "metadata" in data and data.get("metadata", {}).get("resource_type") == "load_balancer":
+                    return ResponseFormatter.format_load_balancer_list(data)
+                
+                # Check for endpoints
+                elif "endpoints" in data:
+                    return ResponseFormatter.format_endpoint_list(data)
+                
+                # Check for RAG response
+                elif "answer" in data:
+                    return ResponseFormatter.format_rag_response(data)
+                
+                # Check for execution result
+                elif "success" in data:
+                    return f"{'✅' if data['success'] else '❌'} {data.get('message', 'Operation completed')}"
+            
+            # If not JSON or unknown format, return as-is
+            return response_text
+            
+        except json.JSONDecodeError:
+            # Not JSON, return as-is
+            return response_text
+        except Exception as e:
+            logger.error(f"Error in auto_format: {e}")
+            return response_text
 
 
 # Create global instance

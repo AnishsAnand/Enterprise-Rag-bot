@@ -12,6 +12,7 @@ import re
 from app.agents.base_agent import BaseAgent
 from app.services.api_executor_service import api_executor_service
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -179,6 +180,47 @@ User: "Show firewalls in Mumbai" or "List network firewalls in Delhi"
 User: "How many firewalls?" or "Count firewalls" or "Show all Vayu firewalls"
 → intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
 
+**Load Balancer Examples - CRITICAL PATTERNS:**
+
+User: "List load balancers" or "Show me load balancers" or "What load balancers do we have?"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "Show load balancers in Mumbai" or "List LBs in Delhi"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "How many load balancers?" or "Count load balancers" or "Show all LBs"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "What are the active load balancers?" or "List load balancers with SSL"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "Show me load balancer configuration" or "Get load balancer details"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "List ALBs" or "Show network load balancers" or "What NLBs do we have?"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "Show loadbalancers" or "List vayu load balancers"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "all load balancers" or "load balancers across all datacenters"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "load balancers in production" or "prod load balancers"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "healthy load balancers" or "load balancers with HTTPS"
+→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+
+**Load Balancer Aliases:**
+- load_balancer, load balancer, load balancers
+- lb, lbs, LB, LBs
+- loadbalancer, loadbalancers
+- vayu load balancer, vayu lb
+- network load balancer, nlb, NLB
+- application load balancer, alb, ALB
+- l4 load balancer, l7 load balancer
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -218,8 +260,14 @@ User: "List all available data centers" or "Show available locations"
 - DocumentDB aliases: documentdb, document db, mongodb, mongo, nosql database
 - VM aliases: vm, vms, virtual machine, virtual machines, instance, instances, server, servers
 - Firewall aliases: firewall, firewalls, fw, vayu firewall, network firewall
+- For "list" operation on load_balancer: "endpoints" parameter is required (data center selection)
+- Do NOT extract location names (like "Mumbai", "Delhi") - ValidationAgent will handle location matching
+- Just detect the intent and operation; ValidationAgent will intelligently match locations
+- ANY query asking about viewing/counting/listing load balancers should be detected as a list operation
+
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
+
         
         return prompt
     
