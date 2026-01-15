@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
-from app.agents import get_agent_manager  # Add agent manager
+from app.agents import get_agent_manager  
 from app.services.openwebui_formatter import format_agent_response_for_openwebui
 
 router = APIRouter()
@@ -571,7 +571,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         logger.info(f"📋 Session ID: {session_id}")
 
         # ==================== STEP 2: Agent Routing Logic ====================
-        # Skip agent routing if force_rag_only is set (prevents infinite loop)
         if request.force_rag_only:
             logger.info(f"🔒 force_rag_only=True: Skipping agent routing, doing pure RAG lookup")
             should_route_to_agent = False
@@ -589,10 +588,8 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
             )
         
         # ==================== STEP 4: Standard RAG Flow ====================
-        # Detect task intent for non-resource operations
         intent_analysis = await orchestration_service.detect_task_intent(query)
         
-        # Auto-execute if enabled and intent is clear
         if request.auto_execute and intent_analysis.get("primary_task"):
             execution_result = await _handle_auto_execution(
                 query=query,
@@ -606,7 +603,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         # ==================== STEP 5: Search and Retrieve Documents ====================
         search_results = await _perform_document_search(query, request)
         
-        # Handle no results case
         if not search_results:
             return await _handle_no_results(query, intent_analysis, request)
 
@@ -710,7 +706,6 @@ async def _get_or_create_session_id(request: WidgetQueryRequest) -> str:
         logger.info(f"📋 Using provided session ID: {request.session_id}")
         return request.session_id
     
-    # Generate session based on user_id if available, otherwise time-based
     time_bucket = str(datetime.now().hour) + str(datetime.now().minute // 10)
     
     if request.user_id:
@@ -730,11 +725,9 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     query_lower = query.lower().strip()
     query_words = query_lower.split()
     
-    # Check if this is a continuation of an existing conversation
     existing_state = conversation_state_manager.get_session(session_id)
     
     # SHORT RESPONSES that are likely answers to agent questions
-    # These should ALWAYS route to agent if there's an active conversation
     short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
     is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
     
@@ -742,11 +735,9 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     if not existing_state:
         recent_state = conversation_state_manager.get_most_recent_active_session()
         if recent_state:
-            # For short answers, route to agent if there's ANY recent active session
             if is_short_answer and recent_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
                 logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
                 return True
-            # Also check if the recent state is waiting for endpoint selection
             if recent_state.status == ConversationStatus.COLLECTING_PARAMS:
                 logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
                 return True
@@ -787,7 +778,6 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
         logger.info(f"🔍 Filter query detected with existing state -> routing to agent")
         return True
     
-    # Use LLM to understand intent if keywords don't match
     if not (has_action and has_resource):
         llm_result = await _llm_intent_classification(query)
         if llm_result:
@@ -897,7 +887,6 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
     )
     
     # Get user roles from request or default to admin for full access
-    # In production, this should come from authentication/authorization
     user_roles = getattr(request, 'user_roles', None) or ["admin", "developer", "viewer"]
     
     agent_result = await agent_manager.process_request(
@@ -1304,7 +1293,6 @@ def _extract_and_score_images(
         if not images_raw:
             images_raw = meta.get("images_json", [])
         
-        # Ensure it's a list
         if not isinstance(images_raw, list):
             if isinstance(images_raw, str):
                 try:
@@ -1328,7 +1316,6 @@ def _extract_and_score_images(
             # Validate image format
             if not isinstance(img, dict):
                 if isinstance(img, str) and img.startswith("http"):
-                    # Convert string URL to dict
                     img = {"url": img, "alt": "", "caption": ""}
                 else:
                     logger.debug(f"Skipping invalid image format: {type(img)}")
@@ -1383,7 +1370,7 @@ def _extract_and_score_images(
             # Only include images with minimum relevance
             if image_score > 0.15:
                 candidate_images.append({
-                    "url": img_url,  # ✅ Absolute URL
+                    "url": img_url,  
                     "alt": img_alt or "Image",
                     "type": img_type,
                     "caption": img_caption,
@@ -1398,7 +1385,6 @@ def _extract_and_score_images(
                     f"(score: {image_score:.3f}, type: {img_type})"
                 )
 
-    # Deduplicate by URL
     seen_urls = set()
     unique_images = []
     for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
@@ -1422,7 +1408,7 @@ def _extract_and_score_images(
                 f"type: {img.get('type', 'N/A')})"
             )
 
-    return unique_images[:12]  # Return top 12 images
+    return unique_images[:12]  
 
 def _build_sources(filtered_results: list, request: WidgetQueryRequest) -> list:
     """Build sources list from filtered results."""
@@ -1569,13 +1555,11 @@ def _extract_key_concepts(text: str) -> List[str]:
     # Remove special characters and split
     words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
     
-    # Common stopwords to filter
     stopwords = {
         'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
         'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has'
     }
     
-    # Filter stopwords and return unique terms
     concepts = [w for w in words if w not in stopwords]
     return list(dict.fromkeys(concepts))[:20]
 
@@ -1751,7 +1735,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
         scrape_params = {
             "extract_text": True,
             "extract_links": False,
-            "extract_images": True,  # ✅ CRITICAL: Must be True
+            "extract_images": True,  
             "extract_tables": True,
             "scroll_page": request.wait_for_js,
             "wait_for_element": "body" if request.wait_for_js else None,
@@ -1780,7 +1764,6 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 detail="Scraped content is too short or empty"
             )
 
-        # ✅ CRITICAL: Extract images from scraped content
         scraped_images = content.get("images", []) or []
         
         logger.info(
@@ -1788,7 +1771,6 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             f"{len(scraped_images)} images from {request.url}"
         )
 
-        # ✅ CRITICAL: Store in knowledge base with images
         if request.store_in_knowledge:
             documents_to_store = []
             
@@ -1797,17 +1779,16 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
                 
                 for i, chunk in enumerate(chunks):
-                    # ✅ First chunk gets all images, others get empty array
                     chunk_images = scraped_images if i == 0 else []
                     
                     documents_to_store.append({
                         "content": chunk,
                         "url": f"{str(request.url)}#chunk-{i}",
                         "title": content.get("title", "") or f"Content from {request.url}",
-                        "format": "text/html",
+                        "format": "text/html", 
                         "timestamp": datetime.now().isoformat(),
                         "source": "widget_scrape",
-                        "images": chunk_images,  # ✅ Store images array
+                        "images": chunk_images,  
                     })
             else:
                 # Single document with all images
@@ -1818,7 +1799,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                     "format": "text/html",
                     "timestamp": datetime.now().isoformat(),
                     "source": "widget_scrape",
-                    "images": scraped_images,  # ✅ Store images array
+                    "images": scraped_images,  
                 })
 
             # Store in background
@@ -1840,15 +1821,14 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
 
-        # ✅ CRITICAL: Include images in response
         return {
             "status": "success",
             "url": str(request.url),
             "title": content.get("title", "Untitled"),
             "content_length": len(page_text),
             "word_count": len(page_text.split()),
-            "images_count": len(scraped_images),  # ✅ Report image count
-            "images": scraped_images[:10],  # ✅ Include sample images in response
+            "images_count": len(scraped_images),  
+            "images": scraped_images[:10],  
             "tables_count": len(content.get("tables", [])),
             "method_used": result.get("method"),
             "stored_in_knowledge": request.store_in_knowledge,
@@ -2201,12 +2181,10 @@ async def store_document_task(docs: List[Dict[str, Any]]):
         for doc in docs:
             images = doc.get("images", [])
             
-            # Ensure images is a list
             if not isinstance(images, list):
                 doc["images"] = []
                 continue
             
-            # Normalize each image
             normalized_images = []
             for img in images:
                 if isinstance(img, dict):
@@ -2217,10 +2195,9 @@ async def store_document_task(docs: List[Dict[str, Any]]):
                             "alt": img.get("alt", ""),
                             "caption": img.get("caption", ""),
                             "type": img.get("type", "content"),
-                            "text": img.get("text", "")[:800]  # Limit text length
+                            "text": img.get("text", "")[:800]  
                         })
                 elif isinstance(img, str) and img.startswith("http"):
-                    # Convert string URL to dict
                     normalized_images.append({
                         "url": img,
                         "alt": "",
