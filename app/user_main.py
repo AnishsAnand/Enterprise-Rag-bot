@@ -28,7 +28,7 @@ import uvicorn
 import jwt
 
 from urllib.parse import urljoin
-from app.api.routes import rag_widget, agent_chat
+from app.api.routes import rag_widget
 from app.api.routes.auth import router as auth_router
 from app.routers import openai_compatible
 from app.core.database import init_db
@@ -432,12 +432,6 @@ if hasattr(rag_widget, "router"):
     logger.info("✅ RAG widget router included at /api")
 else:
     logger.warning("⚠️ rag_widget module has no 'router' attribute")
-
-if hasattr(agent_chat, "router"):
-    app.include_router(agent_chat.router, tags=["agent-chat"])
-    logger.info("✅ Agent chat router included")
-else:
-    logger.warning("⚠️ agent_chat module has no 'router' attribute")
 
 # OpenAI-compatible API for OpenWebUI
 app.include_router(openai_compatible.router)

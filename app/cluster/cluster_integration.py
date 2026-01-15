@@ -1,4 +1,3 @@
-# cluster_api_integration.py - Production-ready cluster API integration
 """
 Integration for Tata Communications PaaS cluster API
 Provides automated cluster information retrieval and management
@@ -368,133 +367,6 @@ class ClusterAPIHandler:
         
         return "\n".join(output)
 
-# ======================== Integration with Action Agent ========================
-
-def integrate_cluster_api_with_action_agent():
-    """
-    Instructions for integrating cluster API with action_agent.py
-    
-    Add this to action_agent.py in the ActionType enum:
-    """
-    integration_code = '''
-# In action_agent.py, update ActionType enum:
-
-class ActionType(Enum):
-    # ... existing types ...
-    CLUSTER_LIST = "cluster_list"
-    CLUSTER_DETAILS = "cluster_details"
-    CLUSTER_FILTER = "cluster_filter"
-
-# In _get_parameters_for_action method, add:
-
-elif action_type == ActionType.CLUSTER_LIST:
-    return get_cluster_list_parameters()
-
-# In _detect_action_type method, add detection logic:
-
-elif any(word in query_lower for word in ['cluster', 'clusters', 'kubernetes', 'k8s']):
-    if any(word in query_lower for word in ['list', 'show', 'get', 'fetch']):
-        action_type = ActionType.CLUSTER_LIST
-        service_target = 'cluster_api'
-    else:
-        action_type = ActionType.CLUSTER_LIST
-        service_target = 'cluster_api'
-
-# In _execute_action method, add execution handler:
-
-elif action_type == ActionType.CLUSTER_LIST:
-    result = await self._execute_cluster_list(service_target, params)
-
-# Add new execution method:
-
-async def _execute_cluster_list(self, service: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute cluster list retrieval"""
-    try:
-        # Parse endpoint selection
-        endpoints_param = params.get('endpoints', 'all')
-        endpoint_ids = None
-        
-        if endpoints_param == 'all':
-            endpoint_ids = [11, 12, 14, 162, 204]  # All locations
-        elif endpoints_param == 'mumbai':
-            endpoint_ids = [11]
-        elif endpoints_param == 'delhi':
-            endpoint_ids = [12]
-        elif endpoints_param == 'bengaluru':
-            endpoint_ids = [14]
-        elif endpoints_param == 'chennai':
-            endpoint_ids = [162]
-        elif endpoints_param == 'cressex':
-            endpoint_ids = [204]
-        elif endpoints_param == 'custom':
-            custom_ids = params.get('custom_endpoint_ids', '')
-            if custom_ids:
-                try:
-                    endpoint_ids = [int(x.strip()) for x in custom_ids.split(',')]
-                except ValueError:
-                    return {
-                        'success': False,
-                        'message': '❌ Invalid endpoint IDs format'
-                    }
-        
-        # Get project ID from environment or config
-        project_id = os.getenv('CLUSTER_API_PROJECT_ID', '1923')
-        
-        # Create handler
-        handler = ClusterAPIHandler(self.http_client, project_id)
-        
-        # Fetch clusters
-        result = await handler.get_clusters(
-            endpoint_ids=endpoint_ids,
-            filter_status=params.get('filter_status'),
-            filter_type=params.get('filter_type')
-        )
-        
-        if not result['success']:
-            return result
-        
-        # Format output
-        clusters = result['clusters']
-        show_details = params.get('show_details', False)
-        formatted_output = handler.format_clusters_output(clusters, show_details)
-        
-        # Generate statistics summary
-        stats = result['statistics']
-        stats_summary = [
-            "\\n📈 **Statistics:**",
-            f"  • Total Clusters: {stats.get('total', 0)}",
-            f"  • Total Nodes: {stats.get('total_nodes', 0)}",
-            f"  • Backup Enabled: {stats.get('backup_enabled_count', 0)}",
-            "\\n**By Status:**"
-        ]
-        
-        for status, count in stats.get('by_status', {}).items():
-            stats_summary.append(f"  • {status}: {count}")
-        
-        stats_summary.append("\\n**By Type:**")
-        for cluster_type, count in stats.get('by_type', {}).items():
-            stats_summary.append(f"  • {cluster_type}: {count}")
-        
-        return {
-            'success': True,
-            'message': f'✅ Successfully retrieved cluster information\\n\\n{formatted_output}\\n{"".join(stats_summary)}',
-            'details': {
-                'total_clusters': len(clusters),
-                'clusters': [c.to_dict() for c in clusters],
-                'statistics': stats
-            }
-        }
-        
-    except Exception as e:
-        logger.exception(f"❌ Cluster list execution failed: {e}")
-        return {
-            'success': False,
-            'message': f'❌ Failed to retrieve clusters: {str(e)}',
-            'error': str(e)
-        }
-'''
-    return integration_code
-
 # ======================== Environment Configuration ========================
 def get_env_configuration():
     """Environment variables needed"""
@@ -545,7 +417,7 @@ if __name__ == "__main__":
     print("🔧 Cluster API Integration Module")
     print("="*60)
     print("\n📝 Integration Instructions:")
-    print(integrate_cluster_api_with_action_agent())
+    # print(integrate_cluster_api_with_action_agent())
     print("\n⚙️ Environment Configuration:")
     print(get_env_configuration())
     print("\n💡 Usage Examples:")
