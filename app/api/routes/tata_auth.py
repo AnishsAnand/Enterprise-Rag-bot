@@ -21,15 +21,13 @@ router = APIRouter(prefix="/api/tata-auth", tags=["Tata Authentication"])
 
 
 class TataAuthRequest(BaseModel):
-    """Request model for Tata authentication"""
     email: EmailStr
     password: str
 
 
 class TataAuthResponse(BaseModel):
-    """Response model for Tata authentication"""
     success: bool
-    access_level: str  # "full" or "read_only"
+    access_level: str  
     message: str
     user_info: Optional[dict] = None
     token: Optional[str] = None
@@ -48,14 +46,12 @@ async def validate_tata_user(request: TataAuthRequest):
         - token: Tata access token if valid Tata user
     """
     try:
-        # Validate against Tata API
         result = await tata_auth_service.validate_user(
             email=request.email,
             password=request.password
         )
         
         if result["valid"]:
-            # Valid Tata Communications user
             return TataAuthResponse(
                 success=True,
                 access_level="full",
@@ -67,7 +63,7 @@ async def validate_tata_user(request: TataAuthRequest):
             # Not a Tata user (or invalid credentials)
             # Still allow access but read-only
             return TataAuthResponse(
-                success=True,  # Success = validation completed, not that user is valid
+                success=True,  
                 access_level="read_only",
                 message="Not a Tata Communications user. Read-only access granted (RAG docs only, no actions).",
                 user_info=result["user_info"],
@@ -84,10 +80,6 @@ async def validate_tata_user(request: TataAuthRequest):
 
 @router.get("/check-email/{email}")
 async def check_email_domain(email: str):
-    """
-    Quick check if email is from Tata Communications domain
-    (doesn't validate credentials, just checks domain)
-    """
     is_tata = email.endswith("@tatacommunications.com") or \
               email.endswith("@tatacommunications.onmicrosoft.com")
     

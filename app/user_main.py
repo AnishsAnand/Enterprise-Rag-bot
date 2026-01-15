@@ -504,7 +504,6 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
             search_depth="balanced",
         )
 
-        # Call widget_query with timeout protection
         widget_resp = None 
         try:
             widget_query_fn = getattr(rag_widget, "widget_query", None)
@@ -580,10 +579,10 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
             
             return {
                 "query": widget_resp.get("query", query),
-                "answer": formatted_answer,  # ✅ NOW FULLY FORMATTED!
-                "steps": steps,  # Keep for API consumers
+                "answer": formatted_answer,  
+                "steps": steps,  
                 "stepsTitle": "Step-by-Step Instructions",
-                "images": images,  # Keep for API consumers
+                "images": images,  
                 "summary": summary,
                 "summaryTitle": "Quick Summary",
                 "timestamp": widget_resp.get("timestamp") or datetime.now().isoformat(),
@@ -634,7 +633,7 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
             
             return {
                 "query": query,
-                "answer": formatted_error,  # ✅ FORMATTED ERROR!
+                "answer": formatted_error,  
                 "steps": [],
                 "stepsTitle": "Step-by-Step Instructions",
                 "images": [],
@@ -658,7 +657,6 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
         if not context_texts:
             context_texts = [r.get("content", "")[:2000] for r in postgres_results[:3]]
 
-        # Generate enhanced answer
         try:
             enhanced = await ai_service.generate_enhanced_response(
                 query,
@@ -739,7 +737,7 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
                 for s in sentences[:6]
             ]
 
-        # Build simple image URL list for mapping
+        
         selected_image_urls = [img.get("url") for img in selected_images if img.get("url")]
 
         # Assign images to steps
@@ -813,7 +811,7 @@ async def user_chat_query(request: UserQueryRequest, background_tasks: Backgroun
 
         return {
             "query": query,
-            "answer": formatted_answer,  # ✅ FULLY FORMATTED!
+            "answer": formatted_answer,  
             "steps": steps,  # Keep for API consumers
             "stepsTitle": "Step-by-Step Instructions",
             "images": images,  # Keep for API consumers

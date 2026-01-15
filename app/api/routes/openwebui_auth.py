@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/openwebui-auth", tags=["OpenWebUI Auth"])
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# JWT settings (should match your main auth)
+# JWT settings 
 SECRET_KEY = "cBbPN3Sa8Yu_mtVrJCozcPpnE0FDXDCSwWZKY-Opw30"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
@@ -36,7 +36,7 @@ class LoginResponse(BaseModel):
     """Login response with token and access level"""
     success: bool
     token: str
-    access_level: str  # "full" or "read_only"
+    access_level: str  
     user_info: dict
     message: str
 
