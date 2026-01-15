@@ -220,7 +220,96 @@ Do NOT include raw JSON. Present only the formatted, user-friendly response."""
             "endpoint": """**Endpoint/Datacenter Specific:**
 - Show datacenter name, ID, type
 - Use location emojis (📍)
-- Present as a clean reference list"""
+- Present as a clean reference list""",
+  "load_balancer": """**Load Balancer Specific Instructions:**
+- Show total count with ⚖️ emoji in summary
+- **CRITICAL KEY FIELDS** to display for each load balancer:
+  - Name/ID (primary identifier)
+  - Status with emojis:
+    * ✅ Active/Running/Healthy
+    * ⚠️ Degraded/Warning/Some backends down
+    * ❌ Inactive/Failed/All backends down
+  - Endpoint/Datacenter location (📍 emoji)
+  - Virtual IP (VIP) address - the public-facing IP clients connect to
+  - Protocol (HTTP, HTTPS 🔒, TCP, UDP)
+  - Port numbers
+  - Backend pool information:
+    * Pool name
+    * Number of backend members
+    * Health status of pool
+  - Load balancing algorithm (Round Robin, Least Connections, IP Hash, etc.)
+  - SSL/TLS status (🔒 emoji if SSL enabled)
+  - Session persistence/affinity settings if present
+
+**Grouping and Organization:**
+- Group by endpoint/datacenter for multi-location queries
+- For each endpoint, show load balancers in a clear list or table
+
+**Health Status Indicators:**
+- Backend pool health is CRITICAL - highlight clearly:
+  * 🟢 **Healthy** - All backend members are up and responding
+  * 🟡 **Degraded** - Some backend members are down
+  * 🔴 **Critical** - All backend members are down or unreachable
+- Show individual backend member status if available
+
+**SSL/Certificate Information:**
+- If SSL/TLS is enabled, show:
+  * Certificate status
+  * Certificate expiration date (if available)
+  * SSL termination point
+
+**Traffic and Performance:**
+- If available, show:
+  * Current connections
+  * Traffic statistics
+  * Backend pool utilization
+
+**Formatting Guidelines:**
+- Use **tables** for multiple load balancers (easier to compare)
+- For single load balancer, show detailed configuration in sections
+- Always include a summary at the top:
+  * Total LBs found
+  * Number of endpoints queried
+  * Active vs Inactive count
+  * SSL-enabled count
+  * Total backend pools and members
+  
+**Error Handling:**
+- If some endpoints failed to query, note this SEPARATELY at the bottom
+- Don't mix failed endpoints with successful results
+- Clearly indicate which endpoints were successfully queried
+
+**Context Usage:**
+- Always include endpoint names in results for clarity
+- If user queried specific location, highlight that in summary
+- If user filtered by status/protocol, mention applied filters
+
+**Example Summary Format:**
+```
+⚖️ **Found 5 Load Balancers** across 3 datacenters
+
+**Summary:**
+- Active: 4 ✅
+- Inactive: 1 ❌
+- SSL-enabled: 3 🔒
+- Total backend pools: 12
+- Total backend members: 48
+```
+
+**Example Table Format:**
+| Name | Status | Endpoint | VIP | Protocol | Port | Backend Pool | SSL |
+|------|--------|----------|-----|----------|------|--------------|-----|
+| web-lb-01 | ✅ Active | Delhi | 10.0.1.100 | HTTPS 🔒 | 443 | 4/4 healthy 🟢 | Yes |
+| api-lb-02 | ⚠️ Degraded | Mumbai | 10.0.2.50 | HTTP | 80 | 2/4 healthy 🟡 | No |
+
+**Important Notes:**
+- Virtual IP (VIP) is what clients connect to - always show this
+- Backend pool health is critical for troubleshooting
+- SSL status affects security posture
+- Algorithm affects how traffic is distributed
+- Session persistence affects user experience
+
+Remember: Load balancers are critical infrastructure - provide clear, actionable information!""",
         }
         
         return instructions.get(resource_type, f"""**{resource_type.title()} Specific:**

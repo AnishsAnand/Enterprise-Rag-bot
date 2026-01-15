@@ -67,6 +67,5 @@ public/
 ssl/
 styles/
 backend/
-app/config/resource_schema.json
 angular-frontend/package-lock.json 
 user-frontend/package-lock.json

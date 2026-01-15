@@ -78,7 +78,7 @@ class APIExecutorService:
     def _load_resource_schema(self) -> None:
         """Load resource schema from JSON file."""
         try:
-            with open(self.resource_schema_path, 'r') as f:
+            with open(self.resource_schema_path,"r", encoding="utf-8") as f:
                 self.resource_schema = json.load(f)
             logger.info(f"✅ Loaded resource schema with {len(self.resource_schema.get('resources', {}))} resources")
         except FileNotFoundError:
@@ -1231,7 +1231,389 @@ class APIExecutorService:
                 "success": False,
                 "error": str(e)
             }
+        
+    async def list_load_balancers(
+    self,
+    ipc_engagement_id: int = None,
+    user_id: str = None,
+    force_refresh: bool = False
+) -> Dict[str, Any]:
+
+        import time
+        start_time = time.time()
     
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+        
+            logger.info(f"⚖️ Listing load balancers for user: {user_id}")
+        
+        # Check user session cache first
+            if not force_refresh:
+                session = await self._get_user_session(user_id)
+                if session and "load_balancers" in session:
+                    cached_lbs = session["load_balancers"]
+                    logger.info(f"✅ Using cached load balancers ({len(cached_lbs)} LBs)")
+                    return {
+                    "success": True,
+                    "data": cached_lbs,
+                    "total": len(cached_lbs),
+                    "ipc_engagement_id": session.get("ipc_engagement_id"),
+                    "cached": True,
+                    "duration_seconds": time.time() - start_time
+                }
+        
+        # Get IPC engagement ID if not provided
+            if not ipc_engagement_id:
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                if not ipc_engagement_id:
+                    return {
+                    "success": False,
+                    "error": "Could not retrieve IPC engagement ID"
+                }
+                logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+        
+        # CRITICAL: Build URL with IPC engagement ID in path
+            url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}"
+        
+            logger.info(f"📡 API Call: GET {url}")
+            logger.info(f"🔑 Using IPC engagement ID: {ipc_engagement_id}")
+        
+        # Get auth headers
+            headers = await self._get_auth_headers(user_id=user_id)
+        
+        # Get HTTP client
+            client = await self._get_http_client()
+        
+        # Make GET request (no payload needed)
+            response = await client.get(
+            url,
+            headers=headers,
+            timeout=30.0
+        )
+        
+            logger.info(f"📥 Load balancer API response: {response.status_code}")
+        
+            if response.status_code == 200:
+                data = response.json()
+            
+            # Handle the nested response structure
+            # API returns: {"status": "success" | "failed", "data": [...] | null}
+                api_status = data.get("status", "").lower()
+            
+                if api_status == "success":
+                # Success case - load balancers exist
+                    load_balancers = data.get("data", [])
+                
+                # Handle nested data structure if present
+                    if isinstance(load_balancers, dict) and "data" in load_balancers:
+                        load_balancers = load_balancers["data"]
+                
+                # Ensure it's a list
+                    if not isinstance(load_balancers, list):
+                        load_balancers = [load_balancers] if load_balancers else []
+                
+                # Cache in user session
+                    await self._update_user_session(
+                    user_id=user_id,
+                    load_balancers=load_balancers
+                    )
+                
+                    logger.info(f"✅ Found {len(load_balancers)} load balancer(s)")
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                    "success": True,
+                    "data": load_balancers,
+                    "total": len(load_balancers),
+                    "ipc_engagement_id": ipc_engagement_id,
+                    "cached": False,
+                    "duration_seconds": duration,
+                    "message": f"Found {len(load_balancers)} load balancer(s)"
+                }
+            
+                elif api_status == "failed":
+                # "failed" status with HTTP 200 means NO load balancers
+                # This is NOT an error - it's a valid empty result
+                    logger.info(f"ℹ️ No load balancers found (status=failed)")
+                
+                # Cache empty result
+                    await self._update_user_session(
+                    user_id=user_id,
+                    load_balancers=[]
+                    )
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                    "success": True,
+                    "data": [],
+                    "total": 0,
+                    "ipc_engagement_id": ipc_engagement_id,
+                    "cached": False,
+                    "duration_seconds": duration,
+                    "message": "No load balancers found"
+                    }
+            
+                else:
+                # Unknown status - treat as error
+                    error_msg = data.get("message", f"Unknown API status: {api_status}")
+                    logger.error(f"❌ Load balancer API returned unexpected status: {api_status}")
+                    return {
+                    "success": False,
+                    "error": error_msg,
+                    "status_code": response.status_code,
+                    "ipc_engagement_id": ipc_engagement_id
+                }
+        
+            elif response.status_code == 404:
+            # 404 means no load balancers (NOT an error)
+                logger.info(f"ℹ️ No load balancers found (404)")
+            
+            # Cache empty result
+                await self._update_user_session(
+                user_id=user_id,
+                load_balancers=[]
+                )
+            
+                return {
+                "success": True,
+                "data": [],
+                "total": 0,
+                "ipc_engagement_id": ipc_engagement_id,
+                "cached": False,
+                "message": "No load balancers found"
+            }
+        
+            else:
+            # Handle other error codes
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    error_msg = response.text if response.text else error_msg
+            
+                logger.error(f"❌ Load balancer API failed: {error_msg}")
+                return {
+                "success": False,
+                "error": error_msg,
+                "status_code": response.status_code,
+                "ipc_engagement_id": ipc_engagement_id
+            }
+    
+        except Exception as e:
+            logger.error(f"❌ Exception in list_load_balancers: {e}", exc_info=True)
+            return {
+            "success": False,
+            "error": str(e),
+            "ipc_engagement_id": ipc_engagement_id
+            }
+
+
+
+    async def get_load_balancer_details(self,lbci: str,user_id: str = None) -> Dict[str, Any]:
+
+        import time
+        start_time = time.time()
+    
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+        
+            if not lbci:
+                return {
+                "success": False,
+                "error": "LBCI (Load Balancer Circuit ID) is required"
+                }
+        
+            logger.info(f"🔍 Fetching details for load balancer: {lbci}")
+        
+        # Build URL
+            url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/getDetails/{lbci}"
+        
+            logger.info(f"📡 API Call: GET {url}")
+        
+        # Get auth headers
+            headers = await self._get_auth_headers(user_id=user_id)
+        
+        # Get HTTP client
+            client = await self._get_http_client()
+        
+        # Make GET request
+            response = await client.get(
+            url,
+            headers=headers,
+            timeout=30.0
+            )
+        
+            logger.info(f"📥 LB Details API response: {response.status_code}")
+        
+            if response.status_code == 200:
+                data = response.json()
+            
+            # API response format: {"status": "success", "data": {...}}
+                if data.get("status") == "success":
+                    details = data.get("data", {})
+                
+                    logger.info(f"✅ Retrieved details for load balancer: {lbci}")
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                    "success": True,
+                    "data": details,
+                    "lbci": lbci,
+                    "duration_seconds": duration,
+                    "message": f"Retrieved details for {lbci}"
+                    }
+                else:
+                    error_msg = data.get("message", "Failed to get load balancer details")
+                    logger.error(f"❌ API returned error: {error_msg}")
+                    return {
+                    "success": False,
+                    "error": error_msg,
+                    "lbci": lbci
+                    }
+        
+            elif response.status_code == 404:
+                logger.warning(f"⚠️ Load balancer not found: {lbci}")
+                return {
+                "success": False,
+                "error": f"Load balancer not found: {lbci}",
+                "status_code": 404,
+                "lbci": lbci
+            }
+        
+            else:
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    error_msg = response.text if response.text else error_msg
+            
+                logger.error(f"❌ LB Details API failed: {error_msg}")
+                return {
+                "success": False,
+                "error": error_msg,
+                "status_code": response.status_code,
+                "lbci": lbci
+                }
+    
+        except Exception as e:
+            logger.error(f"❌ Exception in get_load_balancer_details: {e}", exc_info=True)
+            return {
+            "success": False,
+            "error": str(e),
+            "lbci": lbci
+            }
+        
+
+    async def get_load_balancer_virtual_services(self,lbci: str,user_id: str = None) -> Dict[str, Any]:
+
+        import time
+        start_time = time.time()
+    
+        try:
+            if not user_id:
+                user_id = self._get_user_id_from_email()
+        
+            if not lbci:
+                return {
+                "success": False,
+                "error": "LBCI (Load Balancer Circuit ID) is required"
+                }
+        
+            logger.info(f"🌐 Fetching virtual services for load balancer: {lbci}")
+        
+        # Build URL
+            url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/virtualservices/{lbci}"
+        
+            logger.info(f"📡 API Call: GET {url}")
+        
+        # Get auth headers
+            headers = await self._get_auth_headers(user_id=user_id)
+        
+        # Get HTTP client
+            client = await self._get_http_client()
+        
+        # Make GET request
+            response = await client.get(
+            url,
+            headers=headers,
+            timeout=30.0
+        )
+        
+            logger.info(f"📥 Virtual Services API response: {response.status_code}")
+        
+            if response.status_code == 200:
+                data = response.json()
+            
+            # API response format: {"status": "success", "data": [...]}
+                if data.get("status") == "success":
+                    virtual_services = data.get("data", [])
+                
+                # Ensure it's a list
+                    if not isinstance(virtual_services, list):
+                        virtual_services = [virtual_services] if virtual_services else []
+                
+                    logger.info(f"✅ Retrieved {len(virtual_services)} virtual service(s) for {lbci}")
+                
+                    duration = time.time() - start_time
+                
+                    return {
+                    "success": True,
+                    "data": virtual_services,
+                    "total": len(virtual_services),
+                    "lbci": lbci,
+                    "duration_seconds": duration,
+                    "message": f"Found {len(virtual_services)} virtual service(s)"
+                    }
+                else:
+                    error_msg = data.get("message", "Failed to get virtual services")
+                    logger.error(f"❌ API returned error: {error_msg}")
+                    return {
+                    "success": False,
+                    "error": error_msg,
+                    "lbci": lbci
+                    }
+        
+            elif response.status_code == 404:
+                logger.info(f"ℹ️ No virtual services found for {lbci}")
+                return {
+                "success": True,
+                "data": [],
+                "total": 0,
+                "lbci": lbci,
+                "message": "No virtual services found"
+            }
+        
+            else:
+                error_msg = f"API returned status {response.status_code}"
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get("message", error_msg)
+                except:
+                    error_msg = response.text if response.text else error_msg
+            
+                logger.error(f"❌ Virtual Services API failed: {error_msg}")
+                return {
+                "success": False,
+                "error": error_msg,
+                "status_code": response.status_code,
+                "lbci": lbci
+                }
+    
+        except Exception as e:
+            logger.error(f"❌ Exception in get_load_balancer_virtual_services: {e}", exc_info=True)
+            return {
+            "success": False,
+            "error": str(e),
+            "lbci": lbci
+            }
+
     def get_resource_config(self, resource_type: str) -> Optional[Dict[str, Any]]:
         """
         Get configuration for a resource type.

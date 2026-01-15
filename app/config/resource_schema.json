@@ -1308,7 +1308,176 @@
               }
             ]
           }
-        }
+        },
+        "load_balancer": {
+    "operations": ["list", "get_details", "get_virtual_services"],
+    "aliases": [
+      "load balancer",
+      "load balancers",
+      "lb",
+      "lbs",
+      "loadbalancer",
+      "loadbalancers",
+      "vayu load balancer",
+      "network load balancer",
+      "application load balancer",
+      "alb",
+      "nlb"
+    ],
+    "api_endpoints": {
+      "list": {
+        "method": "GET",
+        "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}",
+        "description": "List ALL load balancers for the IPC engagement (returns load balancers from all endpoints in one call)",
+        "url_params": ["ipc_engagement_id"]
+      },
+      "get_details": {
+        "method": "GET",
+        "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/getDetails/{lbci}",
+        "description": "Get detailed configuration for a specific load balancer by LBCI (Load Balancer Circuit ID)",
+        "url_params": ["lbci"]
+      },
+      "get_virtual_services": {
+        "method": "GET",
+        "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/virtualservices/{lbci}",
+        "description": "Get virtual services (VIPs, listeners) for a specific load balancer by LBCI",
+        "url_params": ["lbci"]
       }
-    }
-  }
+    },
+    "parameters": {
+      "list": {
+        "required": ["ipc_engagement_id"],
+        "optional": []
+      },
+      "get_details": {
+        "required": ["lbci"],
+        "optional": []
+      },
+      "get_virtual_services": {
+        "required": ["lbci"],
+        "optional": []
+      }
+    },
+    "response_mapping": {
+      "load_balancers": "data",
+      "total": "data.length",
+      "lb_names": "data[*].name",
+      "lb_status": "data[*].status",
+      "virtual_ips": "data[*].virtual_ip",
+      "lbci_values": "data[*].lbci"
+    },
+    "permissions": {
+      "list": ["admin", "developer", "viewer"],
+      "get_details": ["admin", "developer", "viewer"],
+      "get_virtual_services": ["admin", "developer", "viewer"]
+    },
+    "workflow": {
+      "list_load_balancers": {
+        "description": "List load balancers for the engagement using IPC engagement ID",
+        "steps": [
+          {
+            "step": 1,
+            "action": "get_paas_engagement",
+            "resource": "engagement",
+            "operation": "get",
+            "cache": true,
+            "cache_duration": 3600,
+            "note": "Get PAAS engagement_id"
+          },
+          {
+            "step": 2,
+            "action": "convert_to_ipc_engagement",
+            "resource": "k8s_cluster",
+            "operation": "get_ipc_engagement",
+            "depends_on": ["engagement_id"],
+            "cache": true,
+            "cache_duration": 3600,
+            "note": "Convert PAAS engagement_id to IPC engagement_id (REQUIRED for LB API)"
+          },
+          {
+            "step": 3,
+            "action": "list_load_balancers",
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}",
+            "url_params": {
+              "ipc_engagement_id": "{{ipc_engagement_id}}"
+            },
+            "note": "CRITICAL: Single API call with IPC engagement ID returns ALL load balancers from all endpoints"
+          },
+          {
+            "step": 4,
+            "action": "format_response",
+            "description": "Format load balancer data using LLM",
+            "display_result": true,
+            "display_format": "intelligent",
+            "note": "Use LLM formatter to present data in user-friendly format"
+          }
+        ]
+      },
+      "get_load_balancer_details": {
+        "description": "Get detailed configuration for a specific load balancer",
+        "steps": [
+          {
+            "step": 1,
+            "action": "extract_lbci",
+            "note": "Extract LBCI from load balancer data or user query"
+          },
+          {
+            "step": 2,
+            "action": "get_lb_details",
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/getDetails/{lbci}",
+            "url_params": {
+              "lbci": "{{lbci}}"
+            }
+          },
+          {
+            "step": 3,
+            "action": "format_details",
+            "description": "Format detailed configuration with LLM"
+          }
+        ]
+      },
+      "get_virtual_services": {
+        "description": "Get virtual services for a load balancer",
+        "steps": [
+          {
+            "step": 1,
+            "action": "extract_lbci",
+            "note": "Extract LBCI from load balancer data or user query"
+          },
+          {
+            "step": 2,
+            "action": "get_virtual_services",
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/virtualservices/{lbci}",
+            "url_params": {
+              "lbci": "{{lbci}}"
+            }
+          },
+          {
+            "step": 3,
+            "action": "format_virtual_services",
+            "description": "Format virtual services with VIPs and listeners"
+          }
+        ]
+      }
+    },
+    "notes": [
+      "CRITICAL: Use IPC engagement ID in URL path (NOT endpoint_id)",
+      "API returns ALL load balancers from ALL endpoints in a single call",
+      "Similar to business_unit API pattern - one call with IPC engagement ID",
+      "LBCI (Load Balancer Circuit ID) is required for detail/virtual service queries",
+      "404 or status='failed' means no load balancers exist (not an error)",
+      "For location/feature-specific queries, filter results intelligently or use detail APIs"
+    ]
+      },
+  "api_pattern": "Same as business_unit - single call with IPC engagement ID returns all resources"
+}
+}
+}
+
+  
+
+
+

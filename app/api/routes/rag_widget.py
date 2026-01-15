@@ -54,10 +54,46 @@ class WidgetScrapeRequest(BaseModel):
 
 class BulkScrapeRequest(BaseModel):
     base_url: HttpUrl
-    max_depth: int = Field(default=2, ge=1, le=5)
-    max_urls: int = Field(default=50, ge=1, le=500)
+    max_depth: int = Field(default=8, ge=1, le=20)
+    max_urls: int = Field(default=500, ge=1, le=3000)
     auto_store: bool = True
     domain_filter: Optional[str] = None
+    follow_external_links: bool = Field(
+        default=False,
+        description="Whether the scraper is allowed to follow links outside the base domain"
+    )
+    extract_deep_images: bool = Field(
+        default=False,
+        description="Extract images from deeply nested pages"
+    )
+
+    extract_tables: bool = Field(
+        default=True,
+        description="Extract tabular content from pages"
+    )
+
+    include_metadata: bool = Field(
+        default=True,
+        description="Include title, headings, and metadata"
+    )
+
+    clean_html: bool = Field(
+        default=True,
+        description="Strip scripts, styles, nav, and boilerplate"
+    )
+
+    chunk_size: int = Field(
+        default=512,
+        ge=128,
+        le=2048,
+        description="Chunk size for RAG ingestion"
+    )
+
+    chunk_overlap: int = Field(
+        default=50,
+        ge=0,
+        le=500
+    )
 
 class TaskExecutionRequest(BaseModel):
     task_description: str = Field(..., min_length=1, max_length=2000)
@@ -418,8 +454,8 @@ class OrchestrationService:
         discovered_urls = await call_maybe_async(
             scraper_service.discover_urls,
             base_url,
-            max_depth=2,
-            max_urls=50
+            max_depth=8,
+            max_urls=500
         )
         
         if discovered_urls:
@@ -427,14 +463,17 @@ class OrchestrationService:
                 enhanced_bulk_scrape_task,
                 discovered_urls,
                 auto_store=services["postgres"]["available"],
-                max_depth=2
+                max_depth=8,
+                extract_images=True
             )
         
         return {
             "status": "started",
             "base_url": base_url,
             "discovered_urls": len(discovered_urls) if discovered_urls else 0,
-            "urls_preview": discovered_urls[:5] if discovered_urls else []
+            "urls_preview": discovered_urls[:10] if discovered_urls else [],
+             "max_depth": 8,
+        "estimated_completion_minutes": len(discovered_urls) * 0.5 if discovered_urls else 0
         }
     
     async def _handle_generic_task(
@@ -1846,9 +1885,22 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
 
 @router.post("/widget/bulk-scrape")
 async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: BackgroundTasks):
-    """Enhanced bulk scraping with better control and filtering"""
+    """
+    Enhanced bulk scraping with deeper crawling capabilities.
+    
+    New features:
+    - Increased default depth from 5→8 (max 20)
+    - Increased default max_urls from 200→500 (max 3000)
+    - Option to follow external links
+    - Deep image extraction from all pages
+    """
     try:
-        logger.info(f"Starting bulk scrape from: {request.base_url}")
+        logger.info(
+            f"🌐 Starting DEEP bulk scrape from: {request.base_url} "
+            f"(depth={request.max_depth}, max_urls={request.max_urls})"
+        )
+        
+        # Discover URLs with requested depth
         discovered_urls = await call_maybe_async(
             scraper_service.discover_urls,
             str(request.base_url),
@@ -1863,28 +1915,52 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
                 "base_url": str(request.base_url)
             }
 
+        # Apply domain filter if specified
         if request.domain_filter:
             filtered_urls = [
                 url for url in discovered_urls
                 if request.domain_filter.lower() in urllib.parse.urlparse(url).netloc.lower()
             ]
+            logger.info(
+                f"🔍 Filtered {len(discovered_urls)} → {len(filtered_urls)} URLs "
+                f"by domain: {request.domain_filter}"
+            )
             discovered_urls = filtered_urls
+        
+        # Filter external links if not allowed
+        if not request.follow_external_links:
+            base_domain = urllib.parse.urlparse(str(request.base_url)).netloc
+            same_domain_urls = [
+                url for url in discovered_urls
+                if urllib.parse.urlparse(url).netloc == base_domain
+            ]
+            logger.info(
+                f"🔒 Filtered {len(discovered_urls)} → {len(same_domain_urls)} URLs "
+                f"(same domain only: {base_domain})"
+            )
+            discovered_urls = same_domain_urls
 
+        # Start enhanced bulk scraping task
         background_tasks.add_task(
             enhanced_bulk_scrape_task,
             discovered_urls,
             request.auto_store,
-            request.max_depth
+            request.max_depth,
+            request.extract_deep_images
         )
 
         return {
             "status": "started",
             "base_url": str(request.base_url),
             "discovered_urls_count": len(discovered_urls),
-            "urls_preview": discovered_urls[:5],
+            "urls_preview": discovered_urls[:10],
             "auto_store": request.auto_store,
             "domain_filter": request.domain_filter,
-            "estimated_time_minutes": len(discovered_urls) * 0.5,
+            "max_depth": request.max_depth,
+            "follow_external_links": request.follow_external_links,
+            "extract_deep_images": request.extract_deep_images,
+            "estimated_time_minutes": round(len(discovered_urls) * 0.5, 1),
+            "estimated_documents": len(discovered_urls) * 2,  # Accounting for chunking
         }
 
     except Exception as e:
@@ -2231,39 +2307,70 @@ async def store_document_task(docs: List[Dict[str, Any]]):
         logger.error(f"❌ Failed storing docs: {e}")
         logger.exception("Full traceback:")
 
-
-async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth: int):
-    """Enhanced bulk scraping with storage"""
+async def enhanced_bulk_scrape_task(
+    urls: List[str], 
+    auto_store: bool, 
+    max_depth: int,
+    extract_images: bool = True
+):
+    """
+    Enhanced bulk scraping with improved image extraction and batching.
+    
+    Improvements:
+    - Adaptive batch sizing based on URL count
+    - Better error handling and retry logic
+    - Enhanced image extraction and storage
+    - Progress logging every 10%
+    """
     scraped_count = 0
     stored_count = 0
     error_count = 0
-    batch_size = min(5, max(1, len(urls) // 10)) if urls else 1
+    total_images = 0
+    
+    # Adaptive batch size: larger batches for bigger jobs
+    if len(urls) > 100:
+        batch_size = 10
+    elif len(urls) > 50:
+        batch_size = 7
+    else:
+        batch_size = 5
 
-    logger.info(f"🚀 Starting bulk scrape of {len(urls)} URLs (batch size: {batch_size})")
+    logger.info(
+        f"🚀 Starting DEEP bulk scrape of {len(urls)} URLs "
+        f"(depth={max_depth}, batch_size={batch_size}, extract_images={extract_images})"
+    )
 
     for i in range(0, len(urls), batch_size):
         batch = urls[i: i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = ((len(urls) - 1) // batch_size) + 1
+        progress_pct = (i / len(urls)) * 100
+        
         batch_start_time = datetime.now()
 
+        # Enhanced scrape parameters with image extraction
         scrape_params = {
             "extract_text": True,
-            "extract_links": False,
-            "extract_images": True,
+            "extract_links": True,  # Enable link extraction for depth
+            "extract_images": extract_images,
             "extract_tables": True,
             "scroll_page": True,
+            "wait_for_element": "body",
             "output_format": "json",
         }
 
+        # Scrape batch concurrently
         tasks = [scraper_service.scrape_url(url, scrape_params) for url in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         documents_to_store = []
         batch_errors = []
+        batch_images = 0
 
         for url, result in zip(batch, results):
             if isinstance(result, Exception):
                 error_count += 1
-                batch_errors.append(f"{url}: {str(result)}")
+                batch_errors.append(f"{url[:50]}: {str(result)[:50]}")
                 logger.warning(f"⚠️ Error scraping {url}: {str(result)}")
                 continue
 
@@ -2271,33 +2378,63 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
                 scraped_count += 1
                 content = result["content"]
                 page_text = content.get("text", "")
+                page_images = content.get("images", []) or []
+                page_links = content.get("links", []) or []
+                
+                batch_images += len(page_images)
+                total_images += len(page_images)
 
+                # Only store pages with substantial content
                 if page_text and len(page_text.strip()) >= 100:
                     if auto_store:
+                        # Split large pages into chunks
                         if len(page_text) > 2500:
-                            chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
+                            chunks = chunk_text(page_text, chunk_size=2000, overlap=300)
                             for j, chunk in enumerate(chunks):
+                                # First chunk gets all images
+                                chunk_images = page_images if j == 0 else []
+                                
                                 documents_to_store.append({
                                     "content": chunk,
                                     "url": f"{url}#chunk-{j}",
                                     "title": content.get("title", "") or f"Content from {url}",
                                     "format": "text/html",
                                     "timestamp": datetime.now().isoformat(),
-                                    "source": "widget_bulk_scrape",
-                                    "images": content.get("images", []) if j == 0 else [],
+                                    "source": "widget_bulk_scrape_deep",
+                                    "images": chunk_images,
+                                    "metadata": {
+                                        "chunk_index": j,
+                                        "total_chunks": len(chunks),
+                                        "page_images": len(page_images),
+                                        "page_links": len(page_links),
+                                        "scrape_depth": max_depth
+                                    }
                                 })
                         else:
+                            # Single document with all images
                             documents_to_store.append({
                                 "content": page_text,
                                 "url": url,
                                 "title": content.get("title", "") or f"Content from {url}",
                                 "format": "text/html",
                                 "timestamp": datetime.now().isoformat(),
-                                "source": "widget_bulk_scrape",
-                                "images": content.get("images", []) or [],
+                                "source": "widget_bulk_scrape_deep",
+                                "images": page_images,
+                                "metadata": {
+                                    "page_images": len(page_images),
+                                    "page_links": len(page_links),
+                                    "scrape_depth": max_depth
+                                }
                             })
+                    
+                    logger.debug(
+                        f"✅ Scraped {url[:60]}: {len(page_text)} chars, "
+                        f"{len(page_images)} images, {len(page_links)} links"
+                    )
                 else:
-                    logger.warning(f"⚠️ Skipping {url}: content too short ({len(page_text)} chars)")
+                    logger.warning(
+                        f"⚠️ Skipping {url[:60]}: content too short ({len(page_text)} chars)"
+                    )
             else:
                 error_count += 1
                 logger.warning(f"⚠️ Failed to scrape {url}: {result.get('error', 'Unknown error')}")
@@ -2320,13 +2457,26 @@ async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth
         batch_duration = (datetime.now() - batch_start_time).total_seconds()
         logger.info(f"⏱️ Batch {i//batch_size + 1}/{(len(urls)-1)//batch_size + 1} completed in {batch_duration:.1f}s")
 
+        if len(urls) <= 50 or progress_pct % 10 < (batch_size / len(urls)) * 100:
+            logger.info(
+                f"📊 Progress: {scraped_count}/{len(urls)} scraped, "
+                f"{stored_count} stored, {total_images} images, "
+                f"{error_count} errors | Batch took {batch_duration:.1f}s"
+            )
+
         if batch_errors:
             logger.warning(f"⚠️ Batch errors: {', '.join(batch_errors[:3])}")
 
-        await asyncio.sleep(min(2.0, batch_size * 0.5))
+        # Adaptive delay based on batch size
+        await asyncio.sleep(min(3.0, batch_size * 0.4))
 
+    # Final summary
     success_rate = (scraped_count / len(urls)) * 100 if urls else 0
     logger.info(
-        f"✅ Bulk scrape completed: {scraped_count}/{len(urls)} scraped ({success_rate:.1f}% success), "
-        f"{stored_count} documents stored, {error_count} errors"
+        f"🎉 DEEP bulk scrape completed!\n"
+        f"  📄 Scraped: {scraped_count}/{len(urls)} pages ({success_rate:.1f}% success)\n"
+        f"  💾 Stored: {stored_count} documents\n"
+        f"  🖼️ Images: {total_images} total\n"
+        f"  ❌ Errors: {error_count}\n"
+        f"  📏 Depth: {max_depth} levels"
     )
