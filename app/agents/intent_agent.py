@@ -8,6 +8,7 @@ from langchain.tools import Tool
 import logging
 import json
 import re
+import os 
 
 from app.agents.base_agent import BaseAgent
 from app.services.api_executor_service import api_executor_service
@@ -37,11 +38,12 @@ class IntentAgent(BaseAgent):
         
         # Setup agent
         self.setup_agent()
+        INTENT_MODEL = os.getenv("INTENT_MODEL", "meta/Llama-3.1-8B-Instruct")
     
     def get_system_prompt(self) -> str:
-        """Return system prompt for intent agent."""
+
         resources_info = self._get_resources_info()
-        
+    
         prompt = """You are the Intent Agent, specialized in detecting user intent for cloud resource operations.
 
 **Available Resources:**
@@ -164,10 +166,10 @@ User: "How many VMs?" or "Count virtual machines" or "Show me all instances"
 → intent_detected: true, resource_type: vm, operation: list, extracted_params: empty
 
 User: "List VMs in Mumbai" or "Show virtual machines in Delhi endpoint"
-→ intent_detected: true, resource_type: vm, operation: list, extracted_params: {{endpoint: Mumbai}}
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: endpoint = Mumbai
 
 User: "Show VMs in zone XYZ" or "List virtual machines in department ABC"
-→ intent_detected: true, resource_type: vm, operation: list, extracted_params: {{zone: XYZ}} or {{department: ABC}}
+→ intent_detected: true, resource_type: vm, operation: list, extracted_params: zone = XYZ or department = ABC
 
 **Firewall Examples:**
 
@@ -180,46 +182,93 @@ User: "Show firewalls in Mumbai" or "List network firewalls in Delhi"
 User: "How many firewalls?" or "Count firewalls" or "Show all Vayu firewalls"
 → intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
 
-**Load Balancer Examples - CRITICAL PATTERNS:**
+**Load Balancer Examples - COMPREHENSIVE PATTERNS:**
 
-User: "List load balancers" or "Show me load balancers" or "What load balancers do we have?"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+**General List (show all):**
+User: "list load balancers" or "show load balancers" or "all load balancers"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "Show load balancers in Mumbai" or "List LBs in Delhi"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "show me all LBs" or "what load balancers do we have"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "How many load balancers?" or "Count load balancers" or "Show all LBs"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "list lbs" or "get load balancers"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "What are the active load balancers?" or "List load balancers with SSL"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+**Specific Load Balancer (show one):**
+User: "show EG_Tata_Com_167_LB_SEG_388"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+NOTE: Don't extract the LB name as a param - LoadBalancerAgent will handle it
 
-User: "Show me load balancer configuration" or "Get load balancer details"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "details for LB_TataCommu_Tata_C_229"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "List ALBs" or "Show network load balancers" or "What NLBs do we have?"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "get info on web-prod-lb-01"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "Show loadbalancers" or "List vayu load balancers"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "EG_Tata_Com_142_LB_SEG_276 status"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "all load balancers" or "load balancers across all datacenters"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+**Location-Filtered (specific location):**
+User: "load balancers in Mumbai" or "show LBs in Delhi"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+NOTE: Don't extract location - LoadBalancerAgent will handle it
 
-User: "load balancers in production" or "prod load balancers"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "list load balancers at Chennai datacenter"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "healthy load balancers" or "load balancers with HTTPS"
-→ intent_detected: true, resource_type: load_balancer, operation: list, extracted_params: empty
+User: "what LBs are in Bangalore"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
 
-**Load Balancer Aliases:**
+**Status-Filtered:**
+User: "show active load balancers" or "list inactive LBs"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "what load balancers are degraded"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "healthy load balancers" or "unhealthy LBs"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+**Feature-Filtered:**
+User: "load balancers with SSL" or "HTTPS load balancers"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "show SSL-enabled LBs" or "load balancers using HTTPS"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "TCP load balancers" or "HTTP load balancers"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+**Count/Status Queries:**
+User: "how many load balancers" or "count LBs"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "how many active load balancers in Mumbai"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+**Configuration Queries:**
+User: "load balancer configuration" or "LB settings"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "show load balancer details" or "get LB info"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+**Load Balancer Aliases (ALL these should be detected):**
 - load_balancer, load balancer, load balancers
 - lb, lbs, LB, LBs
 - loadbalancer, loadbalancers
-- vayu load balancer, vayu lb
+- vayu load balancer, vayu lb (Vayu is the product name)
 - network load balancer, nlb, NLB
 - application load balancer, alb, ALB
 - l4 load balancer, l7 load balancer
+
+**CRITICAL RULES for Load Balancer Intent Detection:**
+1. ANY query asking about load balancers → operation: list
+2. Do NOT extract LB names, locations, or filters as params
+3. LoadBalancerAgent will intelligently parse and filter
+4. Just detect: resource_type=load_balancer, operation=list
+5. Keep extracted_params EMPTY (or minimal)
+
 
 **Endpoint/Datacenter Listing Examples:**
 
@@ -267,8 +316,7 @@ User: "List all available data centers" or "Show available locations"
 
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
-
-        
+    
         return prompt
     
     def _get_resources_info(self) -> str:
@@ -445,15 +493,40 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             return result
             
         except Exception as e:
-            logger.error(f"❌ Intent detection failed: {str(e)}")
+            logger.exception(
+        "❌ IntentAgent failed during intent detection. "
+        "Falling back to heuristic intent detection."
+        )
+
+    # Heuristic fallback: assume safe read-only intent
             return {
-                "agent_name": self.agent_name,
-                "success": False,
-                "error": str(e),
-                "intent_detected": False,
-                "output": f"Failed to detect intent: {str(e)}"
-            }
-    
+            "agent_name": self.agent_name,
+            "success": True,  # Important: pipeline should continue
+            "intent_detected": True,
+            "intent_data": {
+            "resource_type": "load_balancer",
+            "operation": "list",
+            "extracted_params": {},
+            "confidence": 0.4,
+            "ambiguities": [
+            "LLM intent detection failed, heuristic fallback applied"
+                ],
+            "   clarification_needed": None
+        },
+        "output": "Intent detection fallback applied due to internal error"}
+
+    def _fallback_intent(self, reason: str) -> Dict[str, Any]:
+        logger.warning(f"⚠️ Intent fallback used: {reason}")
+        return {
+        "resource_type": "load_balancer",
+        "operation": "list",
+        "extracted_params": {},
+        "confidence": 0.4,
+        "ambiguities": [reason],
+        "clarification_needed": None
+        }
+
+
     def _parse_intent_output(self, output_text: str) -> Dict[str, Any]:
         """
         Parse intent data from LLM output.

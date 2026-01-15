@@ -38,21 +38,33 @@ class LLMFormatterService:
         context: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Format API response using LLM.
+        Format API response using LLM with context awareness.
         
         Args:
-            resource_type: Type of resource (k8s_cluster, vm, business_unit, etc.)
-            operation: Operation performed (list, create, update, delete)
+            resource_type: Type of resource
+            operation: Operation performed
             raw_data: Raw API response data
-            user_query: Original user query for context
-            context: Additional context (endpoint_names, service_type, etc.)
+            user_query: Original user query
+            context: CRITICAL - Must include query_type (specific/general/detailed)
             
         Returns:
-            User-friendly formatted response string
+            Context-aware formatted response
         """
         try:
-            # Build the prompt
-            prompt = self._build_prompt(resource_type, operation, raw_data, user_query, context)
+            # Get query type from context
+            query_type = context.get("query_type", "general") if context else "general"
+            
+            logger.info(f"📝 Formatting {resource_type} response (query_type: {query_type})")
+            
+            # Build context-aware prompt
+            prompt = self._build_prompt(
+                resource_type,
+                operation,
+                raw_data,
+                user_query,
+                context,
+                query_type
+            )
             
             # Call LLM
             response = await ai_service._call_chat_with_retries(
@@ -65,11 +77,11 @@ class LLMFormatterService:
             if response:
                 return response
             else:
-                return self._fallback_format(resource_type, operation, raw_data)
+                return self._fallback_format(resource_type, operation, raw_data, query_type)
                 
         except Exception as e:
-            logger.error(f"Error formatting response with LLM: {str(e)}")
-            return self._fallback_format(resource_type, operation, raw_data)
+            logger.error(f"Error formatting response: {str(e)}")
+            return self._fallback_format(resource_type, operation, raw_data, query_type)
     
     def _build_prompt(
         self,
@@ -77,54 +89,38 @@ class LLMFormatterService:
         operation: str,
         raw_data: Any,
         user_query: str,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]],
+        query_type: str
     ) -> str:
-        """
-        Build formatting prompt based on resource type.
-        
-        Args:
-            resource_type: Resource type
-            operation: Operation performed
-            raw_data: Raw data to format
-            user_query: User's query
-            context: Additional context
-            
-        Returns:
-            Prompt string for LLM
-        """
-        # Calculate ACTUAL count BEFORE truncation
-        actual_count = 0
-        if isinstance(raw_data, list):
-            actual_count = len(raw_data)
-        elif isinstance(raw_data, dict):
-            # Try common keys for nested data
-            for key in ["data", "clusters", "vms", "services", "department", "environments"]:
-                if key in raw_data and isinstance(raw_data[key], list):
-                    actual_count = len(raw_data[key])
-                    break
+        """Build context-aware formatting prompt."""
         
         # Truncate data if too large
         data_str = json.dumps(raw_data, indent=2, default=str)
         is_truncated = False
+        actual_count = self._get_actual_count(raw_data)
+        
         if len(data_str) > 8000:
             data_str = data_str[:8000] + "\n... (truncated)"
             is_truncated = True
         
+        # Count notice
+        count_notice = ""
+        if is_truncated and actual_count > 0:
+            count_notice = f"\n\n**ACTUAL COUNT: {actual_count} items (data truncated for processing)**"
+        
+        # Get query-type-specific instructions
+        query_instructions = self._get_query_type_instructions(query_type, context)
+        
         # Get resource-specific instructions
         resource_instructions = self._get_resource_instructions(resource_type, context)
         
-        # Add count notice if truncated
-        count_notice = ""
-        if is_truncated and actual_count > 0:
-            count_notice = f"\n\n**IMPORTANT: The data below is truncated for processing. The ACTUAL total count is {actual_count} items. Always report this exact count in your summary.**"
-        
-        return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
+        return f"""You are a cloud infrastructure assistant. Format the API response for the user.
 
 **User's Query:** {user_query or f"{operation} {resource_type}"}
 
 **Operation:** {operation}
-
 **Resource Type:** {resource_type}
+**Query Type:** {query_type}
 {count_notice}
 
 **Raw Data:**
@@ -132,190 +128,170 @@ class LLMFormatterService:
 {data_str}
 ```
 
-**General Instructions:**
-1. Present the information in a user-friendly format
-2. Use markdown for better readability (tables, lists, bold text)
-3. Highlight key information (status, names, counts, locations)
-4. Add helpful emojis for visual clarity:
-   - ✅ for Active/Running/Success
-   - ⚠️ for Pending/Warning
-   - ❌ for Failed/Error
-   - 📁 for business units/departments
-   - 🌍 for environments
-   - 🖥️ for VMs
-   - 🚢 for Kubernetes clusters
-   - 🔥 for firewalls
-   - 📦 for managed services
-5. Include a summary at the top (e.g., "Found X items")
-6. Keep it concise - use tables for multiple items
-7. Be conversational and helpful
+{query_instructions}
 
 {resource_instructions}
 
-Do NOT include raw JSON. Present only the formatted, user-friendly response."""
+**General Guidelines:**
+- Use markdown for readability
+- Add helpful emojis
+- Be concise - don't overwhelm with details
+- No raw JSON in response
+
+**CRITICAL: Respect the query_type above. Format accordingly.**"""
+    
+    def _get_query_type_instructions(
+        self,
+        query_type: str,
+        context: Optional[Dict[str, Any]]
+    ) -> str:
+        """Get instructions based on query type."""
+        
+        instructions = {
+            "specific": """**QUERY TYPE: SPECIFIC (Single Resource)**
+
+This user asked about a SPECIFIC load balancer, NOT all of them.
+
+**Your response should:**
+1. Focus ONLY on the requested load balancer
+2. Start with "⚖️ **Load Balancer: [name]**"
+3. Show key details in a clean format:
+   - Status with emoji (✅/⚠️/❌)
+   - VIP address
+   - Protocol and port
+   - Backend pool health (if available)
+   - Location/datacenter
+4. Keep it concise - 5-8 lines max
+5. Add hint: "💡 Use 'details for [name]' for full configuration"
+
+**DO NOT:**
+- List multiple load balancers
+- Show tables with many rows
+- Include unnecessary information
+- Mention "Found X load balancers" (user asked for ONE)
+
+**Example:**
+```
+⚖️ **Load Balancer: web-prod-lb-01**
+
+✅ **Status:** Active and Healthy
+📍 **Location:** Delhi Datacenter
+🌐 **VIP:** 10.0.1.100:443 (HTTPS 🔒)
+🖥️ **Backend Pool:** 4/4 servers healthy 🟢
+⚙️ **Algorithm:** Round Robin
+
+💡 **Tip:** Use 'details for web-prod-lb-01' for full configuration
+```
+""",
+            
+            "specific_detailed": """**QUERY TYPE: SPECIFIC DETAILED (Full Configuration)**
+
+User wants DETAILED information about a specific load balancer.
+
+**Your response should:**
+1. Comprehensive but organized sections
+2. Use headers (###) to separate sections
+3. Show all configuration details
+4. Include virtual services if available
+5. Explain technical terms briefly
+
+**Sections to include:**
+- Overview (status, VIP, location)
+- Configuration (protocol, port, SSL, algorithm)
+- Backend Pools (health status, members)
+- Virtual Services (if requested)
+- SSL/TLS Configuration (if enabled)
+""",
+            
+            "general": """**QUERY TYPE: GENERAL (List Multiple Resources)**
+
+User wants to see MULTIPLE load balancers (or all).
+
+**Your response should:**
+1. Start with summary: "⚖️ Found X load balancers across Y datacenters"
+2. Use table format if 3+ items
+3. Group by datacenter/location
+4. Show key info only: name, status, VIP, location
+5. Add filter summary if applied
+6. Limit to 10 items per location (mention "+ X more")
+
+**Table Format (if 3+ items):**
+| Name | Status | Location | VIP | Protocol |
+|------|--------|----------|-----|----------|
+| ... | ... | ... | ... | ... |
+
+**List Format (if 1-2 items):**
+✅ **name1** (Location) - VIP: x.x.x.x
+✅ **name2** (Location) - VIP: y.y.y.y
+""",
+            
+            "virtual_services": """**QUERY TYPE: VIRTUAL SERVICES**
+
+User wants to see virtual services (VIPs/listeners) for a load balancer.
+
+**Your response should:**
+1. List each virtual service clearly
+2. Show VIP, port, protocol
+3. Include backend pool for each
+4. Note SSL status
+5. Use table if 3+ services
+""",
+        }
+        
+        return instructions.get(query_type, instructions["general"])
     
     def _get_resource_instructions(
         self,
         resource_type: str,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]]
     ) -> str:
-        """
-        Get resource-specific formatting instructions.
+        """Get resource-specific formatting instructions."""
         
-        Args:
-            resource_type: Resource type
-            context: Additional context
-            
-        Returns:
-            Resource-specific instruction string
-        """
-        instructions = {
-            "business_unit": """**Business Unit Specific:**
-- Show engagement name first
-- List departments with their key metrics
-- Key fields: name, ID, location, zones count, VMs count, environments count
-- Group by location if multiple locations""",
-            
-            "environment": """**Environment Specific:**
-- Show total environment count
-- Key fields: name, ID, department, zone info
-- Group by department or zone if available""",
-            
-            "zone": """**Zone/Network Segment Specific:**
-- Show zone name, CIDR, and status (DRAFT/DEPLOYED)
-- Key fields: zoneName, cidr, status, departmentName, environmentName, endpointName
-- Highlight hypervisors (VCD_ESXI, ESXI, etc.)
-- Show network type (Direct, VLAN, etc.)
-- Group by department or endpoint for clarity
-- Add 🟢 for DEPLOYED, 🟡 for DRAFT status
-- Show usable IPs count if available
-- Note if zone is AI-enabled (isAiZone) or NAS-enabled (isNasZone)""",
-            
-            "k8s_cluster": """**Kubernetes Cluster Specific:**
-- Show cluster name, status, K8s version, location
-- Highlight control plane type (managed vs self-managed)
-- Show node count if available
-- Group by datacenter/location""",
-            
-            "vm": """**Virtual Machine Specific:**
-- Key fields: vmName, endpoint, storage, engagement
-- Show status with emojis
-- Mention PPU metering and budgeting if enabled
-- Group by endpoint if multiple locations""",
-            
-            "kafka": """**Kafka Service Specific:**
-- Show service name, status, version, URL
-- Highlight broker configuration
-- Note replication factor if available""",
-            
-            "gitlab": """**GitLab Service Specific:**
-- Show service name, status, version, URL
-- Highlight repository/project info if available""",
-            
-            "firewall": """**Firewall Specific:**
-- Show firewall name, status, rules count
-- Highlight security policies
-- Group by zone/location""",
-            
-            "endpoint": """**Endpoint/Datacenter Specific:**
-- Show datacenter name, ID, type
-- Use location emojis (📍)
-- Present as a clean reference list""",
-  "load_balancer": """**Load Balancer Specific Instructions:**
-- Show total count with ⚖️ emoji in summary
-- **CRITICAL KEY FIELDS** to display for each load balancer:
-  - Name/ID (primary identifier)
-  - Status with emojis:
-    * ✅ Active/Running/Healthy
-    * ⚠️ Degraded/Warning/Some backends down
-    * ❌ Inactive/Failed/All backends down
-  - Endpoint/Datacenter location (📍 emoji)
-  - Virtual IP (VIP) address - the public-facing IP clients connect to
-  - Protocol (HTTP, HTTPS 🔒, TCP, UDP)
-  - Port numbers
-  - Backend pool information:
-    * Pool name
-    * Number of backend members
-    * Health status of pool
-  - Load balancing algorithm (Round Robin, Least Connections, IP Hash, etc.)
-  - SSL/TLS status (🔒 emoji if SSL enabled)
-  - Session persistence/affinity settings if present
+        if resource_type == "load_balancer":
+            return """**Load Balancer Specific Fields:**
 
-**Grouping and Organization:**
-- Group by endpoint/datacenter for multi-location queries
-- For each endpoint, show load balancers in a clear list or table
+**CRITICAL Fields to Show:**
+- Name (primary identifier)
+- Status with emoji (✅ Active | ⚠️ Degraded | ❌ Inactive)
+- VIP (Virtual IP) - what clients connect to
+- Protocol (HTTP/HTTPS 🔒/TCP/UDP)
+- Port number
+- Backend pool health: X/Y healthy 🟢🟡🔴
+- Location/Datacenter (📍)
+- SSL status (🔒 if enabled)
 
 **Health Status Indicators:**
-- Backend pool health is CRITICAL - highlight clearly:
-  * 🟢 **Healthy** - All backend members are up and responding
-  * 🟡 **Degraded** - Some backend members are down
-  * 🔴 **Critical** - All backend members are down or unreachable
-- Show individual backend member status if available
+- 🟢 Healthy - All backends up
+- 🟡 Degraded - Some backends down
+- 🔴 Critical - All backends down
 
-**SSL/Certificate Information:**
-- If SSL/TLS is enabled, show:
-  * Certificate status
-  * Certificate expiration date (if available)
-  * SSL termination point
+**Algorithm (if available):**
+- Round Robin, Least Connections, IP Hash, etc.
 
-**Traffic and Performance:**
-- If available, show:
-  * Current connections
-  * Traffic statistics
-  * Backend pool utilization
-
-**Formatting Guidelines:**
-- Use **tables** for multiple load balancers (easier to compare)
-- For single load balancer, show detailed configuration in sections
-- Always include a summary at the top:
-  * Total LBs found
-  * Number of endpoints queried
-  * Active vs Inactive count
-  * SSL-enabled count
-  * Total backend pools and members
-  
-**Error Handling:**
-- If some endpoints failed to query, note this SEPARATELY at the bottom
-- Don't mix failed endpoints with successful results
-- Clearly indicate which endpoints were successfully queried
-
-**Context Usage:**
-- Always include endpoint names in results for clarity
-- If user queried specific location, highlight that in summary
-- If user filtered by status/protocol, mention applied filters
-
-**Example Summary Format:**
-```
-⚖️ **Found 5 Load Balancers** across 3 datacenters
-
-**Summary:**
-- Active: 4 ✅
-- Inactive: 1 ❌
-- SSL-enabled: 3 🔒
-- Total backend pools: 12
-- Total backend members: 48
-```
-
-**Example Table Format:**
-| Name | Status | Endpoint | VIP | Protocol | Port | Backend Pool | SSL |
-|------|--------|----------|-----|----------|------|--------------|-----|
-| web-lb-01 | ✅ Active | Delhi | 10.0.1.100 | HTTPS 🔒 | 443 | 4/4 healthy 🟢 | Yes |
-| api-lb-02 | ⚠️ Degraded | Mumbai | 10.0.2.50 | HTTP | 80 | 2/4 healthy 🟡 | No |
-
-**Important Notes:**
-- Virtual IP (VIP) is what clients connect to - always show this
-- Backend pool health is critical for troubleshooting
-- SSL status affects security posture
-- Algorithm affects how traffic is distributed
-- Session persistence affects user experience
-
-Remember: Load balancers are critical infrastructure - provide clear, actionable information!""",
-        }
+**Remember:** Load balancers are critical infrastructure - be clear and actionable!"""
         
-        return instructions.get(resource_type, f"""**{resource_type.title()} Specific:**
-- Show key identifying fields (name, ID, status)
-- Present in table format if multiple items
-- Highlight important attributes""")
+        elif resource_type == "k8s_cluster":
+            return """**Kubernetes Cluster Fields:**
+- Cluster name, status, K8s version
+- Node count and health
+- Control plane type
+- Location/datacenter"""
+        
+        else:
+            return f"""**{resource_type.title()} Fields:**
+- Show key identifying fields
+- Use tables for multiple items
+- Highlight status and health"""
+    
+    def _get_actual_count(self, raw_data: Any) -> int:
+        """Get actual count of items before truncation."""
+        if isinstance(raw_data, list):
+            return len(raw_data)
+        elif isinstance(raw_data, dict):
+            for key in ["data", "clusters", "vms", "services", "department"]:
+                if key in raw_data and isinstance(raw_data[key], list):
+                    return len(raw_data[key])
+        return 0
     
     def _fallback_format(
         self,

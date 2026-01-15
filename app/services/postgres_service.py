@@ -760,7 +760,12 @@ class PostgresService:
         return normalized
 
     def _preprocess_query(self, query: str) -> Tuple[str, List[str]]:
-        """Preprocess query and extract key terms."""
+        
+        if isinstance(query, dict):
+            query = json.dumps(query)
+        elif not isinstance(query, str):
+            query = str(query)
+            
         if not query:
             return "", []
         

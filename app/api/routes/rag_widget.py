@@ -14,16 +14,19 @@ import os
 import logging
 import re
 import urllib.parse
+from urllib.parse import urljoin, urlparse
 import difflib
 import inspect
 import json
-
+import hashlib
+from typing import Any, Dict, List, Optional, Set, Tuple
+from collections import deque
 from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.agents import get_agent_manager  # Add agent manager
 from app.services.openwebui_formatter import format_agent_response_for_openwebui
-
+from app.services.rag_search_service import rag_search_service
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,283 @@ class BulkScrapeRequest(BaseModel):
         ge=0,
         le=500
     )
+
+class EnhancedBulkScraperService:
+    """
+    Advanced bulk scraping engine with intelligent discovery and parallel processing.
+    """
+
+    def __init__(self, scraper_service, max_concurrent: int = 10):
+        self.scraper_service = scraper_service
+        self.max_concurrent = max_concurrent
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+
+        # Crawl state
+        self.discovered_urls: Set[str] = set()
+        self.visited_urls: Set[str] = set()
+        self.failed_urls: Set[str] = set()
+        self.content_hashes: Set[str] = set()
+
+        # Priority queue: (priority, depth, url)
+        self.url_queue: deque[Tuple[int, int, str]] = deque()
+
+        # Statistics
+        self.stats = {
+            "total_discovered": 0,
+            "total_scraped": 0,
+            "total_documents": 0,
+            "total_images": 0,
+            "start_time": None,
+            "end_time": None,
+        }
+
+    # ============================================================
+    # URL DISCOVERY
+    # ============================================================
+
+    async def discover_urls_intelligent(
+        self,
+        base_url: str,
+        max_depth: int = 15,
+        max_urls: int = 5000,
+        follow_external: bool = False,
+        url_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        Priority-based URL discovery.
+
+        Priority (0–100):
+        - 90–100: Docs, guides, APIs
+        - 70–89: Product & feature pages
+        - 50–69: Blogs & articles
+        - <50: Low-value or navigational pages
+        """
+
+        self.stats["start_time"] = datetime.now()
+        base_domain = urlparse(base_url).netloc
+
+        self.url_queue.append((100, 0, base_url))
+        self.discovered_urls.add(base_url)
+
+        logger.info(
+            "🔍 Starting intelligent URL discovery | Base=%s Depth=%d URLs=%d",
+            base_url,
+            max_depth,
+            max_urls,
+        )
+
+        while self.url_queue and len(self.discovered_urls) < max_urls:
+            priority, depth, current_url = self.url_queue.popleft()
+
+            if current_url in self.visited_urls or depth > max_depth:
+                continue
+
+            self.visited_urls.add(current_url)
+
+            html = await self._fetch_page_safe(current_url)
+            if not html:
+                self.failed_urls.add(current_url)
+                continue
+
+            soup = BeautifulSoup(html, "html.parser")
+            links = self._extract_links_enhanced(soup, current_url)
+
+            for link_url, link_text in links:
+                parsed = urlparse(link_url)
+
+                if not follow_external and parsed.netloc != base_domain:
+                    continue
+
+                if link_url in self.discovered_urls:
+                    continue
+
+                if url_patterns and not self._matches_patterns(link_url, url_patterns):
+                    continue
+
+                if exclude_patterns and self._matches_patterns(link_url, exclude_patterns):
+                    continue
+
+                score = self._calculate_url_priority(link_url, link_text, depth + 1)
+                self.url_queue.append((score, depth + 1, link_url))
+                self.discovered_urls.add(link_url)
+
+            self.url_queue = deque(
+                sorted(self.url_queue, key=lambda x: x[0], reverse=True)
+            )
+
+            if len(self.discovered_urls) % 100 == 0:
+                logger.info(
+                    "📊 Discovered=%d Visited=%d Queue=%d",
+                    len(self.discovered_urls),
+                    len(self.visited_urls),
+                    len(self.url_queue),
+                )
+
+            await asyncio.sleep(0.1)
+
+        self.stats["total_discovered"] = len(self.discovered_urls)
+        return list(self.discovered_urls)
+
+    # ============================================================
+    # PARALLEL SCRAPING
+    # ============================================================
+
+    async def bulk_scrape_parallel(
+        self,
+        urls: List[str],
+        extract_images: bool = True,
+        extract_tables: bool = True,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 300,
+    ) -> List[Dict[str, Any]]:
+        """
+        Parallel bulk scraping with quality filtering and intelligent chunking.
+        """
+
+        documents: List[Dict[str, Any]] = []
+        batch_size = 50
+
+        for i in range(0, len(urls), batch_size):
+            batch = urls[i : i + batch_size]
+
+            tasks = [
+                self._scrape_url_enhanced(url, extract_images, extract_tables)
+                for url in batch
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for url, result in zip(batch, results):
+                if isinstance(result, Exception) or not result:
+                    continue
+
+                text = result["content"].get("text", "")
+                images = result["content"].get("images", [])
+
+                if not self._is_quality_content(text, url):
+                    continue
+
+                fingerprint = self._simhash(text)
+                if fingerprint in self.content_hashes:
+                    continue
+
+                self.content_hashes.add(fingerprint)
+                chunks = self._chunk_text_intelligent(text, chunk_size, chunk_overlap)
+
+                for idx, chunk in enumerate(chunks):
+                    documents.append(
+                        {
+                            "content": chunk,
+                            "url": f"{url}#chunk-{idx}" if idx else url,
+                            "title": result["content"].get("title", ""),
+                            "timestamp": datetime.now().isoformat(),
+                            "images": images if idx == 0 else [],
+                            "metadata": {
+                                "chunk_index": idx,
+                                "total_chunks": len(chunks),
+                                "quality": self._calculate_content_quality(text),
+                                "word_count": len(chunk.split()),
+                            },
+                        }
+                    )
+
+                self.stats["total_scraped"] += 1
+                self.stats["total_documents"] += len(chunks)
+                self.stats["total_images"] += len(images)
+
+            await asyncio.sleep(1)
+
+        self.stats["end_time"] = datetime.now()
+        return documents
+
+    # ============================================================
+    # HELPERS
+    # ============================================================
+
+    async def _fetch_page_safe(self, url: str) -> Optional[str]:
+        for attempt in range(3):
+            try:
+                async with self.semaphore:
+                    r = self.scraper_service.session.get(
+                        url, timeout=self.scraper_service.request_timeout
+                    )
+                    r.raise_for_status()
+                    if "text/html" in r.headers.get("Content-Type", ""):
+                        return r.text
+            except Exception:
+                await asyncio.sleep(2**attempt)
+        return None
+
+    def _extract_links_enhanced(
+        self, soup: BeautifulSoup, base_url: str
+    ) -> List[Tuple[str, str]]:
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.startswith(("#", "javascript:", "mailto:")):
+                continue
+
+            url = urljoin(base_url, href)
+            parsed = urlparse(url)._replace(fragment="")
+            clean = parsed.geturl()
+
+            if clean.lower().endswith(
+                (".pdf", ".jpg", ".png", ".css", ".js", ".zip", ".svg")
+            ):
+                continue
+
+            links.append((clean, a.get_text(strip=True)))
+        return links
+
+    def _calculate_url_priority(self, url: str, text: str, depth: int) -> int:
+        score = 50
+        high = ["doc", "guide", "tutorial", "api", "sdk"]
+        medium = ["feature", "product", "integration"]
+        low = ["tag", "category", "login", "search"]
+
+        if any(k in url.lower() or k in text.lower() for k in high):
+            score += 40
+        elif any(k in url.lower() or k in text.lower() for k in medium):
+            score += 20
+
+        if any(k in url.lower() for k in low):
+            score -= 30
+
+        score -= depth * 5
+        return max(0, min(100, score))
+
+    def _matches_patterns(self, url: str, patterns: List[str]) -> bool:
+        return any(re.search(p, url, re.IGNORECASE) for p in patterns)
+
+    def _simhash(self, text: str) -> str:
+        words = re.findall(r"\w+", text.lower())
+        return hashlib.md5(" ".join(words[:1000]).encode()).hexdigest()[:16]
+
+    def _is_quality_content(self, text: str, _: str) -> bool:
+        return len(text.split()) >= 50
+
+    def _chunk_text_intelligent(
+        self, text: str, size: int, overlap: int
+    ) -> List[str]:
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        chunks, current = [], ""
+
+        for p in paragraphs:
+            if len(current) + len(p) > size:
+                chunks.append(current.strip())
+                current = current[-overlap:] + "\n\n" + p
+            else:
+                current += "\n\n" + p if current else p
+
+        if current.strip():
+            chunks.append(current.strip())
+        return chunks
+
+    def _calculate_content_quality(self, text: str) -> float:
+        wc = len(text.split())
+        diversity = len(set(text.lower().split())) / max(wc, 1)
+        return min(1.0, 0.4 + diversity)
 
 class TaskExecutionRequest(BaseModel):
     task_description: str = Field(..., min_length=1, max_length=2000)
@@ -342,51 +622,73 @@ class OrchestrationService:
         return result
     
     async def _handle_search_task(
-        self,
-        params: List[str],
-        services: Dict[str, Dict[str, Any]],
-        original_query: str
-    ) -> Dict[str, Any]:
-        """Handle search/retrieval task."""
+    self,
+    params: List[str],
+    services: Dict[str, Dict[str, Any]],
+    original_query: str
+) -> Dict[str, Any]:
+
+
+    # 1️⃣ Hard dependency on vector DB
         if not services["postgres"]["available"]:
+            logger.error("[RAG] Vector DB unavailable — blocking hallucination")
             return {
-                "error": "Vector database unavailable",
-                "fallback": "Using AI-only response",
-                "result": await self._ai_only_fallback(original_query, services)
-            }
-        
+            "success": False,
+            "error": "Knowledge base is unavailable",
+            "answer": "The knowledge base is currently unavailable. Please try again later.",
+            "sources": [],
+            "confidence": 0.0
+        }
+
         search_query = params[0] if params else original_query
-        
-        # Perform vector search
-        search_results = await call_maybe_async(
-            postgres_service.search_documents,
-            search_query,
-            n_results=50
-        )
-        
-        if not search_results and services["ai_service"]["available"]:
-            return await self._ai_only_fallback(search_query, services)
-        
-        # Generate enhanced response
-        context = [r.get("content", "") for r in search_results[:5]]
-        
+
+    # 2️⃣ Use your production-grade RAG pipeline
+        rag_result = await rag_search_service.search(
+        query=search_query,
+        user_id=None,
+        knowledge_base_id=None,
+        top_k=5
+    )
+
+    # 3️⃣ Enforce NO-RESULTS contract
+        if rag_result.get("no_results"):
+            return {
+            "success": False,
+            "answer": rag_result["no_results_message"],
+            "sources": [],
+            "confidence": 0.0,
+            "no_results": True
+        }
+
+        chunks = rag_result["chunks"]
+
+    # 4️⃣ Evidence-based answer synthesis
+        context = [c["text"] for c in chunks]
+
         if services["ai_service"]["available"]:
             enhanced = await ai_service.generate_enhanced_response(
-                search_query,
-                context,
-                None
-            )
-            return {
-                "answer": enhanced.get("text") if isinstance(enhanced, dict) else enhanced,
-                "sources": search_results[:5],
-                "confidence": enhanced.get("quality_score", 0.8) if isinstance(enhanced, dict) else 0.8
-            }
-        
+            search_query,
+            context,
+            None
+        )
+
+            answer_text = enhanced.get("text") if isinstance(enhanced, dict) else enhanced
+        else:
+        # AI unavailable → return pure evidence
+            answer_text = "\n\n".join(context)
+
+    # 5️⃣ Confidence = KB-grounded confidence
+        avg_confidence = sum(c["confidence_score"] for c in chunks) / len(chunks)
+
         return {
-            "sources": search_results[:5],
-            "message": "AI service unavailable for enhanced response generation"
-        }
-    
+        "success": True,
+        "answer": answer_text,
+        "sources": chunks,
+        "confidence": round(avg_confidence, 3),
+        "search_quality": rag_result.get("search_quality"),
+        "metadata": rag_result.get("metadata"),
+    }
+
     async def _handle_analyze_task(
         self,
         params: List[str],

@@ -11,7 +11,7 @@ from datetime import datetime
 from app.services.llm_formatter_service import llm_formatter
 
 logger = logging.getLogger(__name__)
-
+from app.services.ai_service import ai_service
 
 class BaseResourceAgent(ABC):
     """
@@ -115,8 +115,26 @@ class BaseResourceAgent(ABC):
         except Exception as e:
             logger.error(f"Error fetching engagement ID: {str(e)}")
             return None
+        
+    # base_resource_agent.py
+
+    async def maybe_get_engagement_id(
+    self,
+    operation: str,
+    user_roles: List[str] = None
+) -> Optional[int]:
+        """
+        Engagement is required ONLY for mutating operations.
+        LIST / READ operations must work without engagement.
+        """
+        if operation in ("list", "get", "describe"):
+            return None
+
+        return await self.get_engagement_id(user_roles=user_roles)
+
+
     
-    async def get_datacenters(self, engagement_id: int = None, user_roles: List[str] = None) -> List[Dict[str, Any]]:
+    async def get_datacenters(self,operation: str = "list", engagement_id: int = None, user_roles: List[str] = None) -> List[Dict[str, Any]]:
         """
         Common utility: Get available datacenters.
         
@@ -131,9 +149,14 @@ class BaseResourceAgent(ABC):
         
         try:
             if not engagement_id:
-                engagement_id = await self.get_engagement_id(user_roles=user_roles)
-                if not engagement_id:
-                    return []
+                engagement_id = await self.maybe_get_engagement_id(
+                    operation=operation,
+                    user_roles=user_roles
+                )
+            params = {}
+            if engagement_id:
+                params["engagement_id"] = engagement_id
+
             
             result = await api_executor_service.execute_operation(
                 resource_type="endpoint",
