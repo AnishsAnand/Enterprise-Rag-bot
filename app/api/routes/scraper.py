@@ -8,8 +8,6 @@ from app.services.postgres_service import postgres_service
 
 router = APIRouter()
 
-
-
 class ScrapeRequest(BaseModel):
     url: HttpUrl
     extract_text: bool = True

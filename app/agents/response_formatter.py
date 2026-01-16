@@ -136,8 +136,6 @@ class ResponseFormatter:
                         response += f"**Name:** {data['clusterName']}\n"
                     if "status" in data:
                         response += f"**Status:** {data['status']}\n"
-                    
-                    # Add any message
                     if "message" in data:
                         response += f"\n{data['message']}\n"
                 
@@ -152,15 +150,6 @@ class ResponseFormatter:
     
     @staticmethod
     def format_rag_response(data: Dict[str, Any]) -> str:
-        """
-        Format RAG agent response.
-        
-        Args:
-            data: RAG response data
-            
-        Returns:
-            Formatted string
-        """
         try:
             answer = data.get("answer", "")
             sources = data.get("sources", [])
@@ -171,10 +160,6 @@ class ResponseFormatter:
             
             response = answer
             
-            # Sources section removed per user request
-            # Sources are still available in the API response metadata if needed
-            
-            # Add confidence if low
             if confidence < 0.5:
                 response += "\n\n_Note: I'm not very confident about this answer. You may want to verify this information._"
             
@@ -184,48 +169,6 @@ class ResponseFormatter:
             logger.error(f"Error formatting RAG response: {e}")
             return str(data)
     
-    @staticmethod
-    def auto_format(response_text: str) -> str:
-        """
-        Automatically detect and format JSON responses.
-        
-        Args:
-            response_text: Raw response text (might contain JSON)
-            
-        Returns:
-            Formatted text
-        """
-        try:
-            # Try to parse as JSON
-            data = json.loads(response_text)
-            
-            # Detect response type and format accordingly
-            if isinstance(data, dict):
-                # Check for cluster list
-                if "clusters" in data or ("data" in data and isinstance(data.get("data"), dict) and "data" in data["data"]):
-                    return ResponseFormatter.format_cluster_list(data)
-                
-                # Check for endpoints
-                elif "endpoints" in data:
-                    return ResponseFormatter.format_endpoint_list(data)
-                
-                # Check for RAG response
-                elif "answer" in data:
-                    return ResponseFormatter.format_rag_response(data)
-                
-                # Check for execution result
-                elif "success" in data:
-                    return f"{'✅' if data['success'] else '❌'} {data.get('message', 'Operation completed')}"
-            
-            # If not JSON or unknown format, return as-is
-            return response_text
-            
-        except json.JSONDecodeError:
-            # Not JSON, return as-is
-            return response_text
-        except Exception as e:
-            logger.error(f"Error in auto_format: {e}")
-            return response_text
         
     @staticmethod
     def format_load_balancer_list(data: Dict[str, Any]) -> str:
@@ -293,20 +236,10 @@ class ResponseFormatter:
         
         except Exception as e:
             logger.error(f"Error formatting load balancer list: {e}")
-        # Fallback to basic format
             return f"✅ Found load balancers:\n```json\n{json.dumps(data, indent=2)}\n```"
     
     @staticmethod
     def auto_format(response_text: str) -> str:
-        """
-        Automatically detect and format JSON responses.
-        
-        Args:
-            response_text: Raw response text (might contain JSON)
-            
-        Returns:
-            Formatted text
-        """
         try:
             # Try to parse as JSON
             data = json.loads(response_text)
@@ -332,16 +265,12 @@ class ResponseFormatter:
                 elif "success" in data:
                     return f"{'✅' if data['success'] else '❌'} {data.get('message', 'Operation completed')}"
             
-            # If not JSON or unknown format, return as-is
             return response_text
             
         except json.JSONDecodeError:
-            # Not JSON, return as-is
             return response_text
         except Exception as e:
             logger.error(f"Error in auto_format: {e}")
             return response_text
 
-
-# Create global instance
 response_formatter = ResponseFormatter()
