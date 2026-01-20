@@ -798,8 +798,15 @@ class LoadBalancerAgent(BaseResourceAgent):
         logger.warning(f"❌ No match found for: {lb_identifier}")
         return None
     
-    async def _get_ipc_engagement_id(self,user_id: str,user_roles=None,force_refresh: bool = False) -> Optional[int]:
+    async def _get_ipc_engagement_id(
+    self,
+    user_id: str,
+    user_roles=None,
+    force_refresh: bool = False
+) -> Optional[int]:
         """Get IPC engagement ID (helper method)."""
+
+    # 🛡️ HARDEN against OpenWebUI / Gateway garbage
         if not user_roles or not isinstance(user_roles, (list, tuple, set)):
             user_roles = []
     # Fetch engagement based on roles
@@ -813,7 +820,11 @@ class LoadBalancerAgent(BaseResourceAgent):
         force_refresh=force_refresh)
         return ipc_engagement_id
 
-    async def _get_load_balancer_details(self,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_load_balancer_details(
+        self,
+        params: Dict[str, Any],
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Get detailed configuration for a specific load balancer."""
         try:
             lbci = params.get("lbci")
@@ -829,11 +840,11 @@ class LoadBalancerAgent(BaseResourceAgent):
                     return {
                         "success": False,
                         "error": "LBCI required",
-                        "response": "Please specify which load balancer (need LBCI)."
-                    }
-            
-            logger.info(f"🔍 Fetching details for: {lbci}")
-            result = await api_executor_service.get_load_balancer_details(lbci=lbci,user_id=user_id)
+                        "response": "Please specify which load balancer (need LBCI)."}
+            logger.info(f"🔍 Fetching details for: {lbci}") 
+            result = await api_executor_service.get_load_balancer_details(
+                lbci=lbci,
+                user_id=user_id)
             if not result.get("success"):
                 return {
                     "success": False,
@@ -876,15 +887,20 @@ class LoadBalancerAgent(BaseResourceAgent):
                     return {
                         "success": False,
                         "error": "LBCI required",
-                        "response": "Please specify which load balancer."}
+                        "response": "Please specify which load balancer."
+                    }
+            
             logger.info(f"🌐 Fetching virtual services for: {lbci}")
-
-            result = await api_executor_service.get_load_balancer_virtual_services(lbci=lbci,user_id=user_id)
+            
+            result = await api_executor_service.get_load_balancer_virtual_services(
+                lbci=lbci,
+                user_id=user_id)
             if not result.get("success"):
                 return {
                     "success": False,
                     "error": result.get("error"),
-                    "response": f"Failed to get virtual services: {result.get('error')}"}
+                    "response": f"Failed to get virtual services: {result.get('error')}"
+                }
             virtual_services = result.get("data", [])
             total = len(virtual_services)
             formatted_response = await self.format_response_with_llm(
@@ -893,9 +909,7 @@ class LoadBalancerAgent(BaseResourceAgent):
                 context={
                     "lbci": lbci,
                     "total": total,
-                    "query_type": "virtual_services"
-                }
-            )
+                    "query_type": "virtual_services"})
             if total == 0:
                 formatted_response = (
                     f"🌐 **No Virtual Services Configured**\n\n"
@@ -913,13 +927,17 @@ class LoadBalancerAgent(BaseResourceAgent):
             raise
 
     async def _enrich_load_balancers_with_location(self,load_balancers: List[Dict[str, Any]],user_id: str,ipc_engagement_id: int) -> List[Dict[str, Any]]:
+
         logger.info(f"🌍 Enriching {len(load_balancers)} LBs with location data")
+    
     # Fetch business units API (has endpoint data)
         bu_result = await api_executor_service.get_business_units_list(
         ipc_engagement_id=ipc_engagement_id,
         user_id=user_id,
-        force_refresh=False  
+        force_refresh=False  # Use cache
         )
+    
+    # Build endpoint_id -> location mapping
         endpoint_map = {}
         if bu_result.get("success") and bu_result.get("departments"):
             for dept in bu_result["departments"]:
@@ -932,10 +950,12 @@ class LoadBalancerAgent(BaseResourceAgent):
                     if endpoint_id:
                         endpoint_map[endpoint_id] = {
                         "location": location,
-                        "name": endpoint_name}
+                        "name": endpoint_name
+                    }
     
         logger.info(f"📍 Built endpoint map: {len(endpoint_map)} locations")
-
+    
+    # Enrich each LB
         enriched = []
         for lb in load_balancers:
             lb_name = lb.get("name", "")
@@ -962,6 +982,7 @@ class LoadBalancerAgent(BaseResourceAgent):
         return enriched
 
     def _extract_location_from_name(self, lb_name: str) -> Optional[str]:
+        
         location_patterns = {
         "Mumbai": ["mumbai", "bkc", "mum"],
         "Delhi": ["delhi", "del", "ncr"],
