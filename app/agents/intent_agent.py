@@ -194,19 +194,28 @@ User: "show me all LBs" or "what load balancers do we have"
 User: "list lbs" or "get load balancers"
 → resource_type: load_balancer, operation: list, extracted_params: empty
 
-**Specific Load Balancer (show one):**
-User: "show EG_Tata_Com_167_LB_SEG_388"
+**Specific Load Balancer (show one with FULL DETAILS):**
+User: "show EG_Tata_Com_167_LB_SEG_388" or "EG_Tata_Com_167_LB_SEG_388"
 → resource_type: load_balancer, operation: list, extracted_params: empty
-NOTE: Don't extract the LB name as a param - LoadBalancerAgent will handle it
+NOTE: Don't extract the LB name - LoadBalancerAgent will detect it and fetch COMPLETE details
 
-User: "details for LB_TataCommu_Tata_C_229"
-→ resource_type: load_balancer, operation: list, extracted_params: empty
-
-User: "get info on web-prod-lb-01"
+User: "details for EG_Tata_Com_167_LB_SEG_388" or "list the details about EG_Tata_Com_167_LB_SEG_388"
 → resource_type: load_balancer, operation: list, extracted_params: empty
 
-User: "EG_Tata_Com_142_LB_SEG_276 status"
+User: "get info on LB_TataCommu_Tata_C_229" or "tell me about LB_TataCommu_Tata_C_229"
 → resource_type: load_balancer, operation: list, extracted_params: empty
+
+User: "what is EG_Tata_Com_142_LB_SEG_276" or "describe EG_Tata_Com_142_LB_SEG_276"
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+
+**IMPORTANT: When user mentions ANY specific LB name (contains _LB_ pattern):**
+- ALWAYS detect as: resource_type=load_balancer, operation=list
+- LoadBalancerAgent will automatically:
+  1. Detect it's a specific LB query
+  2. Find the LBCI from the LB list
+  3. Call getDetails API for configuration
+  4. Call virtualservices API for VIPs/listeners
+  5. Format everything beautifully
 
 **Location-Filtered (specific location):**
 User: "load balancers in Mumbai" or "show LBs in Delhi"
@@ -253,6 +262,7 @@ User: "load balancer configuration" or "LB settings"
 User: "show load balancer details" or "get LB info"
 → resource_type: load_balancer, operation: list, extracted_params: empty
 
+
 **Load Balancer Aliases (ALL these should be detected):**
 - load_balancer, load balancer, load balancers
 - lb, lbs, LB, LBs
@@ -261,6 +271,25 @@ User: "show load balancer details" or "get LB info"
 - network load balancer, nlb, NLB
 - application load balancer, alb, ALB
 - l4 load balancer, l7 load balancer
+
+NOTE: LoadBalancerAgent will detect this as LBCI and automatically fetch:
+  1. Load balancer configuration details
+  2. Virtual services (VIPs, listeners, pools)
+  3. Format everything in production-ready display
+→ resource_type: load_balancer, operation: list, extracted_params: empty
+**IMPORTANT: When user mentions ANY LBCI number (pure digits, 5-6 characters):**
+- ALWAYS detect as: resource_type=load_balancer, operation=list
+- LoadBalancerAgent will automatically:
+  1. Detect it's an LBCI query
+  2. Find the LB with that LBCI
+  3. Call getDetails API for configuration
+  4. Call virtualservices API for VIPs/listeners
+  5. Format everything beautifully
+  
+  **IMPORTANT: LBCI Pattern = 5-6 digit numbers (e.g., 312798, 45762, 154892)**
+- When user mentions ANY 5-6 digit number in context of load balancers
+- ALWAYS detect as: resource_type=load_balancer, operation=list
+- LoadBalancerAgent will automatically fetch COMPLETE details + virtual services
 
 **CRITICAL RULES for Load Balancer Intent Detection:**
 1. ANY query asking about load balancers → operation: list

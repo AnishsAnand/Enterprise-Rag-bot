@@ -765,7 +765,6 @@ class PostgresService:
             query = json.dumps(query)
         elif not isinstance(query, str):
             query = str(query)
-            
         if not query:
             return "", []
         

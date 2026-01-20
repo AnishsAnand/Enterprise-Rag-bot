@@ -26,7 +26,7 @@ from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.agents import get_agent_manager  # Add agent manager
 from app.services.openwebui_formatter import format_agent_response_for_openwebui
-from app.services.rag_search_service import rag_search_service
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -622,73 +622,51 @@ class OrchestrationService:
         return result
     
     async def _handle_search_task(
-    self,
-    params: List[str],
-    services: Dict[str, Dict[str, Any]],
-    original_query: str
-) -> Dict[str, Any]:
-
-
-    # 1️⃣ Hard dependency on vector DB
+        self,
+        params: List[str],
+        services: Dict[str, Dict[str, Any]],
+        original_query: str
+    ) -> Dict[str, Any]:
+        """Handle search/retrieval task."""
         if not services["postgres"]["available"]:
-            logger.error("[RAG] Vector DB unavailable — blocking hallucination")
             return {
-            "success": False,
-            "error": "Knowledge base is unavailable",
-            "answer": "The knowledge base is currently unavailable. Please try again later.",
-            "sources": [],
-            "confidence": 0.0
-        }
-
+                "error": "Vector database unavailable",
+                "fallback": "Using AI-only response",
+                "result": await self._ai_only_fallback(original_query, services)
+            }
+        
         search_query = params[0] if params else original_query
-
-    # 2️⃣ Use your production-grade RAG pipeline
-        rag_result = await rag_search_service.search(
-        query=search_query,
-        user_id=None,
-        knowledge_base_id=None,
-        top_k=5
-    )
-
-    # 3️⃣ Enforce NO-RESULTS contract
-        if rag_result.get("no_results"):
-            return {
-            "success": False,
-            "answer": rag_result["no_results_message"],
-            "sources": [],
-            "confidence": 0.0,
-            "no_results": True
-        }
-
-        chunks = rag_result["chunks"]
-
-    # 4️⃣ Evidence-based answer synthesis
-        context = [c["text"] for c in chunks]
-
+        
+        # Perform vector search
+        search_results = await call_maybe_async(
+            postgres_service.search_documents,
+            search_query,
+            n_results=50
+        )
+        
+        if not search_results and services["ai_service"]["available"]:
+            return await self._ai_only_fallback(search_query, services)
+        
+        # Generate enhanced response
+        context = [r.get("content", "") for r in search_results[:5]]
+        
         if services["ai_service"]["available"]:
             enhanced = await ai_service.generate_enhanced_response(
-            search_query,
-            context,
-            None
-        )
-
-            answer_text = enhanced.get("text") if isinstance(enhanced, dict) else enhanced
-        else:
-        # AI unavailable → return pure evidence
-            answer_text = "\n\n".join(context)
-
-    # 5️⃣ Confidence = KB-grounded confidence
-        avg_confidence = sum(c["confidence_score"] for c in chunks) / len(chunks)
-
+                search_query,
+                context,
+                None
+            )
+            return {
+                "answer": enhanced.get("text") if isinstance(enhanced, dict) else enhanced,
+                "sources": search_results[:5],
+                "confidence": enhanced.get("quality_score", 0.8) if isinstance(enhanced, dict) else 0.8
+            }
+        
         return {
-        "success": True,
-        "answer": answer_text,
-        "sources": chunks,
-        "confidence": round(avg_confidence, 3),
-        "search_quality": rag_result.get("search_quality"),
-        "metadata": rag_result.get("metadata"),
-    }
-
+            "sources": search_results[:5],
+            "message": "AI service unavailable for enhanced response generation"
+        }
+    
     async def _handle_analyze_task(
         self,
         params: List[str],

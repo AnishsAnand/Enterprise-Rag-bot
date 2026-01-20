@@ -229,33 +229,100 @@ class ResponseFormatter:
         
     @staticmethod
     def format_load_balancer_list(data: Dict[str, Any]) -> str:
-
+        """
+        ENHANCED formatter for load balancers with better detail display.
+        
+        Handles both:
+        - General list view (multiple LBs)
+        - Detailed single LB view (with configuration + virtual services)
+        """
         try:
             if not data.get("success"):
                 return f"❌ Failed to retrieve load balancers: {data.get('error', 'Unknown error')}"
         
             load_balancers = data.get("data", [])
+            metadata = data.get("metadata", {})
+            query_type = metadata.get("query_type", "general")
+        
+        # ═════════════════════════════════════════════════════════════════
+        # DETAILED SINGLE LB VIEW
+        # ═════════════════════════════════════════════════════════════════
+            if query_type == "specific" and len(load_balancers) == 1:
+                lb = load_balancers[0]
+                lb_name = lb.get("name", "Unknown")
+                lbci = lb.get("lbci", "N/A")
+                location = lb.get("_location", "Unknown")
+                status = lb.get("status", "Unknown")
+                vip = lb.get("virtual_ip", lb.get("virtualIp", "N/A"))
+                protocol = lb.get("protocol", "N/A")
+                port = lb.get("port", "N/A")
+                ssl_enabled = lb.get("ssl_enabled", lb.get("sslEnabled", False))
+            
+            # Status emoji
+                status_emoji = "✅" if status.lower() in ["active", "running", "healthy"] else "⚠️"
+                ssl_emoji = "🔒" if ssl_enabled else "🔓"
+            
+            # Build detailed response
+                response = f"⚖️ **Load Balancer Details**\n\n"
+                response += f"### {status_emoji} {lb_name} {ssl_emoji}\n\n"
+                response += f"**Basic Information:**\n"
+                response += f"- **LBCI:** `{lbci}`\n"
+                response += f"- **Status:** {status}\n"
+                response += f"- **Location:** {location}\n"
+                response += f"- **Virtual IP:** {vip}\n"
+                response += f"- **Protocol:** {protocol} (Port {port})\n"
+                response += f"- **SSL/TLS:** {'Enabled' if ssl_enabled else 'Disabled'}\n\n"
+            
+            # Add algorithm if available
+                algorithm = lb.get("algorithm")
+                if algorithm:
+                    response += f"- **Algorithm:** {algorithm}\n"
+            
+            # Add backend pool info if available
+                backend = lb.get("backend_pool", lb.get("backendPool"))
+                if backend:
+                    response += f"\n**Backend Pool:** {backend}\n"
+            
+            # Show hint for more details
+                if not metadata.get("has_details"):
+                    response += f"\n💡 **Tip:** Ask for 'details for {lb_name}' to see full configuration and virtual services.\n"
+            
+                return response
+        
+        # ═════════════════════════════════════════════════════════════════
+        # GENERAL LIST VIEW (multiple LBs)
+        # ═════════════════════════════════════════════════════════════════
             if not load_balancers:
                 return "⚖️ No load balancers found."
         
-            total = data.get("metadata", {}).get("count", len(load_balancers))
-            endpoints_queried = data.get("metadata", {}).get("endpoints_queried", 0)
+            total = metadata.get("count", len(load_balancers))
+            original_count = metadata.get("original_count", total)
+            filter_applied = metadata.get("filter_applied", False)
+            filter_reason = metadata.get("filter_reason")
         
-            response = f"✅ Found **{total} load balancer(s)** across **{endpoints_queried} datacenter(s)**\n\n"
+            response = f"✅ Found **{total} load balancer(s)**"
         
-        # Group by endpoint
-            by_endpoint = {}
+            if filter_applied and filter_reason:
+                response += f" (filtered by: **{filter_reason}**)"
+        
+            if total != original_count:
+                response += f" out of {original_count} total"
+        
+            response += "\n\n"
+        
+        # Group by location
+            by_location = {}
             for lb in load_balancers:
-                endpoint = lb.get("_endpoint_name", "Unknown")
-                if endpoint not in by_endpoint:
-                    by_endpoint[endpoint] = []
-                by_endpoint[endpoint].append(lb)
+                location = lb.get("_location", "Unknown")
+                if location not in by_location:
+                    by_location[location] = []
+                by_location[location].append(lb)
         
-        # Display load balancers by endpoint
-            for endpoint, endpoint_lbs in by_endpoint.items():
-                response += f"### 📍 {endpoint}\n\n"
+        # Display load balancers by location
+            for location, location_lbs in sorted(by_location.items()):
+                response += f"### 📍 {location}\n\n"
             
-                for lb in endpoint_lbs[:10]:  # Show first 10 per endpoint
+                for lb in location_lbs[:10]:  # Show first 10 per location
                     name = lb.get("name", lb.get("loadBalancerName", "Unknown"))
                     status = lb.get("status", "Unknown")
                     vip = lb.get("virtual_ip", lb.get("virtualIp", "N/A"))
@@ -275,26 +342,146 @@ class ResponseFormatter:
                     ssl_emoji = " 🔒" if ssl_enabled else ""
                 
                     response += f"{status_emoji} **{name}**{ssl_emoji}\n"
-                    response += f"   - VIP: {vip}\n"
-                    response += f"   - Protocol: {protocol} (Port {port})\n"
-                    response += f"   - Status: {status}\n\n"
+                    response += f"   - VIP: {vip} | Protocol: {protocol}:{port} | Status: {status}\n\n"
             
-                if len(endpoint_lbs) > 10:
-                    response += f"   ... and {len(endpoint_lbs) - 10} more load balancer(s)\n\n"
-        
-        # Add failed endpoints if any
-            failed = data.get("metadata", {}).get("endpoint_details", {}).get("failed", [])
-            if failed:
-                response += "\n⚠️ **Failed to query some endpoints:**\n"
-                for fail in failed:
-                    response += f"   - {fail.get('name', 'Unknown')}: {fail.get('error', 'Unknown error')}\n"
+                if len(location_lbs) > 10:
+                    response += f"   ... and {len(location_lbs) - 10} more\n\n"
         
             return response
         
         except Exception as e:
-            logger.error(f"Error formatting load balancer list: {e}")
-        # Fallback to basic format
-            return f"✅ Found load balancers:\n```json\n{json.dumps(data, indent=2)}\n```"
+            logger.error(f"Error formatting load balancer list: {e}", exc_info=True)
+        # Fallback to JSON
+            return f"✅ Found load balancers (raw data):\n```json\n{json.dumps(data, indent=2)[:1000]}\n```"
+        
+ 
+
+    @staticmethod
+    def format_load_balancer_detailed(data: Dict[str, Any]) -> str:
+        """
+        Format detailed load balancer response with virtual services.
+        
+        PRODUCTION-READY: Creates user-friendly output, NOT raw JSON.
+        
+        Args:
+            data: Dict containing:
+                - load_balancer: Basic LB info
+                - details: Configuration details (optional)
+                - virtual_services: List of virtual services (optional)
+                - errors: Any errors encountered
+        
+        Returns:
+            User-friendly formatted string
+        """
+        try:
+            lb = data.get("load_balancer", {})
+            details = data.get("details", {})
+            virtual_services = data.get("virtual_services", [])
+            errors = data.get("errors", {})
+            
+            lb_name = lb.get("name", "Unknown")
+            lbci = lb.get("lbci") or lb.get("circuitId") or "N/A"
+            status = lb.get("status", "Unknown")
+            location = lb.get("_location", "Unknown")
+            vip = lb.get("virtual_ip") or lb.get("virtualIp", "N/A")
+            protocol = lb.get("protocol", "N/A")
+            port = lb.get("port", "N/A")
+            ssl_enabled = lb.get("ssl_enabled") or lb.get("sslEnabled", False)
+            
+            # Status emoji
+            if status.lower() in ["active", "running", "healthy", "up"]:
+                status_emoji = "✅"
+            elif status.lower() in ["degraded", "warning"]:
+                status_emoji = "⚠️"
+            else:
+                status_emoji = "❌"
+            
+            ssl_emoji = "🔒" if ssl_enabled else "🔓"
+            
+            # Build response
+            response = f"⚖️ **Load Balancer Details**\n\n"
+            response += f"### {status_emoji} {lb_name} {ssl_emoji}\n\n"
+            
+            # Basic Information
+            response += f"**Basic Information:**\n"
+            response += f"- **LBCI:** `{lbci}`\n"
+            response += f"- **Status:** {status}\n"
+            response += f"- **Location:** {location}\n"
+            
+            if vip != "N/A":
+                response += f"- **Virtual IP:** {vip}\n"
+            
+            response += f"- **Protocol:** {protocol}"
+            if port != "N/A":
+                response += f" (Port {port})"
+            response += "\n"
+            
+            response += f"- **SSL/TLS:** {'Enabled' if ssl_enabled else 'Disabled'}\n"
+            
+            # Configuration Details (if available)
+            if details:
+                algorithm = details.get("algorithm")
+                if algorithm:
+                    response += f"- **Algorithm:** {algorithm}\n"
+                
+                backend = details.get("backend_pool") or details.get("backendPool")
+                if backend:
+                    response += f"- **Backend Pool:** {backend}\n"
+            
+            # Virtual Services Section (CRITICAL)
+            response += f"\n### 🌐 Virtual Services"
+            
+            if errors.get("virtual_services"):
+                response += f" (⚠️ Error)\n\n"
+                response += f"Failed to retrieve virtual services: {errors['virtual_services']}\n"
+            elif not virtual_services:
+                response += f"\n\n"
+                response += f"ℹ️ No virtual services configured\n"
+            else:
+                response += f" ({len(virtual_services)})\n\n"
+                
+                for vs in virtual_services:
+                    vs_name = vs.get("virtualServerName", "Unknown")
+                    vip_ip = vs.get("vipIp", "N/A")
+                    vs_port = vs.get("virtualServerport", "N/A")
+                    vs_protocol = vs.get("protocol", "N/A")
+                    vs_status = vs.get("status", "Unknown")
+                    algorithm = vs.get("poolAlgorithm", "N/A")
+                    monitors = vs.get("monitor", [])
+                    pool_path = vs.get("virtualServerPath", "N/A")
+                    persistence = vs.get("persistenceType")
+                    
+                    # Status emoji
+                    vs_status_emoji = "✅" if vs_status.upper() == "UP" else "⚠️"
+                    
+                    response += f"#### {vs_name}\n\n"
+                    response += f"- **VIP:** {vip_ip}:{vs_port}\n"
+                    response += f"- **Protocol:** {vs_protocol}\n"
+                    response += f"- **Status:** {vs_status_emoji} {vs_status}\n"
+                    response += f"- **Algorithm:** {algorithm}\n"
+                    
+                    if monitors:
+                        monitors_str = ", ".join(monitors) if isinstance(monitors, list) else monitors
+                        response += f"- **Health Monitors:** {monitors_str}\n"
+                    
+                    if persistence:
+                        response += f"- **Persistence:** {persistence}\n"
+                    
+                    if pool_path != "N/A":
+                        response += f"- **Pool Path:** `{pool_path}`\n"
+                    
+                    response += "\n"
+            
+            # Configuration Details Error
+            if errors.get("details"):
+                response += f"\n⚠️ **Note:** Configuration details unavailable: {errors['details']}\n"
+            
+            return response
+        
+        except Exception as e:
+            logger.error(f"❌ Error formatting detailed LB response: {e}", exc_info=True)
+            # Fallback
+            return f"⚖️ Load balancer details (formatting error):\n```json\n{json.dumps(data, indent=2)[:1000]}\n```"
     
     @staticmethod
     def auto_format(response_text: str) -> str:
