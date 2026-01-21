@@ -1315,6 +1315,39 @@
             ]
           }
         }
+      },
+      "reports": {
+        "operations": ["list"],
+        "aliases": ["report", "reports", "common cluster report", "common cluster", "cluster inventory report", "cluster report", "cluster inventory", "cluster compute report", "compute report", "cluster compute", "storage inventory report", "storage report", "pvc report"],
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/ipcreports/reports/{report_name}",
+            "description": "Fetch report data by report name."
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": [],
+            "optional": ["report_name", "page", "size", "engagement_id", "startDate", "endDate", "clusterName", "datacenter", "status", "k8sVersion", "workerNode", "pvcType"],
+            "validation": {
+              "report_name": { "type": "string", "min_length": 3 },
+              "page": { "type": "integer", "min": 0 },
+              "size": { "type": "integer", "min": 1, "max": 200 },
+              "startDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+              "endDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+              "clusterName": { "type": "string", "min_length": 2 },
+              "datacenter": { "type": "string", "min_length": 2 },
+              "status": { "type": "string", "min_length": 2 },
+              "k8sVersion": { "type": "string", "min_length": 2 },
+              "workerNode": { "type": "string", "min_length": 2 },
+              "pvcType": { "type": "string", "min_length": 2 }
+            }
+          }
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"]
+        }
       }
     }
   }

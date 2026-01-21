@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # Fallback models to try when primary model fails
 FALLBACK_MODELS = [
     "meta/Llama-3.1-8B-Instruct",  # Most reliable fallback
-    "openai/gpt-3.5-turbo",
     "meta/llama-3.1-70b-instruct",
 ]
 

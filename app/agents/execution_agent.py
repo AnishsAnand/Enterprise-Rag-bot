@@ -24,6 +24,7 @@ from app.agents.resource_agents.managed_services_agent import ManagedServicesAge
 from app.agents.resource_agents.virtual_machine_agent import VirtualMachineAgent
 from app.agents.resource_agents.network_agent import NetworkAgent
 from app.agents.resource_agents.generic_resource_agent import GenericResourceAgent
+from app.agents.resource_agents.reports_agent import ReportsAgent
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class ExecutionAgent(BaseAgent):
         self.vm_agent = VirtualMachineAgent()
         self.network_agent = NetworkAgent()
         self.generic_agent = GenericResourceAgent()
+        self.reports_agent = ReportsAgent()
         
         # Resource type to agent mapping - ALL resources go through agents
         self.resource_agent_map = {
@@ -75,6 +77,11 @@ class ExecutionAgent(BaseAgent):
             # Network
             "firewall": self.network_agent,
             "load_balancer": self.network_agent,
+
+            # Reports
+            "reports": self.reports_agent,
+            "report": self.reports_agent,
+            "common_cluster_report": self.reports_agent,
             
             # Generic (fallback for other resources)
             "endpoint": self.generic_agent,
@@ -102,6 +109,7 @@ class ExecutionAgent(BaseAgent):
 - Managed services: Kafka, GitLab, Jenkins, PostgreSQL, DocumentDB, Container Registry (ManagedServicesAgent)
 - Virtual machines (VirtualMachineAgent)
 - Network: Firewalls, Load Balancers (NetworkAgent)
+- Reports: Common Cluster Report (ReportsAgent)
 - Generic: Endpoints, Business Units, Environments, Zones (GenericResourceAgent)
 
 All operations are routed through specialized resource agents for proper handling."""

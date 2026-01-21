@@ -34,7 +34,6 @@ PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-4o-mini")
 # Fallback models disabled - they all return 500 errors
 # Only use PRIMARY_CHAT_MODEL (openai/gpt-oss-120b) which is fast (0.2-0.3s) and reliable
 FALLBACK_CHAT_MODELS = [
-    "openai/gpt-3.5-turbo",
     "meta/llama-3.1-70b-instruct", 
     "meta/Llama-3.1-8B-Instruct",
     "openai/gpt-oss-120b",  # Moved to end as it's failing

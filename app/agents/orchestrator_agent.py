@@ -827,15 +827,18 @@ Respond with ONLY ONE of these:
                     "routing": "filter_selection"
                 }
             
-            # Use K8sClusterAgent to parse the selection
-            from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
-            cluster_agent = K8sClusterAgent()
-            
-            selection_result = cluster_agent.parse_filter_selection(
-                user_input=user_input,
-                options=options,
-                filter_type=filter_type
-            )
+            if filter_type and filter_type.startswith("report_"):
+                selection_result = self._parse_generic_selection(user_input, options)
+            else:
+                # Use K8sClusterAgent to parse the selection
+                from app.agents.resource_agents.k8s_cluster_agent import K8sClusterAgent
+                cluster_agent = K8sClusterAgent()
+                
+                selection_result = cluster_agent.parse_filter_selection(
+                    user_input=user_input,
+                    options=options,
+                    filter_type=filter_type
+                )
             
             if not selection_result or not selection_result.get("matched"):
                 # Could not parse selection - ask user again
@@ -855,22 +858,68 @@ Respond with ONLY ONE of these:
                 }
             
             # Successfully parsed selection!
-            filter_ids = selection_result["filter_ids"]
-            endpoint_ids = selection_result["endpoint_ids"]
-            endpoint_names = selection_result["endpoint_names"]
-            selected_names = selection_result["selected_names"]
-            filter_key = selection_result["filter_key"]  # "businessUnits", "environments", or "zones"
-            
-            logger.info(f"✅ Filter selection: {selected_names} (endpoints: {endpoint_ids}, {filter_key}: {filter_ids})")
-            
-            # Clear filter selection state
-            state.pending_filter_options = None
-            state.pending_filter_type = None
-            
-            # Add the collected parameters to state
-            state.add_parameter("endpoints", endpoint_ids, is_valid=True)
-            state.add_parameter("endpoint_names", endpoint_names, is_valid=True)
-            state.add_parameter(filter_key, filter_ids, is_valid=True)
+            if filter_type and filter_type.startswith("report_"):
+                selected_names = selection_result.get("selected_names", [])
+                selected_options = selection_result.get("selected_options", [])
+                
+                logger.info(f"✅ Report filter selection: {selected_names} ({filter_type})")
+                
+                # Clear filter selection state
+                state.pending_filter_options = None
+                state.pending_filter_type = None
+                
+                # Apply selected filter to report params
+                if filter_type == "report_catalog" and selected_options:
+                    selected_option = selected_options[0]
+                    report_type = selected_option.get("value") or selected_option.get("name")
+                    if report_type:
+                        state.add_parameter("report_type", report_type, is_valid=True)
+                elif filter_type == "report_cluster" and selected_names:
+                    state.add_parameter("clusterName", ",".join(selected_names), is_valid=True)
+                elif filter_type == "report_datacenter" and selected_names:
+                    state.add_parameter("datacenter", ",".join(selected_names), is_valid=True)
+                elif filter_type == "report_dates":
+                    selected = selected_options[0] if selected_options else {}
+                    if selected.get("name") == "Custom Date Range":
+                        state.pending_filter_options = []
+                        state.pending_filter_type = "report_custom_dates"
+                        state.status = ConversationStatus.AWAITING_FILTER_SELECTION
+                        conversation_state_manager.update_session(state)
+                        return {
+                            "success": True,
+                            "response": "Please provide a custom date range in the format `YYYY-MM-DD to YYYY-MM-DD`.",
+                            "routing": "filter_selection"
+                        }
+                    if selected.get("startDate") and selected.get("endDate"):
+                        state.add_parameter("startDate", selected["startDate"], is_valid=True)
+                        state.add_parameter("endDate", selected["endDate"], is_valid=True)
+                elif filter_type == "report_custom_dates":
+                    dates = self._extract_date_range(user_input)
+                    if not dates:
+                        return {
+                            "success": True,
+                            "response": "Please provide dates in the format `YYYY-MM-DD to YYYY-MM-DD`.",
+                            "routing": "filter_selection"
+                        }
+                    state.add_parameter("startDate", dates["startDate"], is_valid=True)
+                    state.add_parameter("endDate", dates["endDate"], is_valid=True)
+            else:
+                filter_ids = selection_result["filter_ids"]
+                endpoint_ids = selection_result["endpoint_ids"]
+                endpoint_names = selection_result["endpoint_names"]
+                selected_names = selection_result["selected_names"]
+                filter_key = selection_result["filter_key"]  # "businessUnits", "environments", or "zones"
+                
+                logger.info(f"✅ Filter selection: {selected_names} (endpoints: {endpoint_ids}, {filter_key}: {filter_ids})")
+                
+                # Clear filter selection state
+                state.pending_filter_options = None
+                state.pending_filter_type = None
+                
+                # Add the collected parameters to state
+                state.add_parameter("endpoints", endpoint_ids, is_valid=True)
+                state.add_parameter("endpoint_names", endpoint_names, is_valid=True)
+                state.add_parameter(filter_key, filter_ids, is_valid=True)
             
             # Update status to executing
             state.status = ConversationStatus.EXECUTING
@@ -922,3 +971,45 @@ Respond with ONLY ONE of these:
                 "response": f"Error processing your selection: {str(e)}",
                 "routing": "filter_selection"
             }
+
+    def _parse_generic_selection(
+        self,
+        user_input: str,
+        options: Optional[List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        if not options:
+            return {"matched": False}
+        user_input = (user_input or "").strip()
+        selected = []
+        import re
+        parts = re.split(r'[,;]|\band\b', user_input)
+        parts = [p.strip() for p in parts if p.strip()]
+        for part in parts:
+            try:
+                idx = int(part) - 1
+                if 0 <= idx < len(options):
+                    selected.append(options[idx])
+                    continue
+            except ValueError:
+                pass
+            part_lower = part.lower()
+            for opt in options:
+                opt_name = (opt.get("name") or "").lower()
+                if part_lower in opt_name or opt_name in part_lower:
+                    if opt not in selected:
+                        selected.append(opt)
+                    break
+        if not selected:
+            return {"matched": False}
+        return {
+            "matched": True,
+            "selected_names": [opt.get("name") for opt in selected if opt.get("name")],
+            "selected_options": selected
+        }
+
+    def _extract_date_range(self, user_input: str) -> Optional[Dict[str, str]]:
+        import re
+        matches = re.findall(r"\d{4}-\d{2}-\d{2}", user_input or "")
+        if len(matches) >= 2:
+            return {"startDate": matches[0], "endDate": matches[1]}
+        return None

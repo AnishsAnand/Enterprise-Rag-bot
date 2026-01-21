@@ -271,6 +271,7 @@ async def get_chat(chat_id: str):
 
 @router.put("/api/v1/chats/{chat_id}")
 @router.patch("/api/v1/chats/{chat_id}")
+@router.post("/api/v1/chats/{chat_id}")
 async def update_chat(chat_id: str, request: UpdateChatRequest):
     """
     Update a chat session (title, pinned status, etc.)

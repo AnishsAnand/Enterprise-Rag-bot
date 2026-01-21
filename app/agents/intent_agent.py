@@ -229,6 +229,23 @@ User: "Show firewalls in Mumbai" or "List network firewalls in Delhi"
 User: "How many firewalls?" or "Count firewalls" or "Show all Vayu firewalls"
 → intent_detected: true, resource_type: firewall, operation: list, extracted_params: empty
 
+**Reports Examples:**
+
+User: "Show common cluster report" or "Open the common cluster report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: common_cluster}}
+
+User: "Show cluster inventory report" or "Open the cluster report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_inventory}}
+
+User: "Show cluster compute report" or "Open the cluster compute report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_compute}}
+
+User: "Show storage inventory report" or "Open the PVC report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: storage_inventory}}
+
+User: "List reports" or "Show reports table"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: empty
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -270,6 +287,7 @@ User: "List all available data centers" or "Show available locations"
 - DocumentDB aliases: documentdb, document db, mongodb, mongo, nosql database
 - VM aliases: vm, vms, virtual machine, virtual machines, instance, instances, server, servers
 - Firewall aliases: firewall, firewalls, fw, vayu firewall, network firewall
+- Reports aliases: report, reports, common cluster report, common cluster, cluster inventory report, cluster report, cluster inventory, cluster compute report, compute report, cluster compute, storage inventory report, storage report, pvc report
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
         

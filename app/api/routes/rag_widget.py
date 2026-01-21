@@ -767,14 +767,14 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
             return True
     
     # Check for resource/cluster operation keywords
-    action_keywords = ["create", "make", "build", "deploy", "provision", "delete", 
+    action_keywords = ["create", "make", "build", "deploy", "provision", "delete",
                       "remove", "update", "modify", "list", "show", "get", "view", "display",
-                      "filter", "only", "just"]
-    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule", 
-                        "load balancer", "database", "storage", "volume", "endpoint", 
-                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka", 
+                      "filter", "only", "just", "available", "bring up"]
+    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule",
+                        "load balancer", "database", "storage", "volume", "endpoint",
+                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka",
                         "gitlab", "registry", "postgres", "documentdb", "vm", "vms",
-                        "virtual machine", "version", "k8s version"]
+                        "virtual machine", "version", "k8s version", "report", "reports"]
     
     has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
     has_resource = any(keyword in query_lower for keyword in resource_keywords)
