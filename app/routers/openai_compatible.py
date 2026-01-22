@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Header, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, AsyncGenerator
+import os
 import time
 import uuid
 import json
@@ -168,7 +169,10 @@ async def get_rich_content_from_widget(
     """
     try:
         # Construct widget request
-        widget_url = "http://127.0.0.1:8001/api/widget/query"  # Internal call
+        widget_url = os.getenv(
+            "WIDGET_INTERNAL_URL",
+            "http://127.0.0.1:8000/api/widget/query",
+        )
         
         widget_payload = {
             "query": query,
@@ -456,14 +460,18 @@ async def chat_completions(
         if not request_data.messages or len(request_data.messages) == 0:
             raise HTTPException(status_code=400, detail="No messages provided")
         
-        user_message = request_data.messages[-1]
-        if user_message.role != "user":
+        # Some clients append assistant/tool messages last; pick the latest user message.
+        user_message = next(
+            (msg for msg in reversed(request_data.messages) if msg.role == "user"),
+            None
+        )
+        if not user_message:
             raise HTTPException(
-                status_code=400, 
-                detail="Last message must be from user"
+                status_code=400,
+                detail="No user message found in request"
             )
-        
-        query = user_message.content.strip()
+
+        query = (user_message.content or "").strip()
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         

@@ -106,7 +106,12 @@ class LLMFormatterService:
         # Count notice
         count_notice = ""
         if is_truncated and actual_count > 0:
-            count_notice = f"\n\n**ACTUAL COUNT: {actual_count} items (data truncated for processing)**"
+            count_notice = (
+                "\n\n**IMPORTANT: The data below is truncated for processing. "
+                f"The ACTUAL total count is {actual_count} items. "
+                "Always report this exact count in your summary. Also, at the END of your response, add a note: "
+                "'📌 _Some results were truncated. Let me know if you'd like to see the complete list or filter by specific criteria._'**"
+            )
         
         # Get query-type-specific instructions
         query_instructions = self._get_query_type_instructions(query_type, context)
@@ -114,7 +119,7 @@ class LLMFormatterService:
         # Get resource-specific instructions
         resource_instructions = self._get_resource_instructions(resource_type, context)
         
-        return f"""You are a cloud infrastructure assistant. Format the API response for the user.
+        return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
 
 **User's Query:** {user_query or f"{operation} {resource_type}"}
 

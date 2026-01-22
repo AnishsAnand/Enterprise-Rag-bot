@@ -172,16 +172,6 @@ for i in {1..30}; do
     sleep 2
 done
 
-# User
-echo "Waiting for User service..."
-for i in {1..30}; do
-    if curl -fs http://localhost:8001/health &>/dev/null; then
-        echo -e "${GREEN}✅ User service ready${NC}"
-        break
-    fi
-    sleep 2
-done
-
 # -------------------------------------------------------------------
 # DONE
 # -------------------------------------------------------------------
@@ -191,8 +181,8 @@ echo -e "${GREEN}🎉 Startup Complete!${NC}"
 echo "========================================================"
 echo ""
 echo "📊 Service URLs:"
-echo "   - Admin Backend: http://localhost:8000"
-echo "   - User Frontend: http://localhost:8001"
+echo "   - Backend API:   http://localhost:8000"
+echo "   - User Frontend: http://localhost:4201"
 echo "   - OpenWebUI:     http://localhost:3000"
 echo "   - Nginx (HTTP):  http://localhost:80"
 echo "   - PostgreSQL:    localhost:5432"

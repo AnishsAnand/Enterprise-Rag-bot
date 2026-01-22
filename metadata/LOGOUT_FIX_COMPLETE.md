@@ -91,7 +91,7 @@ OpenWebUI:
 ## 📝 Important Notes
 
 - **Token blacklist is in-memory**: Will be cleared on server restart
-- **For production**: Use Redis or database for token blacklist with TTL
+- **For production**: Use database for token blacklist with TTL
 - **OpenWebUI sessions**: Managed separately by OpenWebUI
 - **User credentials**: Stored in our database, encrypted
 

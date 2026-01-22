@@ -632,6 +632,64 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         }
                 # Check if we need endpoint/datacenter parameter
                 if "endpoints" in state.missing_params or "endpoint_id" in state.missing_params or "endpoint_ids" in state.missing_params:
+                    # SPECIAL CHECK: If user wants to filter by BU/Environment/Zone, 
+                    # skip endpoint prompt and go directly to execution (which will show filter options)
+                    # IMPORTANT: Use input_text FIRST (current request), then fall back to state.user_query
+                    user_query = input_text or state.user_query or ""
+                    query_lower = user_query.lower()
+                    
+                    logger.info(f"🔍 Checking for BU/Env/Zone filter in query: '{query_lower}' (resource_type: {state.resource_type})")
+                    
+                    # Check for filter type keywords - these indicate user wants to filter by BU/Env/Zone
+                    # The endpoint will come FROM the filter selection, not from user
+                    bu_keywords = ["bu", "business unit", "business units", "department", "dept"]
+                    env_keywords = ["environment", "environments", "env"]
+                    zone_keywords = ["zone", "zones"]
+                    
+                    # Check if query mentions filtering by any of these
+                    has_filter_intent = "filter" in query_lower or "by" in query_lower
+                    has_bu = any(kw in query_lower for kw in bu_keywords)
+                    has_env = any(kw in query_lower for kw in env_keywords)
+                    has_zone = any(kw in query_lower for kw in zone_keywords)
+                    
+                    is_filter_request = has_filter_intent and (has_bu or has_env or has_zone)
+                    logger.info(f"🔍 Filter check: has_filter_intent={has_filter_intent}, has_bu={has_bu}, has_env={has_env}, has_zone={has_zone}, is_filter_request={is_filter_request}")
+                    
+                    if is_filter_request and state.resource_type == "k8s_cluster":
+                        # Determine filter type
+                        if has_bu:
+                            filter_type = "bu"
+                        elif has_env:
+                            filter_type = "environment"
+                        else:
+                            filter_type = "zone"
+                        
+                        logger.info(f"🎯 Detected {filter_type} filter request - skipping endpoint prompt, routing to execution")
+                        
+                        # Get all endpoints temporarily (execution agent will show filter options)
+                        endpoints_json = await self._fetch_available_options("endpoints")
+                        endpoints_data = json.loads(endpoints_json)
+                        
+                        if endpoints_data.get("options"):
+                            all_endpoint_ids = [opt.get("id") for opt in endpoints_data["options"] if opt.get("id")]
+                            all_endpoint_names = [opt.get("name") for opt in endpoints_data["options"] if opt.get("name")]
+                            
+                            # Temporarily mark endpoints as collected (execution will handle filter)
+                            state.add_parameter("endpoints", all_endpoint_ids, is_valid=True)
+                            state.add_parameter("endpoint_names", all_endpoint_names, is_valid=True)
+                            
+                            # Persist state
+                            conversation_state_manager.update_session(state)
+                            
+                            # Mark ready to execute - the K8sClusterAgent will detect the filter request
+                            # and show the BU/Env/Zone options instead of listing clusters
+                            return {
+                                "agent_name": self.agent_name,
+                                "success": True,
+                                "output": "Let me show you the available filter options...",
+                                "ready_to_execute": True
+                            }
+                    
                     logger.info("🔍 Collecting endpoint parameter using intelligent tools")
                     # Fetch available endpoints dynamically
                     endpoints_json = await self._fetch_available_options("endpoints")

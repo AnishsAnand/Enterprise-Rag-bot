@@ -15,6 +15,7 @@ from app.agents.resource_agents.virtual_machine_agent import VirtualMachineAgent
 from app.agents.resource_agents.network_agent import NetworkAgent
 from app.agents.resource_agents.load_balancer_agent import LoadBalancerAgent
 from app.agents.resource_agents.generic_resource_agent import GenericResourceAgent
+from app.agents.resource_agents.reports_agent import ReportsAgent
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,11 @@ class ExecutionAgent(BaseAgent):
         self.managed_services_agent = ManagedServicesAgent()
         self.vm_agent = VirtualMachineAgent()
         self.network_agent = NetworkAgent()  
-        self.load_balancer_agent = LoadBalancerAgent()  
+        self.load_balancer_agent = LoadBalancerAgent()
         self.generic_agent = GenericResourceAgent()
+        self.reports_agent = ReportsAgent()
+        
+        # Resource type to agent mapping - ALL resources go through agents
         self.resource_agent_map = {
             # Kubernetes
             "k8s_cluster": self.k8s_agent,
@@ -57,6 +61,13 @@ class ExecutionAgent(BaseAgent):
             "load_balancer": self.load_balancer_agent,
             "lb": self.load_balancer_agent,
             "loadbalancer": self.load_balancer_agent,
+
+            # Reports
+            "reports": self.reports_agent,
+            "report": self.reports_agent,
+            "common_cluster_report": self.reports_agent,
+            
+            # Generic (fallback for other resources)
             "endpoint": self.generic_agent,
             "business_unit": self.generic_agent,
             "environment": self.generic_agent,
@@ -80,7 +91,8 @@ class ExecutionAgent(BaseAgent):
 - Managed services: Kafka, GitLab, Jenkins, PostgreSQL, DocumentDB, Container Registry (ManagedServicesAgent)
 - Virtual machines (VirtualMachineAgent)
 - Firewalls (NetworkAgent)
-- Load balancers (LoadBalancerAgent) - NEW: Dedicated agent for LB operations
+- Load balancers (LoadBalancerAgent)
+- Reports: Common Cluster Report (ReportsAgent)
 - Generic: Endpoints, Business Units, Environments, Zones (GenericResourceAgent)
 
 **Load Balancer Operations:**
@@ -274,7 +286,29 @@ All operations are routed through specialized resource agents for proper handlin
                     "session_id": session_id,
                     "user_id": user_id,
                     "user_query": user_query,
-                    "user_roles": user_roles })
+                    "user_roles": user_roles
+                }
+            )
+            
+            # Check if this is a filter selection response (needs user to select BU/Env/Zone)
+            if execution_result.get("set_filter_state"):
+                logger.info(f"🔄 Filter selection required - storing options in state")
+                
+                # Store filter options in state for later retrieval
+                state.pending_filter_options = execution_result.get("filter_options_for_state", [])
+                state.pending_filter_type = execution_result.get("filter_type_for_state", "bu")
+                state.status = ConversationStatus.AWAITING_FILTER_SELECTION
+                
+                # Persist state
+                conversation_state_manager.update_session(state)
+                
+                return {
+                    "agent_name": self.agent_name,
+                    "success": True,
+                    "output": execution_result.get("response", ""),
+                    "execution_result": execution_result,
+                    "metadata": execution_result.get("metadata", {})
+                }
             # Update conversation state with result
             state.set_execution_result(execution_result)
             # Update status based on result

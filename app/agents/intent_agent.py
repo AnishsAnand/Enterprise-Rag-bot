@@ -91,6 +91,56 @@ User: "Tell me about clusters in Mumbai and Chennai"
 User: "What are the available clusters?" or "What k8s clusters do we have?"
 → intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
 
+**Cluster Filtering by BU/Environment/Zone Examples:**
+
+User: "List clusters in business unit XYZ" or "Show clusters for BU ABC"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "Filter clusters by department TATA" or "Show clusters in department test"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "List clusters in environment production" or "Show clusters for env staging"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "Filter clusters by zone XYZ" or "Show clusters in zone test"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+User: "What clusters are in the TATA COMMUNICATIONS business unit?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: list, extracted_params: empty
+
+**Cluster Info/Lookup Examples (Reverse Mapping - Zone/Env/BU lookup):**
+
+User: "Which zone is cluster blr-paas in?" or "What zone is blr-paas cluster in?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "blr-paas"
+
+User: "Which environment is cluster my-cluster in?" or "What env does my-cluster belong to?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-cluster"
+
+User: "Which business unit is cluster prod-app in?" or "What BU does prod-app belong to?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "prod-app"
+
+User: "Tell me about cluster test-cluster" or "Info about cluster dev-cluster"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "test-cluster"
+
+User: "Find cluster staging-app" or "Lookup cluster production-web"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "staging-app"
+
+User: "Where is cluster my-app located?" or "What is the hierarchy for cluster test?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-app"
+
+**Cluster Firewall Lookup Examples (find firewall associated with a cluster):**
+
+User: "Which firewall is cluster blr-paas associated to?" or "What firewall is blr-paas using?"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "blr-paas"
+
+User: "What firewall does cluster my-cluster use?" or "Show firewall for cluster test-app"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "my-cluster"
+
+User: "Find the edge gateway for cluster prod-cluster"
+→ intent_detected: true, resource_type: k8s_cluster, operation: read, extracted_params with cluster_name: "prod-cluster"
+
+**NOTE:** When user asks about a firewall FOR a specific cluster, route to k8s_cluster read operation, NOT firewall read.
+
 **Kafka Service Examples:**
 
 User: "List Kafka services" or "Show me Kafka" or "What Kafka services do we have?"
@@ -301,6 +351,22 @@ NOTE: LoadBalancerAgent will detect this as LBCI and automatically fetch:
 4. Just detect: resource_type=load_balancer, operation=list
 5. Keep extracted_params EMPTY (or minimal)
 
+**Reports Examples:**
+
+User: "Show common cluster report" or "Open the common cluster report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: common_cluster}}
+
+User: "Show cluster inventory report" or "Open the cluster report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_inventory}}
+
+User: "Show cluster compute report" or "Open the cluster compute report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_compute}}
+
+User: "Show storage inventory report" or "Open the PVC report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: storage_inventory}}
+
+User: "List reports" or "Show reports table"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: empty
 
 **Endpoint/Datacenter Listing Examples:**
 
@@ -326,9 +392,11 @@ User: "List all available data centers" or "Show available locations"
 - For "list" operation on k8s_cluster, kafka, gitlab, container_registry, jenkins, postgres, documentdb, firewall: "endpoints" parameter is required (data center selection)
 - For "list" operation on vm: NO parameters required (lists all VMs), but can optionally extract endpoint, zone, or department for filtering
 - For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
+- k8s_cluster list supports FILTERING by BU/Environment/Zone - if user asks to "filter by BU", "filter by environment", or "filter by zone", still detect as k8s_cluster list operation. The K8sClusterAgent will handle the filtering intelligently by matching names to IDs.
 - Do NOT extract location names (like "Mumbai", "Delhi") for cluster/service/firewall operations - the ValidationAgent will handle matching locations to endpoint IDs
+- Do NOT extract BU/Environment/Zone names for filtering - the K8sClusterAgent will extract and match them from the user query
 - For VM operations, you CAN extract location/zone/department names as they are used as filters, not required parameters
-- Just detect the intent and operation; ValidationAgent will intelligently match locations from the user query
+- Just detect the intent and operation; ValidationAgent/K8sClusterAgent will intelligently match locations/filters from the user query
 - ANY query asking about viewing/counting/listing actual resources (not concepts) should be detected as a list operation
 - "What are the clusters?" = list operation (showing actual clusters)
 - "What is a cluster?" = NOT a list operation (this would be a documentation question, but you won't see it as it's routed elsewhere)
@@ -345,7 +413,7 @@ User: "List all available data centers" or "Show available locations"
 - Do NOT extract location names (like "Mumbai", "Delhi") - ValidationAgent will handle location matching
 - Just detect the intent and operation; ValidationAgent will intelligently match locations
 - ANY query asking about viewing/counting/listing load balancers should be detected as a list operation
-
+- Reports aliases: report, reports, common cluster report, common cluster, cluster inventory report, cluster report, cluster inventory, cluster compute report, compute report, cluster compute, storage inventory report, storage report, pvc report
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
     

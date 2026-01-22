@@ -2273,8 +2273,6 @@ createtags(tags: any[]) {
 //                       "imagePath": "./assets/images/paas/opensearch.svg",
 //                       "visibility": "MGMT",
 //                       "description": "In-memory data structure store used as a database, cache, and message broker.",
-//                       "mappinginapi": "redis",
-//                       "moreInfoLink": "https://redis.io/docs/"
 //                   },
 //                   {
 //                       "name": "TCL Ingress Controller",

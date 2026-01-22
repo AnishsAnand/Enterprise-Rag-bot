@@ -1044,10 +1044,20 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     # SHORT RESPONSES that are likely answers to agent questions
     short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
     is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
+    
+    # Active conversation statuses that need routing to agent
+    active_statuses = [
+        ConversationStatus.COLLECTING_PARAMS,
+        ConversationStatus.AWAITING_SELECTION,
+        ConversationStatus.AWAITING_FILTER_SELECTION  # New: for BU/Env/Zone filter selection
+    ]
+    
+    # Check for recent active sessions - for short answers, be more aggressive
     if not existing_state:
         recent_state = conversation_state_manager.get_most_recent_active_session()
         if recent_state:
-            if is_short_answer and recent_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+            # For short answers, route to agent if there's ANY recent active session
+            if is_short_answer and recent_state.status in active_statuses:
                 logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
                 return True
             if recent_state.status == ConversationStatus.COLLECTING_PARAMS:
@@ -1055,22 +1065,23 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
                 return True
     
     if existing_state:
-        if existing_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
+        if existing_state.status in active_statuses:
             logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
             return True
         if is_short_answer and existing_state.status in [ConversationStatus.COMPLETED, ConversationStatus.EXECUTING]:
             # Check if this might be a follow-up filter request
             logger.info(f"🔄 Short answer with recent completed conversation -> routing to agent")
             return True
-
-    action_keywords = ["create", "make", "build", "deploy", "provision", "delete", 
+    
+    # Check for resource/cluster operation keywords
+    action_keywords = ["create", "make", "build", "deploy", "provision", "delete",
                       "remove", "update", "modify", "list", "show", "get", "view", "display",
-                      "filter", "only", "just"]
-    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule", 
-                        "load balancer", "database", "storage", "volume", "endpoint", 
-                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka", 
+                      "filter", "only", "just", "available", "bring up"]
+    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule",
+                        "load balancer", "database", "storage", "volume", "endpoint",
+                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka",
                         "gitlab", "registry", "postgres", "documentdb", "vm", "vms",
-                        "virtual machine", "version", "k8s version"]
+                        "virtual machine", "version", "k8s version", "report", "reports"]
     
     has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
     has_resource = any(keyword in query_lower for keyword in resource_keywords)

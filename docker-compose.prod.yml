@@ -1,5 +1,5 @@
 # docker-compose.prod.yml
-# Infrastructure only - RAG apps run locally on 8000/8001
+# Infrastructure only - RAG app runs locally on 8000
 version: '3.8'
 
 services:
@@ -32,26 +32,6 @@ services:
       - "max_connections=200"
       - "-c"
       - "shared_buffers=256MB"
-
-  # ---------------------------------------------------------------------------
-  # Redis
-  # ---------------------------------------------------------------------------
-  redis:
-    image: redis:7-alpine
-    container_name: enterprise-rag-redis
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - rag-network
 
   # ---------------------------------------------------------------------------
   # Prometheus
@@ -113,7 +93,7 @@ services:
     container_name: enterprise-rag-openwebui
     restart: unless-stopped
     environment:
-      OPENAI_API_BASE_URL: http://host.docker.internal:8001/api/v1
+      OPENAI_API_BASE_URL: http://host.docker.internal:8000/api/v1
       OPENAI_API_KEY: ${OPENWEBUI_API_KEY:-sk-dummy-key}
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
@@ -144,7 +124,6 @@ networks:
 # ---------------------------------------------------------------------------
 volumes:
   postgres_data:
-  redis_data:
   prometheus_data:
   grafana_data:
   openwebui_data:

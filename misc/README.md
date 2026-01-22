@@ -31,7 +31,7 @@ Docker Compose configurations for different deployment scenarios.
 - **`docker-compose.openwebui.yml`** - OpenWebUI-specific Docker Compose
   - OpenWebUI service configuration
   - Integration with main services
-  - Additional dependencies (Redis)
+  - Additional dependencies
 
 ### Usage
 

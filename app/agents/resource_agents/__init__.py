@@ -9,6 +9,7 @@ from .virtual_machine_agent import VirtualMachineAgent
 from .network_agent import NetworkAgent
 from .generic_resource_agent import GenericResourceAgent
 from .load_balancer_agent import LoadBalancerAgent
+from .reports_agent import ReportsAgent
 
 __all__ = [
     'BaseResourceAgent',
@@ -17,6 +18,7 @@ __all__ = [
     'VirtualMachineAgent',
     'NetworkAgent',
     'LoadBalancerAgent',
-    'GenericResourceAgent'
+    'GenericResourceAgent',
+    'ReportsAgent'
 ]
 

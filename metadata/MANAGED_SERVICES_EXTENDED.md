@@ -453,27 +453,27 @@ The system now supports **6 managed services**:
 
 ## 🚀 Adding Future Services
 
-To add a new managed service (e.g., `IKSRedis`):
+To add a new managed service (e.g., `IKSExample`):
 
 ### 1. Update `resource_schema.json`
 ```json
 // In managed_service.service_types
-"redis": {
-  "api_value": "IKSRedis",
-  "display_name": "Redis",
-  "description": "Redis in-memory data store"
+"example_service": {
+  "api_value": "IKSExample",
+  "display_name": "Example Service",
+  "description": "Example managed service"
 }
 
 // Add new resource definition
-"redis": {
+"example_service": {
   "operations": ["list"],
-  "aliases": ["redis", "redis service", "cache"],
+  "aliases": ["example service"],
   "parent_resource": "managed_service",
-  "service_type": "IKSRedis",
+  "service_type": "IKSExample",
   "api_endpoints": {
     "list": {
       "method": "POST",
-      "url": "https://.../listManagedServices/IKSRedis"
+      "url": "https://.../listManagedServices/IKSExample"
     }
   },
   "parameters": {
@@ -481,7 +481,7 @@ To add a new managed service (e.g., `IKSRedis`):
       "required": ["endpoints"],
       "internal": {
         "engagementId": "ipc_engagement_id",
-        "serviceType": "IKSRedis"
+        "serviceType": "IKSExample"
       }
     }
   },
@@ -494,14 +494,14 @@ To add a new managed service (e.g., `IKSRedis`):
 
 ### 2. Add wrapper in `api_executor_service.py`
 ```python
-async def list_redis(
+async def list_example_service(
     self,
     endpoint_ids: List[int] = None,
     ipc_engagement_id: int = None
 ) -> Dict[str, Any]:
-    """List Redis managed services."""
+    """List example managed services."""
     return await self.list_managed_services(
-        service_type="IKSRedis",
+        service_type="IKSExample",
         endpoint_ids=endpoint_ids,
         ipc_engagement_id=ipc_engagement_id
     )
@@ -510,26 +510,26 @@ async def list_redis(
 ### 3. Add execution handling in `execution_agent.py`
 ```python
 # In execute() method
-elif state.resource_type == "redis" and state.operation == "list":
-    logger.info("📋 Using list_redis workflow method")
+elif state.resource_type == "example_service" and state.operation == "list":
+    logger.info("📋 Using list_example_service workflow method")
     # ... endpoint conversion ...
-    execution_result = await api_executor_service.list_redis(...)
+    execution_result = await api_executor_service.list_example_service(...)
 
 # In _format_success_message() method
-if state.resource_type == "redis" and state.operation == "list":
-    # Format Redis-specific details
+if state.resource_type == "example_service" and state.operation == "list":
+    # Format example service details
     message += f"> **Cache Size:** {cache_size}MB\n"
 ```
 
 ### 4. Add examples in `intent_agent.py`
 ```
-**Redis Service Examples:**
+**Example Service Examples:**
 
-User: "List Redis services" or "Show me Redis cache"
-→ intent_detected: true, resource_type: redis, operation: list
+User: "List example services"
+→ intent_detected: true, resource_type: example_service, operation: list
 
 # Update notes and aliases
-- Redis aliases: redis, redis service, cache, in-memory cache
+- Example aliases: example service
 ```
 
 ---

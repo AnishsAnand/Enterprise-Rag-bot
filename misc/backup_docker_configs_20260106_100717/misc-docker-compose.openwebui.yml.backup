@@ -67,7 +67,6 @@ services:
     environment:
       # Database
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/ragbot}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       
       # AI/ML Services
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -95,7 +94,6 @@ services:
     restart: always
     depends_on:
       - postgres
-      - redis
       - milvus
     networks:
       - rag-network
@@ -125,26 +123,6 @@ services:
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ============================================================================
-  # Redis - Caching and session management
-  # ============================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: enterprise-rag-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - rag-network
-    restart: always
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -225,8 +203,6 @@ volumes:
   open-webui-data:
     driver: local
   postgres-data:
-    driver: local
-  redis-data:
     driver: local
   milvus-data:
     driver: local

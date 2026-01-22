@@ -14,10 +14,10 @@ services:
       - "3000:8080"
     environment:
       # Connection to Enterprise RAG Bot backend
-      # - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8001/api/v1
+      # - OPENAI_API_BASE_URL=http://enterprise-rag-bot:8000/api/v1
 
       # Connection to locally run backend
-      - OPENAI_API_BASE_URL=http://host.docker.internal:8001/api/v1
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/api/v1
       - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-change-this-secure-key}
       
       # Feature flags
@@ -66,11 +66,10 @@ services:
       dockerfile: Dockerfile
     container_name: enterprise-rag-bot
     ports:
-      - "8001:8001"
+      - "8000:8000"
     environment:
       # Database
       - DATABASE_URL=${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/ragbot}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       
       # AI/ML Services
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -85,7 +84,7 @@ services:
       - CORS_ORIGINS=http://localhost:3000,http://enterprise-rag-openwebui:8080,http://localhost:4201
       
       # Application Port
-      - PORT=8001
+      - PORT=8000
       - HOST=0.0.0.0
       
       # Open WebUI compatibility
@@ -98,12 +97,11 @@ services:
     restart: always
     depends_on:
       - postgres
-      - redis
       - milvus
     networks:
       - rag-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -128,26 +126,6 @@ services:
     restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ============================================================================
-  # Redis - Caching and session management
-  # ============================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: enterprise-rag-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    networks:
-      - rag-network
-    restart: always
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -228,8 +206,6 @@ volumes:
   open-webui-data:
     driver: local
   postgres-data:
-    driver: local
-  redis-data:
     driver: local
   milvus-data:
     driver: local

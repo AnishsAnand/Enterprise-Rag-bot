@@ -318,17 +318,17 @@ The system is designed to be extensible. To add a new managed service type:
 
 ```json
 {
-  "redis": {
+  "example_service": {
     "operations": ["list"],
-    "aliases": ["redis service", "redis cache"],
+    "aliases": ["example service", "example cache"],
     "parent_resource": "managed_service",
-    "service_type": "IKSRedis",  // Match API's serviceType value
+    "service_type": "IKSExample",  // Match API's serviceType value
     "parameters": {
       "list": {
         "required": ["endpoints"],
         "internal": {
           "engagementId": "ipc_engagement_id",
-          "serviceType": "IKSRedis"
+          "serviceType": "IKSExample"
         }
       }
     }
@@ -339,14 +339,14 @@ The system is designed to be extensible. To add a new managed service type:
 ### Step 2: Add convenience method to `api_executor_service.py`
 
 ```python
-async def list_redis(
+async def list_example_service(
     self,
     endpoint_ids: List[int] = None,
     ipc_engagement_id: int = None
 ) -> Dict[str, Any]:
-    """List Redis managed services."""
+    """List example managed services."""
     return await self.list_managed_services(
-        service_type="IKSRedis",
+        service_type="IKSExample",
         endpoint_ids=endpoint_ids,
         ipc_engagement_id=ipc_engagement_id
     )
@@ -355,9 +355,9 @@ async def list_redis(
 ### Step 3: Add handling to `execution_agent.py`
 
 ```python
-elif state.resource_type == "redis" and state.operation == "list":
+elif state.resource_type == "example_service" and state.operation == "list":
     endpoint_ids = state.collected_params.get("endpoints")
-    execution_result = await api_executor_service.list_redis(
+    execution_result = await api_executor_service.list_example_service(
         endpoint_ids=endpoint_ids,
         ipc_engagement_id=None
     )
@@ -432,7 +432,7 @@ The managed services integration is complete and production-ready!
 **What you can now do**:
 - ✅ List Kafka services across data centers
 - ✅ List GitLab services across data centers  
-- ✅ Easily add more managed service types (Redis, PostgreSQL, MongoDB, etc.)
+- ✅ Easily add more managed service types (PostgreSQL, MongoDB, etc.)
 - ✅ Same UX as cluster listing (intuitive and conversational)
 - ✅ Automatic engagement ID conversion (PAAS → IPC)
 - ✅ Beautiful, formatted responses

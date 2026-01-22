@@ -48,7 +48,7 @@ else
 fi
 
 # Check each service
-SERVICES=("postgres" "redis" "etcd" "minio" "milvus" "enterprise-rag-bot" "open-webui")
+SERVICES=("postgres" "etcd" "minio" "milvus" "enterprise-rag-bot" "open-webui")
 for service in "${SERVICES[@]}"; do
     if docker ps | grep -q "enterprise-rag-$service\|$service"; then
         STATUS=$(docker inspect --format='{{.State.Health.Status}}' "enterprise-rag-$service" 2>/dev/null || echo "unknown")

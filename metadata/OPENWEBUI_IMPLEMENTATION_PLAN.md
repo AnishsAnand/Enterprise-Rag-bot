@@ -230,7 +230,6 @@ docker-compose -f docker-compose.openwebui.yml logs -f
 - ✅ Open WebUI (port 3000)
 - ✅ Enterprise RAG Bot (port 8000)
 - ✅ PostgreSQL (port 5432)
-- ✅ Redis (port 6379)
 - ✅ Milvus (port 19530)
 - ✅ Etcd
 - ✅ MinIO
@@ -469,7 +468,7 @@ logger.info(f"Chat completion | User: {user_id} | Tokens: {total_tokens}")
 #### Task 6.2: Performance Optimization
 
 **Actions**:
-- [ ] Enable response caching (Redis)
+- [ ] Enable response caching (in-app)
 - [ ] Optimize Milvus queries
 - [ ] Database connection pooling
 - [ ] Load balancing setup
@@ -484,7 +483,6 @@ logger.info(f"Chat completion | User: {user_id} | Tokens: {total_tokens}")
 **Setup**:
 - [ ] Database backup schedule
 - [ ] Milvus vector backup
-- [ ] Redis persistence
 - [ ] Configuration backups
 - [ ] Disaster recovery plan
 

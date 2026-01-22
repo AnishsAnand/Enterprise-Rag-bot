@@ -32,8 +32,7 @@ services:
     ports:
       - "4200:4200"   # Admin frontend
       - "4201:4201"   # User frontend
-      - "8000:8000"   # Admin backend
-      - "8001:8001"   # User backend
+      - "8000:8000"   # Unified backend
     volumes:
       - ./uploads:/app/uploads
       - ./outputs:/app/outputs
@@ -44,8 +43,8 @@ services:
       - etcd
       - minio
     healthcheck:
-      # lightweight TCP check: succeeds when either backend port responds
-      test: ["CMD-SHELL", "timeout 5 bash -c 'nc -z localhost 8000 || nc -z localhost 8001'"]
+      # lightweight TCP check: succeeds when backend port responds
+      test: ["CMD-SHELL", "timeout 5 bash -c 'nc -z localhost 8000'"]
       interval: 40s
       timeout: 10s
       retries: 8
@@ -67,8 +66,8 @@ services:
       MILVUS_ENABLE_SEMANTIC_RERANK: "true"
       MILVUS_ENABLE_CONTEXT_ENRICHMENT: "true"
       VECTOR_DB: "milvus"
-      USER_APP_HOST: "0.0.0.0"
-      USER_APP_PORT: "8001"
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8000"
       # PostgreSQL for session persistence (Memori)
       DATABASE_URL: "postgresql://ragbot:ragbot_secret_2024@postgres:5432/ragbot_sessions"
       # other environment vars from your .env will also be loaded

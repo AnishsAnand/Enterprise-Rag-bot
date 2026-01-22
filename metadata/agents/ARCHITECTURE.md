@@ -439,7 +439,6 @@ Current Architecture:
 Future Enhancements:
 ┌────────────────────────────────────┐
 │ Distributed Architecture           │
-│ • Redis for state management       │
 │ • Message queue for agent comm     │
 │ • Horizontal scaling               │
 │ • Good for: 1000s of concurrent    │

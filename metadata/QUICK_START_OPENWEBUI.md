@@ -118,7 +118,6 @@ Bot: I'll help you create a cluster. Let me guide you through the process...
 | API Docs | http://localhost:8000/docs | API documentation |
 | MinIO Console | http://localhost:9001 | Object storage UI |
 | PostgreSQL | localhost:5432 | Database |
-| Redis | localhost:6379 | Cache |
 | Milvus | localhost:19530 | Vector DB |
 
 ## 🔧 Troubleshooting

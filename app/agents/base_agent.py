@@ -15,6 +15,12 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Fallback models to try when primary model fails
+FALLBACK_MODELS = [
+    "meta/Llama-3.1-8B-Instruct",  # Most reliable fallback
+    "meta/llama-3.1-70b-instruct",
+]
+
 class BaseAgent(ABC):
     """
     Abstract base class for all agents in the system.
@@ -36,17 +42,22 @@ class BaseAgent(ABC):
         self.temperature = temperature
         self.max_tokens = max_tokens
         # Get model configuration from environment
-        grok_base_url = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
-        grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
+        self.grok_base_url = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
+        self.grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
         self.model_name = model_name or os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+        
+        # Track failed models to avoid retrying
+        self.failed_models: set = set()
+        self.current_model = self.model_name
         # Initialize LangChain LLM with OpenAI-compatible endpoint
         self.llm = ChatOpenAI(
             model=self.model_name,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
-            openai_api_base=grok_base_url,
-            openai_api_key=grok_api_key,
-            model_kwargs={"top_p": 0.9})
+            openai_api_base=self.grok_base_url,
+            openai_api_key=self.grok_api_key,
+            model_kwargs={"top_p": 0.9}
+        )
         # Agent state
         self.state: Dict[str, Any] = {
             "agent_name": agent_name,
@@ -122,50 +133,148 @@ class BaseAgent(ABC):
     async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute the agent with given input and context.
+        Automatically retries with fallback models if primary model fails.
+        
         Args:
             input_text: User input or task description
             context: Additional context for the agent
         Returns:
             Dict containing agent output and metadata
         """
-        try:
-            self.state["execution_count"] += 1
-            self.state["last_execution"] = datetime.utcnow().isoformat()
-            # Prepare input with context
-            full_input = input_text
-            if context:
-                context_str = "\n\n**Context:**\n" + "\n".join(
-                    f"- {k}: {v}" for k, v in context.items())
-                full_input = f"{input_text}{context_str}"
-            logger.info(f"🤖 {self.agent_name} executing with input: {input_text[:100]}...")
-            # Execute agent
-            if self.agent_executor:
-                result = await self.agent_executor.ainvoke({"input": full_input})
-            else:
-                # Fallback to direct LLM call if no executor
-                result = {"output": await self._direct_llm_call(full_input)}
-            # Format response
-            response = {
-                "agent_name": self.agent_name,
-                "success": True,
-                "output": result.get("output", ""),
-                "intermediate_steps": result.get("intermediate_steps", []),
-                "timestamp": datetime.utcnow().isoformat(),
-                "execution_count": self.state["execution_count"]}
-            logger.info(f"✅ {self.agent_name} completed execution")
-            return response
-        except Exception as e:
-            logger.error(f"❌ {self.agent_name} execution failed: {str(e)}")
-            self.state["errors"].append({
-                "timestamp": datetime.utcnow().isoformat(),
-                "error": str(e),
-                "input": input_text[:200]})
-            return {
-                "agent_name": self.agent_name,
-                "success": False,
-                "error": str(e),
-                "output": f"Agent {self.agent_name} encountered an error: {str(e)}",
-                "timestamp": datetime.utcnow().isoformat()}
+        self.state["execution_count"] += 1
+        self.state["last_execution"] = datetime.utcnow().isoformat()
+        
+        # Prepare input with context
+        full_input = input_text
+        if context:
+            context_str = "\n\n**Context:**\n" + "\n".join(
+                f"- {k}: {v}" for k, v in context.items()
+            )
+            full_input = f"{input_text}{context_str}"
+        
+        logger.info(f"🤖 {self.agent_name} executing with input: {input_text[:100]}...")
+        
+        # Build list of models to try: current model first, then fallbacks
+        models_to_try = [self.current_model]
+        for fallback in FALLBACK_MODELS:
+            if fallback != self.current_model and fallback not in self.failed_models:
+                models_to_try.append(fallback)
+        
+        last_error = None
+        
+        for model in models_to_try:
+            try:
+                # Switch to this model if different from current
+                if model != self.current_model:
+                    logger.info(f"🔄 {self.agent_name} switching to fallback model: {model}")
+                    self._switch_model(model)
+                
+                # Execute agent
+                if self.agent_executor:
+                    result = await self.agent_executor.ainvoke({"input": full_input})
+                else:
+                    # Fallback to direct LLM call if no executor
+                    result = {"output": await self._direct_llm_call(full_input)}
+                
+                # Success! Format response
+                response = {
+                    "agent_name": self.agent_name,
+                    "success": True,
+                    "output": result.get("output", ""),
+                    "intermediate_steps": result.get("intermediate_steps", []),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "execution_count": self.state["execution_count"],
+                    "model_used": self.current_model
+                }
+                
+                logger.info(f"✅ {self.agent_name} completed execution with model {self.current_model}")
+                return response
+                
+            except Exception as e:
+                error_str = str(e)
+                last_error = e
+                
+                # Check if this is a model failure (500, connection error)
+                is_model_failure = (
+                    "500" in error_str or 
+                    "502" in error_str or
+                    "503" in error_str or
+                    "Connection error" in error_str or
+                    "InternalServerError" in error_str
+                )
+                
+                if is_model_failure:
+                    logger.warning(f"⚠️ {self.agent_name} model {model} failed: {error_str[:200]}")
+                    self.failed_models.add(model)
+                    continue  # Try next model
+                else:
+                    # Non-model error (e.g., parsing error) - don't try other models
+                    logger.error(f"❌ {self.agent_name} execution failed (non-model error): {error_str}")
+                    break
+        
+        # All models failed
+        logger.error(f"❌ {self.agent_name} all models failed. Last error: {str(last_error)}")
+        self.state["errors"].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "error": str(last_error),
+            "input": input_text[:200],
+            "models_tried": models_to_try
+        })
+        
+        return {
+            "agent_name": self.agent_name,
+            "success": False,
+            "error": str(last_error),
+            "output": f"Agent {self.agent_name} encountered an error: {str(last_error)}",
+            "timestamp": datetime.utcnow().isoformat(),
+            "models_tried": models_to_try
+        }
+    
+    def _switch_model(self, model_name: str) -> None:
+        """
+        Switch to a different LLM model.
+        
+        Args:
+            model_name: Name of the model to switch to
+        """
+        self.current_model = model_name
+        self.llm = ChatOpenAI(
+            model=model_name,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            openai_api_base=self.grok_base_url,
+            openai_api_key=self.grok_api_key,
+            model_kwargs={"top_p": 0.9}
+        )
+        
+        # Re-setup agent executor with new LLM if we have tools
+        if self.tools:
+            try:
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", self.get_system_prompt()),
+                    MessagesPlaceholder(variable_name="chat_history", optional=True),
+                    ("user", "{input}"),
+                    MessagesPlaceholder(variable_name="agent_scratchpad"),
+                ])
+                
+                agent = create_openai_functions_agent(
+                    llm=self.llm,
+                    tools=self.tools,
+                    prompt=prompt
+                )
+                
+                self.agent_executor = AgentExecutor(
+                    agent=agent,
+                    tools=self.tools,
+                    memory=self.memory,
+                    verbose=True,
+                    max_iterations=5,
+                    handle_parsing_errors=True,
+                    return_intermediate_steps=True
+                )
+                logger.info(f"✅ {self.agent_name} re-initialized with model {model_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to reinitialize agent with model {model_name}: {str(e)}")
     
     async def _direct_llm_call(self, input_text: str) -> str:
         """

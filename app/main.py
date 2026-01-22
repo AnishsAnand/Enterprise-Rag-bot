@@ -9,11 +9,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import uvicorn
 
 from app.core.config import settings
-from app.api.routes import rag_widget, agent_chat, health
+from app.api.routes import (
+    scraper,
+    rag,
+    admin,
+    support,
+    rag_widget,
+    agent_chat,
+    health,
+    chat_persistence,
+)
+from app.api.routes.user_chat import router as user_chat_router
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
@@ -116,6 +127,16 @@ allowed_origins: List[str] = [
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
 if extra_origins:
     allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
+
+user_allowed_origins = os.getenv("USER_ALLOWED_ORIGINS", "")
+if user_allowed_origins:
+    allowed_origins.extend([o.strip() for o in user_allowed_origins.split(",") if o.strip()])
+
+allow_all = os.getenv("ALLOW_ALL_ORIGINS", "false").lower() in ("1", "true", "yes")
+user_allow_all = os.getenv("USER_ALLOW_ALL_ORIGINS", "false").lower() in ("1", "true", "yes")
+if allow_all or user_allow_all:
+    allowed_origins = ["*"]
+    logger.warning("⚠️ CORS set to allow ALL origins - not recommended for production!")
 logger.info("✅ CORS allowed origins: %s", allowed_origins)
 app.add_middleware(
     CORSMiddleware,
@@ -124,10 +145,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],)
 
+app.state.allowed_origins = allowed_origins
+
+# ------------------------ Security Headers ------------------------
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        try:
+            app_origins = getattr(request.app.state, "allowed_origins", [])
+            if app_origins and app_origins != ["*"]:
+                frame_ancestors = " ".join(app_origins)
+                csp_value = f"default-src 'self'; frame-ancestors {frame_ancestors};"
+                response.headers["Content-Security-Policy"] = csp_value
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer-when-downgrade"
+        except Exception:
+            pass
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # ===================== API Routes =====================
 app.include_router(health.router)  # Add health check routes
-app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
+app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
+app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
+app.include_router(rag_widget.router, prefix="/api", tags=["rag-widget"])
+app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"], include_in_schema=False)
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
+app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
+app.include_router(chat_persistence.router)
+app.include_router(user_chat_router)
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
 # ===================== Static Files & Frontend =====================

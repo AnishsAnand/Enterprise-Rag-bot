@@ -70,30 +70,6 @@ class Settings(BaseSettings):
     )
     
     # =========================
-    # Redis Configuration
-    # =========================
-    REDIS_HOST: str = Field(
-        default_factory=lambda: os.getenv("REDIS_HOST", "redis"),
-        description="Redis host"
-    )
-    REDIS_PORT: int = Field(
-        default_factory=lambda: int(os.getenv("REDIS_PORT", "6379")),
-        description="Redis port"
-    )
-    REDIS_DB: int = Field(
-        default_factory=lambda: int(os.getenv("REDIS_DB", "0")),
-        description="Redis database number"
-    )
-    REDIS_PASSWORD: Optional[str] = Field(
-        default_factory=lambda: os.getenv("REDIS_PASSWORD"),
-        description="Redis password (optional)"
-    )
-    REDIS_URL: Optional[str] = Field(
-        default=None,
-        description="Redis connection URL (auto-generated)"
-    )
-    
-    # =========================
     # Storage Configuration
     # =========================
     CHROMA_PERSIST_DIRECTORY: str = Field(
@@ -227,18 +203,6 @@ class Settings(BaseSettings):
         default_factory=lambda: os.getenv("PYTHONPATH", "./app"),
         description="Python path"
     )
-    
-    def model_post_init(self, __context):
-        if not self.REDIS_URL:
-            if self.REDIS_PASSWORD:
-                self.REDIS_URL = (
-                    f"redis://:{self.REDIS_PASSWORD}@"
-                    f"{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-            )
-            else:
-                self.REDIS_URL = (
-                    f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-             )
     
     model_config = SettingsConfigDict(
     env_file=".env",

@@ -13,7 +13,8 @@ class ConversationStatus(Enum):
     """Status of the conversation flow."""
     INITIATED = "initiated"
     COLLECTING_PARAMS = "collecting_params"
-    AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options
+    AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options (e.g., endpoints)
+    AWAITING_FILTER_SELECTION = "awaiting_filter_selection"  # Waiting for user to select BU/Env/Zone filter
     VALIDATING = "validating"
     READY_TO_EXECUTE = "ready_to_execute"
     EXECUTING = "executing"
@@ -59,6 +60,11 @@ class ConversationState:
         # Agent tracking
         self.active_agent: Optional[str] = None
         self.agent_handoffs: List[Dict[str, str]] = []
+        
+        # Filter selection tracking (for BU/Environment/Zone filtering)
+        self.pending_filter_options: Optional[List[Dict[str, Any]]] = None
+        self.pending_filter_type: Optional[str] = None  # "bu", "environment", "zone"
+        
         logger.info(f"✅ Created conversation state for session {session_id}, user {user_id}")
     
     def set_intent(self,resource_type: str,operation: str,required_params: List[str],optional_params: Optional[List[str]] = None) -> None:
@@ -275,7 +281,10 @@ class ConversationState:
             "error_message": self.error_message,
             "active_agent": self.active_agent,
             "agent_handoffs": self.agent_handoffs,
-            "metadata": metadata}
+            "pending_filter_options": self.pending_filter_options,
+            "pending_filter_type": self.pending_filter_type,
+            "metadata": metadata
+        }
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ConversationState":
@@ -318,7 +327,12 @@ class ConversationState:
         state.execution_result = data.get("execution_result")
         state.error_message = data.get("error_message")
         state.active_agent = data.get("active_agent")
-        state.agent_handoffs = data.get("agent_handoffs", [])     
+        state.agent_handoffs = data.get("agent_handoffs", [])
+        
+        # Restore filter selection state
+        state.pending_filter_options = data.get("pending_filter_options")
+        state.pending_filter_type = data.get("pending_filter_type")
+        
         # Restore additional attributes from metadata
         metadata = data.get("metadata", {})
         if metadata.get("last_asked_param"):
