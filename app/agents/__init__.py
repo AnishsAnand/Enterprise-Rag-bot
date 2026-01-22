@@ -1,8 +1,5 @@
 """
 Multi-Agent System for Enterprise RAG Bot.
-
-This package contains the LangChain-based multi-agent system for handling
-CRUD operations on cloud resources with conversational parameter collection.
 """
 
 from app.agents.agent_manager import AgentManager, get_agent_manager

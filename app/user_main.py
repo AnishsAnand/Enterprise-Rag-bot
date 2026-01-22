@@ -29,7 +29,6 @@ import jwt
 
 from urllib.parse import urljoin
 from app.api.routes import rag_widget, agent_chat
-from app.api.routes.auth import router as auth_router
 from app.routers import openai_compatible
 from app.core.database import init_db
 from app.services.postgres_service import postgres_service
@@ -425,7 +424,6 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 # ------------------------ Routers ------------------------
-app.include_router(auth_router)
 
 if hasattr(rag_widget, "router"):
     app.include_router(rag_widget.router, prefix="/api")

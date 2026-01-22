@@ -24,8 +24,8 @@ from collections import deque
 from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
-from app.agents import get_agent_manager  # Add agent manager
-from app.services.openwebui_formatter import format_agent_response_for_openwebui
+from app.agents import get_agent_manager  
+from app.services.enhanced_bulk_scraper import ProductionBulkScraperService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -94,7 +94,6 @@ class BulkScrapeRequest(BaseModel):
         ge=0,
         le=500
     )
-
 class EnhancedBulkScraperService:
     """
     Advanced bulk scraping engine with intelligent discovery and parallel processing.
@@ -123,7 +122,6 @@ class EnhancedBulkScraperService:
             "start_time": None,
             "end_time": None,
         }
-
     # ============================================================
     # URL DISCOVERY
     # ============================================================
@@ -161,7 +159,7 @@ class EnhancedBulkScraperService:
         )
 
         while self.url_queue and len(self.discovered_urls) < max_urls:
-            priority, depth, current_url = self.url_queue.popleft()
+            depth, current_url = self.url_queue.popleft()
 
             if current_url in self.visited_urls or depth > max_depth:
                 continue
@@ -905,7 +903,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
             )
         
         # ==================== STEP 4: Standard RAG Flow ====================
-        # Detect task intent for non-resource operations
         intent_analysis = await orchestration_service.detect_task_intent(query)
         
         # Auto-execute if enabled and intent is clear
@@ -921,8 +918,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
 
         # ==================== STEP 5: Search and Retrieve Documents ====================
         search_results = await _perform_document_search(query, request)
-        
-        # Handle no results case
         if not search_results:
             return await _handle_no_results(query, intent_analysis, request)
 
@@ -1026,7 +1021,6 @@ async def _get_or_create_session_id(request: WidgetQueryRequest) -> str:
         logger.info(f"📋 Using provided session ID: {request.session_id}")
         return request.session_id
     
-    # Generate session based on user_id if available, otherwise time-based
     time_bucket = str(datetime.now().hour) + str(datetime.now().minute // 10)
     
     if request.user_id:
@@ -1045,40 +1039,30 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     
     query_lower = query.lower().strip()
     query_words = query_lower.split()
-    
-    # Check if this is a continuation of an existing conversation
     existing_state = conversation_state_manager.get_session(session_id)
     
     # SHORT RESPONSES that are likely answers to agent questions
-    # These should ALWAYS route to agent if there's an active conversation
     short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
     is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
-    
-    # Check for recent active sessions - for short answers, be more aggressive
     if not existing_state:
         recent_state = conversation_state_manager.get_most_recent_active_session()
         if recent_state:
-            # For short answers, route to agent if there's ANY recent active session
             if is_short_answer and recent_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
                 logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
                 return True
-            # Also check if the recent state is waiting for endpoint selection
             if recent_state.status == ConversationStatus.COLLECTING_PARAMS:
                 logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
                 return True
     
-    # If existing conversation in parameter collection or awaiting selection state
     if existing_state:
         if existing_state.status in [ConversationStatus.COLLECTING_PARAMS, ConversationStatus.AWAITING_SELECTION]:
             logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
             return True
-        # For short answers, also continue if conversation was recently active
         if is_short_answer and existing_state.status in [ConversationStatus.COMPLETED, ConversationStatus.EXECUTING]:
             # Check if this might be a follow-up filter request
             logger.info(f"🔄 Short answer with recent completed conversation -> routing to agent")
             return True
-    
-    # Check for resource/cluster operation keywords
+
     action_keywords = ["create", "make", "build", "deploy", "provision", "delete", 
                       "remove", "update", "modify", "list", "show", "get", "view", "display",
                       "filter", "only", "just"]
@@ -1090,50 +1074,40 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     
     has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
     has_resource = any(keyword in query_lower for keyword in resource_keywords)
-    
-    # If keywords match, route to agent
+
     if has_action and has_resource:
         logger.info(f"✅ Action + Resource keywords detected")
         return True
-    
-    # Check for filter/refinement queries on previous results
+
     filter_keywords = ["only", "just", "filter", "show me", "28", "1.28", "version", "active", "running"]
     is_filter_query = any(kw in query_lower for kw in filter_keywords)
     if is_filter_query and existing_state:
         logger.info(f"🔍 Filter query detected with existing state -> routing to agent")
         return True
     
-    # Use LLM to understand intent if keywords don't match
     if not (has_action and has_resource):
         llm_result = await _llm_intent_classification(query)
         if llm_result:
             return True
-    
-    # Check conversation history for context
+
     if not (has_action and has_resource) and existing_state:
         if _check_conversation_context(existing_state, query_lower):
             return True
     
-    # Check for implicit location-based operations
     location_indicators = ["in ", " at ", " from ", "dc", "datacenter", "data center", "location", "where"]
     mentions_location = any(indicator in query_lower for indicator in location_indicators)
-    
     if has_resource and mentions_location and not has_action:
         logger.info(f"🎯 Detected implicit list operation (resource + location)")
         return True
-    
     return False
 
 
 async def _llm_intent_classification(query: str) -> bool:
     """Use LLM to classify query intent and detect typos."""
     logger.info(f"🤖 Using LLM to analyze query intent: '{query}'")
-    
     try:
         intent_prompt = f"""You are an intent classifier for a cloud infrastructure management system.
-
 User query: "{query}"
-
 Analyze if this query is about:
 1. Managing cloud resources (clusters, endpoints, datacenters, firewalls, databases, etc.)
 2. Resource operations (create, list, show, get, delete, update, etc.)
@@ -1156,7 +1130,6 @@ Respond ONLY with a JSON object:
             timeout=15
         )
         
-        # Parse LLM response
         import json
         import re
         
@@ -1190,17 +1163,13 @@ def _check_conversation_context(existing_state, query_lower: str) -> bool:
     
     if not last_messages:
         return False
-    
+
     last_response = last_messages[-1].get("content", "").lower()
-    
-    # Check if we recently asked about clusters/resources
     conversation_indicators = ["cluster", "data center", "endpoint", "which one"]
     if any(word in last_response for word in conversation_indicators):
         logger.info(f"🎯 Query continues conversation context → routing to agents")
         return True
-    
     return False
-
 
 async def _handle_agent_routing(query: str, session_id: str, request: WidgetQueryRequest, 
                                 background_tasks: BackgroundTasks) -> dict:
@@ -1209,28 +1178,21 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
     
     agent_manager = get_agent_manager(
         vector_service=postgres_service,
-        ai_service=ai_service
-    )
+        ai_service=ai_service)
     
-    # Get user roles from request or default to admin for full access
-    # In production, this should come from authentication/authorization
     user_roles = getattr(request, 'user_roles', None) or ["admin", "developer", "viewer"]
-    
     agent_result = await agent_manager.process_request(
         user_input=query,
         session_id=session_id,
         user_id=request.user_id or "widget_user",
-        user_roles=user_roles
-    )
+        user_roles=user_roles)
     
     logger.info(f"✅ Agent processing complete: routing={agent_result.get('routing')}, "
                f"success={agent_result.get('success')}")
-    
+
     response_text = agent_result.get("response", "")
     metadata = agent_result.get("metadata", {})
     missing_params = metadata.get("missing_params", [])
-    
-    # If agent is asking for clarification
     if missing_params or "?" in response_text or "which" in response_text.lower():
         logger.info(f"🔄 Agent asking for clarification, missing: {missing_params}")
         return {
@@ -1250,30 +1212,24 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
             "images": [],
             "steps": []
         }
-    
-    # If agent has execution result
+
     execution_result = agent_result.get("execution_result")
     if execution_result and execution_result.get("success"):
         logger.info(f"🎯 Agent executed operation successfully")
         result_data = execution_result.get("data", {})
-        
-        # Handle endpoint listing
+
         if isinstance(result_data, dict) and "endpoints" in result_data:
             return _format_endpoint_response(result_data, query, session_id, metadata)
-        
-        # Handle cluster listing
+
         if isinstance(result_data, dict) and "data" in result_data:
             return _format_cluster_response(result_data, query, session_id, metadata)
-    
-    # Format agent response using OpenWebUI formatter
+
     formatted_answer = format_agent_response_for_openwebui(
         response_text=response_text,
         execution_result=execution_result,
         session_id=session_id,
         metadata=metadata
     )
-    
-    # Default: return agent's response with high confidence
     return {
         "query": query,
         "answer": formatted_answer,
@@ -1289,7 +1245,6 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
         "images": [],
         "steps": []
     }
-
 
 def _format_endpoint_response(result_data: dict, query: str, session_id: str, metadata: dict) -> dict:
     """Format endpoint listing response."""
@@ -1307,7 +1262,6 @@ def _format_endpoint_response(result_data: dict, query: str, session_id: str, me
         answer += f"| {i} | {name} | {ep_id} | {ep_type} |\n"
     
     answer += "\n💡 You can use these endpoints when listing or creating clusters."
-    
     return {
         "query": query,
         "answer": answer,
@@ -1330,20 +1284,17 @@ def _format_endpoint_response(result_data: dict, query: str, session_id: str, me
         "steps": []
     }
 
-
 def _format_cluster_response(result_data: dict, query: str, session_id: str, metadata: dict) -> dict:
     """Format cluster listing response."""
     clusters = result_data["data"]
-    
-    # Group by endpoint
+
     by_endpoint = {}
     for cluster in clusters:
         endpoint = cluster.get("displayNameEndpoint", "Unknown")
         if endpoint not in by_endpoint:
             by_endpoint[endpoint] = []
         by_endpoint[endpoint].append(cluster)
-    
-    # Create formatted answer
+
     if len(by_endpoint) == 1:
         endpoint_name = list(by_endpoint.keys())[0]
         answer = f"✅ Found **{len(clusters)} Kubernetes clusters** in **{endpoint_name}**:\n\n"
@@ -1383,23 +1334,15 @@ def _format_cluster_response(result_data: dict, query: str, session_id: str, met
     }
 
 
-async def _handle_auto_execution(query: str, intent_analysis: dict, 
-                                 request: WidgetQueryRequest, 
-                                 background_tasks: BackgroundTasks) -> dict:
+async def _handle_auto_execution(query: str, intent_analysis: dict, request: WidgetQueryRequest,background_tasks: BackgroundTasks) -> dict:
     """Handle auto-execution of detected tasks."""
     primary_task = intent_analysis.get("primary_task")
-    
     if not primary_task or primary_task["confidence"] <= 0.7:
         return None
-    
     logger.info(f"Auto-executing task: {primary_task['type']}")
-    
     execution_result = await orchestration_service.execute_orchestrated_task(
         primary_task,
-        background_tasks
-    )
-    
-    # Store interaction if enabled
+        background_tasks)
     if request.store_interaction:
         interaction_doc = {
             "content": json.dumps({
@@ -1414,7 +1357,6 @@ async def _handle_auto_execution(query: str, intent_analysis: dict,
             "source": "widget_interaction",
         }
         background_tasks.add_task(store_document_task, [interaction_doc])
-    
     return {
         "query": query,
         "intent_detected": intent_analysis,
@@ -1422,7 +1364,6 @@ async def _handle_auto_execution(query: str, intent_analysis: dict,
         "execution_result": execution_result,
         "timestamp": datetime.now().isoformat()
     }
-
 
 async def _perform_document_search(query: str, request: WidgetQueryRequest) -> list:
     """Perform document search with configured depth."""
@@ -1432,7 +1373,6 @@ async def _perform_document_search(query: str, request: WidgetQueryRequest) -> l
         "deep": {"max_results": min(request.max_results * 2, 100), "use_reranking": True},
     }
     search_config = search_params.get(request.search_depth, search_params["balanced"])
-
     try:
         search_results = await call_maybe_async(
             postgres_service.search_documents,
@@ -1444,7 +1384,6 @@ async def _perform_document_search(query: str, request: WidgetQueryRequest) -> l
         logger.exception(f"Error while searching documents: {e}")
         return []
 
-
 async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQueryRequest) -> dict:
     """Handle case when no search results are found."""
     try:
@@ -1452,7 +1391,6 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
     except Exception as e:
         logger.warning(f"LLM fallback failed: {e}")
         answer = None
-
     if answer:
         summary = None
         try:
@@ -1464,7 +1402,6 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
             )
         except Exception:
             summary = (answer[:600] + "...") if len(answer) > 600 else answer
-
         return {
             "query": query,
             "answer": answer,
@@ -1479,7 +1416,6 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
             "timestamp": datetime.now().isoformat(),
             "summary": summary or "No summary available."
         }
-
     return {
         "query": query,
         "answer": "I don't have any relevant information in my knowledge base to answer your question. Please try rephrasing your query or add more context.",
@@ -1492,7 +1428,6 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
         "search_depth": request.search_depth,
         "timestamp": datetime.now().isoformat()
     }
-
 
 def _filter_search_results(search_results: list, request: WidgetQueryRequest) -> list:
     """Filter search results based on relevance scores."""
@@ -1507,7 +1442,6 @@ def _filter_search_results(search_results: list, request: WidgetQueryRequest) ->
         filtered_results = search_results[:request.max_results]
     
     return filtered_results
-
 
 def _extract_base_context(filtered_results: list) -> list:
     """Extract base context from filtered results."""
@@ -1525,7 +1459,6 @@ def _extract_base_context(filtered_results: list) -> list:
     
     return base_context
 
-
 async def _generate_enhanced_response(query: str, base_context: list) -> tuple:
     """Generate enhanced response with expanded context."""
     try:
@@ -1535,7 +1468,6 @@ async def _generate_enhanced_response(query: str, base_context: list) -> tuple:
             base_context,
             None
         )
-        
         if isinstance(enhanced_result, dict):
             answer = enhanced_result.get("text", "")
             expanded_context = enhanced_result.get("expanded_context", "")
@@ -1543,8 +1475,7 @@ async def _generate_enhanced_response(query: str, base_context: list) -> tuple:
         else:
             answer = enhanced_result or ""
             expanded_context = ""
-            confidence = 0.0
-            
+            confidence = 0.0   
     except Exception as e:
         logger.warning(f"Enhanced response generation failed: {e}")
         try:
@@ -1554,14 +1485,11 @@ async def _generate_enhanced_response(query: str, base_context: list) -> tuple:
             answer = ""
         expanded_context = "\n\n".join(base_context[:2]) if base_context else ""
         confidence = 0.6
-    
     return answer, expanded_context, confidence
-
 
 async def _generate_steps(query: str, expanded_context: str, base_context: list, answer: str) -> list:
     """Generate stepwise response."""
     working_context = [expanded_context] if expanded_context else base_context[:3]
-    
     try:
         steps_data = await call_maybe_async(
             ai_service.generate_stepwise_response,
@@ -1578,9 +1506,7 @@ async def _generate_steps(query: str, expanded_context: str, base_context: list,
             steps_data = [{"text": (s + "."), "type": "info"} for s in sentences[:5]]
         else:
             steps_data = [{"text": "Unable to generate structured response.", "type": "info"}]
-    
     return steps_data
-
 
 def _extract_and_score_images(
     query: str,
@@ -1589,13 +1515,6 @@ def _extract_and_score_images(
 ) -> list:
     """
     Extract and score images from search results.
-    
-    CRITICAL CHANGES:
-    1. Properly extract images from metadata.images field
-    2. Validate image URLs (must be absolute HTTP/HTTPS)
-    3. Score images by relevance to query
-    4. Return top-ranked images
-    
     Returns:
         List of top-scored images with URLs, ready for OpenWebUI display
     """
@@ -1613,13 +1532,10 @@ def _extract_and_score_images(
         relevance_score = result.get("relevance_score", 0.0)
 
         # ✅ CRITICAL: Extract images from metadata
-        # The images field can be in multiple locations
         images_raw = meta.get("images", [])
-        
         # Fallback: check images_json field
         if not images_raw:
             images_raw = meta.get("images_json", [])
-        
         # Ensure it's a list
         if not isinstance(images_raw, list):
             if isinstance(images_raw, str):
@@ -1629,18 +1545,14 @@ def _extract_and_score_images(
                     images_raw = []
             else:
                 images_raw = []
-
         if not images_raw:
             logger.debug(f"No images in result {result_idx + 1}")
             continue
-
         logger.info(
             f"✅ Found {len(images_raw)} images in result {result_idx + 1} "
             f"from {page_url[:60]}"
         )
-
-        # Process each image
-        for img_idx, img in enumerate(images_raw):
+        for img in enumerate(images_raw):
             # Validate image format
             if not isinstance(img, dict):
                 if isinstance(img, str) and img.startswith("http"):
@@ -1649,30 +1561,22 @@ def _extract_and_score_images(
                 else:
                     logger.debug(f"Skipping invalid image format: {type(img)}")
                     continue
-
-            # ✅ CRITICAL: Validate image URL
             img_url = img.get("url", "")
             if not img_url or not isinstance(img_url, str):
                 logger.debug("Skipping image with no URL")
                 continue
-            
-            # Must be absolute HTTP/HTTPS URL
+
             if not img_url.startswith("http://") and not img_url.startswith("https://"):
                 logger.debug(f"Skipping relative/invalid URL: {img_url[:60]}")
                 continue
 
-            # Filter out tracking pixels and tiny images
             if any(skip in img_url.lower() for skip in ["1x1", "pixel", "tracker", "blank"]):
                 logger.debug(f"Skipping tracking pixel: {img_url[:60]}")
                 continue
-
-            # Extract image metadata
             img_alt = img.get("alt", "")
             img_caption = img.get("caption", "")
             img_type = img.get("type", "content")
             img_text = img.get("text", "")
-
-            # Build text for similarity scoring
             img_search_text = " ".join([
                 img_alt,
                 img_caption,
@@ -1680,14 +1584,10 @@ def _extract_and_score_images(
                 page_title
             ]).lower()
 
-            # Calculate relevance score
             img_concepts = set(_extract_key_concepts(img_search_text))
             concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
             text_similarity = _enhanced_similarity(query, img_search_text)
-
-            # Bonus for instructional image types
             type_bonus = 0.3 if img_type in ["diagram", "screenshot", "illustration"] else 0.1
-
             # Combined score
             image_score = (
                 text_similarity * 0.4 +
@@ -1695,11 +1595,9 @@ def _extract_and_score_images(
                 relevance_score * 0.2 +
                 type_bonus * 0.1
             )
-
-            # Only include images with minimum relevance
             if image_score > 0.15:
                 candidate_images.append({
-                    "url": img_url,  # ✅ Absolute URL
+                    "url": img_url, 
                     "alt": img_alt or "Image",
                     "type": img_type,
                     "caption": img_caption,
@@ -1738,7 +1636,7 @@ def _extract_and_score_images(
                 f"type: {img.get('type', 'N/A')})"
             )
 
-    return unique_images[:12]  # Return top 12 images
+    return unique_images[:12]  
 
 def _build_sources(filtered_results: list, request: WidgetQueryRequest) -> list:
     """Build sources list from filtered results."""
@@ -1813,7 +1711,6 @@ def _combine_steps_with_images(steps_data: list, selected_images: list) -> list:
                     "relevance_score": None
                 }
 
-            # Check for image prompt
             if not assigned_img:
                 image_prompt = None
                 if isinstance(step.get("image_prompt"), str) and step.get("image_prompt").strip():
@@ -1826,7 +1723,6 @@ def _combine_steps_with_images(steps_data: list, selected_images: list) -> list:
                 if image_prompt:
                     assigned_img = {"image_prompt": image_prompt}
 
-        # Assign from selected images if no image yet
         if not assigned_img and selected_images and i < len(selected_images):
             step_img = selected_images[i]
             if step_img.get("url"):
@@ -1876,26 +1772,6 @@ async def _store_interaction(query: str, answer: str, confidence: float,
     }
     background_tasks.add_task(store_document_task, [interaction_doc])
 
-
-def _extract_key_concepts(text: str) -> List[str]:
-    """Extract key terms from text for concept matching"""
-    if not text:
-        return []
-    
-    # Remove special characters and split
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-    
-    # Common stopwords to filter
-    stopwords = {
-        'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
-        'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has'
-    }
-    
-    # Filter stopwords and return unique terms
-    concepts = [w for w in words if w not in stopwords]
-    return list(dict.fromkeys(concepts))[:20]
-
-
 def _enhanced_similarity(query: str, text: str) -> float:
     """Calculate enhanced similarity between query and text"""
     if not query or not text:
@@ -1907,18 +1783,15 @@ def _enhanced_similarity(query: str, text: str) -> float:
     # Sequence matching
     import difflib
     seq_ratio = difflib.SequenceMatcher(None, query_norm, text_norm).ratio()
-    
     # Word overlap
     query_words = set(query_norm.split())
     text_words = set(text_norm.split())
     overlap = len(query_words & text_words) / len(query_words | text_words) if query_words else 0.0
-    
     # Substring bonus
     substring_bonus = 0.2 if query_norm in text_norm else 0.0
     
     score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
     return min(1.0, max(0.0, score))
-
 
 @router.post("/widget/execute-task")
 async def widget_execute_task(request: TaskExecutionRequest, background_tasks: BackgroundTasks):
@@ -1933,7 +1806,6 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
         intent_analysis = await orchestration_service.detect_task_intent(request.task_description)
         
         if not intent_analysis.get("primary_task"):
-            # Store unclear requirement in knowledge base
             if request.store_result:
                 unclear_doc = {
                     "content": json.dumps({
@@ -1986,7 +1858,6 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
             if missing_services:
                 error_msg = f"Required services unavailable: {', '.join(missing_services)}"
                 logger.warning(error_msg)
-                
                 # Store failed attempt
                 if request.store_result:
                     failed_doc = {
@@ -2004,7 +1875,6 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
                         "source": "failed_task",
                     }
                     background_tasks.add_task(store_document_task, [failed_doc])
-                
                 return {
                     "status": "failed",
                     "task": request.task_description,
@@ -2017,9 +1887,7 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
         # Execute task
         execution_result = await orchestration_service.execute_orchestrated_task(
             intent_analysis["primary_task"],
-            background_tasks
-        )
-        
+            background_tasks)
         # Store result if enabled
         if request.store_result and execution_result.get("status") == "success":
             result_doc = {
@@ -2050,16 +1918,10 @@ async def widget_execute_task(request: TaskExecutionRequest, background_tasks: B
         logger.exception(f"Task execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")
 
-
 @router.post("/widget/scrape")
 async def widget_scrape(request: WidgetScrapeRequest, background_tasks: BackgroundTasks):
     """
     Enhanced scraping with proper image extraction and storage.
-    
-    CRITICAL CHANGES:
-    1. Extract images with scraper
-    2. Store images_json in database
-    3. Return images in response
     """
     try:
         logger.info(f"🌐 Scraping URL with image extraction: {request.url}")
@@ -2067,13 +1929,12 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
         scrape_params = {
             "extract_text": True,
             "extract_links": False,
-            "extract_images": True,  # ✅ CRITICAL: Must be True
+            "extract_images": True, 
             "extract_tables": True,
             "scroll_page": request.wait_for_js,
             "wait_for_element": "body" if request.wait_for_js else None,
             "output_format": "json",
         }
-
         # Scrape the page
         result = await call_maybe_async(
             scraper_service.scrape_url, 
@@ -2086,19 +1947,15 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 status_code=400,
                 detail=f"Scraping failed: {result.get('error', 'Unknown error')}"
             )
-
         content = result.get("content", {}) or {}
         page_text = content.get("text", "") or ""
-        
         if len(page_text.strip()) < 50:
             raise HTTPException(
                 status_code=400, 
                 detail="Scraped content is too short or empty"
             )
-
         # ✅ CRITICAL: Extract images from scraped content
         scraped_images = content.get("images", []) or []
-        
         logger.info(
             f"✅ Scraped {len(page_text)} chars, "
             f"{len(scraped_images)} images from {request.url}"
@@ -2111,11 +1968,8 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             if len(page_text) > 2000:
                 # Split into chunks
                 chunks = chunk_text(page_text, chunk_size=1500, overlap=200)
-                
                 for i, chunk in enumerate(chunks):
-                    # ✅ First chunk gets all images, others get empty array
                     chunk_images = scraped_images if i == 0 else []
-                    
                     documents_to_store.append({
                         "content": chunk,
                         "url": f"{str(request.url)}#chunk-{i}",
@@ -2123,8 +1977,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                         "format": "text/html",
                         "timestamp": datetime.now().isoformat(),
                         "source": "widget_scrape",
-                        "images": chunk_images,  # ✅ Store images array
-                    })
+                        "images": chunk_images,  })
             else:
                 # Single document with all images
                 documents_to_store.append({
@@ -2134,7 +1987,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                     "format": "text/html",
                     "timestamp": datetime.now().isoformat(),
                     "source": "widget_scrape",
-                    "images": scraped_images,  # ✅ Store images array
+                    "images": scraped_images,  
                 })
 
             # Store in background
@@ -2144,7 +1997,6 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 f"✅ Queued {len(documents_to_store)} documents for storage "
                 f"with {len(scraped_images)} images"
             )
-
         # Generate summary
         try:
             summary = await call_maybe_async(
@@ -2155,7 +2007,6 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             )
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
-
         # ✅ CRITICAL: Include images in response
         return {
             "status": "success",
@@ -2163,8 +2014,8 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             "title": content.get("title", "Untitled"),
             "content_length": len(page_text),
             "word_count": len(page_text.split()),
-            "images_count": len(scraped_images),  # ✅ Report image count
-            "images": scraped_images[:10],  # ✅ Include sample images in response
+            "images_count": len(scraped_images),  
+            "images": scraped_images[:10],  
             "tables_count": len(content.get("tables", [])),
             "method_used": result.get("method"),
             "stored_in_knowledge": request.store_in_knowledge,
@@ -2179,12 +2030,10 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
         logger.exception(f"Widget scrape error: {e}")
         raise HTTPException(status_code=500, detail=f"Scraping error: {str(e)}")
     
-
 @router.post("/widget/bulk-scrape")
 async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: BackgroundTasks):
     """
     Enhanced bulk scraping with deeper crawling capabilities.
-    
     New features:
     - Increased default depth from 5→8 (max 20)
     - Increased default max_urls from 200→500 (max 3000)
@@ -2211,7 +2060,6 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
                 "message": "No URLs discovered from the base URL",
                 "base_url": str(request.base_url)
             }
-
         # Apply domain filter if specified
         if request.domain_filter:
             filtered_urls = [
@@ -2237,7 +2085,7 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
             )
             discovered_urls = same_domain_urls
 
-        # Start enhanced bulk scraping task
+        # Start bulk scraping task
         background_tasks.add_task(
             enhanced_bulk_scrape_task,
             discovered_urls,
@@ -2257,20 +2105,14 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
             "follow_external_links": request.follow_external_links,
             "extract_deep_images": request.extract_deep_images,
             "estimated_time_minutes": round(len(discovered_urls) * 0.5, 1),
-            "estimated_documents": len(discovered_urls) * 2,  # Accounting for chunking
-        }
-
+            "estimated_documents": len(discovered_urls) * 2}
+    
     except Exception as e:
         logger.exception(f"Widget bulk scrape error: {e}")
         raise HTTPException(status_code=500, detail=f"Bulk scrape error: {str(e)}")
 
-
 @router.post("/widget/upload-file")
-async def widget_upload_file(
-    file: UploadFile = File(...),
-    store_in_knowledge: bool = True,
-    chunk_large_files: bool = True
-):
+async def widget_upload_file(file: UploadFile = File(...),store_in_knowledge: bool = True,chunk_large_files: bool = True):
     """Enhanced file upload with robust processing and storage"""
     try:
         if not file.filename:
@@ -2390,7 +2232,6 @@ async def widget_upload_file(
 
         if not text or len(text.strip()) < 10:
             raise HTTPException(status_code=400, detail="File content is too short or unreadable")
-
         # Normalize whitespace
         text = re.sub(r"\r\n?", "\n", text)
         text = re.sub(r"\n\s*\n", "\n\n", text)
@@ -2553,24 +2394,20 @@ async def store_document_task(docs: List[Dict[str, Any]]):
         # Validate and normalize images in each document
         for doc in docs:
             images = doc.get("images", [])
-            
-            # Ensure images is a list
             if not isinstance(images, list):
                 doc["images"] = []
                 continue
-            
             # Normalize each image
             normalized_images = []
             for img in images:
                 if isinstance(img, dict):
-                    # Ensure required fields exist
                     if img.get("url"):
                         normalized_images.append({
                             "url": img.get("url"),
                             "alt": img.get("alt", ""),
                             "caption": img.get("caption", ""),
                             "type": img.get("type", "content"),
-                            "text": img.get("text", "")[:800]  # Limit text length
+                            "text": img.get("text", "")[:800] 
                         })
                 elif isinstance(img, str) and img.startswith("http"):
                     # Convert string URL to dict
@@ -2581,41 +2418,28 @@ async def store_document_task(docs: List[Dict[str, Any]]):
                         "type": "content",
                         "text": ""
                     })
-            
             doc["images"] = normalized_images
-            
             logger.debug(
                 f"Normalized {len(normalized_images)} images for document "
-                f"{doc.get('url', 'unknown')[:60]}"
-            )
-        
+                f"{doc.get('url', 'unknown')[:60]}")
         # Store documents
         func = getattr(postgres_service, "add_documents", None)
         if not func:
             raise RuntimeError("postgres_service has no add_documents method")
-        
         result = func(docs)
         if inspect.isawaitable(result):
             await result
-        
         total_images = sum(len(doc.get("images", [])) for doc in docs)
         logger.info(
             f"✅ Stored {len(docs)} documents with {total_images} images total"
         )
-        
     except Exception as e:
         logger.error(f"❌ Failed storing docs: {e}")
         logger.exception("Full traceback:")
 
-async def enhanced_bulk_scrape_task(
-    urls: List[str], 
-    auto_store: bool, 
-    max_depth: int,
-    extract_images: bool = True
-):
+async def enhanced_bulk_scrape_task(urls: List[str], auto_store: bool, max_depth: int,extract_images: bool = True):
     """
     Enhanced bulk scraping with improved image extraction and batching.
-    
     Improvements:
     - Adaptive batch sizing based on URL count
     - Better error handling and retry logic
@@ -2627,7 +2451,6 @@ async def enhanced_bulk_scrape_task(
     error_count = 0
     total_images = 0
     
-    # Adaptive batch size: larger batches for bigger jobs
     if len(urls) > 100:
         batch_size = 10
     elif len(urls) > 50:
@@ -2648,21 +2471,17 @@ async def enhanced_bulk_scrape_task(
         
         batch_start_time = datetime.now()
 
-        # Enhanced scrape parameters with image extraction
         scrape_params = {
             "extract_text": True,
-            "extract_links": True,  # Enable link extraction for depth
+            "extract_links": True, 
             "extract_images": extract_images,
             "extract_tables": True,
             "scroll_page": True,
             "wait_for_element": "body",
             "output_format": "json",
         }
-
-        # Scrape batch concurrently
         tasks = [scraper_service.scrape_url(url, scrape_params) for url in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-
         documents_to_store = []
         batch_errors = []
         batch_images = 0
@@ -2683,11 +2502,8 @@ async def enhanced_bulk_scrape_task(
                 
                 batch_images += len(page_images)
                 total_images += len(page_images)
-
-                # Only store pages with substantial content
                 if page_text and len(page_text.strip()) >= 100:
                     if auto_store:
-                        # Split large pages into chunks
                         if len(page_text) > 2500:
                             chunks = chunk_text(page_text, chunk_size=2000, overlap=300)
                             for j, chunk in enumerate(chunks):
@@ -2711,7 +2527,6 @@ async def enhanced_bulk_scrape_task(
                                     }
                                 })
                         else:
-                            # Single document with all images
                             documents_to_store.append({
                                 "content": page_text,
                                 "url": url,
@@ -2761,15 +2576,11 @@ async def enhanced_bulk_scrape_task(
             logger.info(
                 f"📊 Progress: {scraped_count}/{len(urls)} scraped, "
                 f"{stored_count} stored, {total_images} images, "
-                f"{error_count} errors | Batch took {batch_duration:.1f}s"
-            )
-
+                f"{error_count} errors | Batch took {batch_duration:.1f}s")
         if batch_errors:
             logger.warning(f"⚠️ Batch errors: {', '.join(batch_errors[:3])}")
-
         # Adaptive delay based on batch size
         await asyncio.sleep(min(3.0, batch_size * 0.4))
-
     # Final summary
     success_rate = (scraped_count / len(urls)) * 100 if urls else 0
     logger.info(

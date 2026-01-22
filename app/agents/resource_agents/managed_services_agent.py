@@ -1,6 +1,5 @@
 """
 Managed Services Agent - Handles all PaaS managed services.
-Includes: Kafka, GitLab, Jenkins, PostgreSQL, DocumentDB, Container Registry.
 """
 
 from typing import Any, Dict, List, Optional
@@ -24,8 +23,6 @@ class ManagedServicesAgent(BaseResourceAgent):
     - DocumentDB (IKSDocumentDB)
     - Container Registry (IKSContainerRegistry)
     """
-    
-    # Mapping of resource types to service types
     SERVICE_TYPE_MAP = {
         "kafka": "IKSKafka",
         "gitlab": "IKSGitlab",
@@ -36,8 +33,6 @@ class ManagedServicesAgent(BaseResourceAgent):
         "container_registry": "IKSContainerRegistry",
         "registry": "IKSContainerRegistry"
     }
-    
-    # Display names for each service
     SERVICE_DISPLAY_NAMES = {
         "IKSKafka": "Apache Kafka",
         "IKSGitlab": "GitLab SCM",
@@ -61,7 +56,7 @@ class ManagedServicesAgent(BaseResourceAgent):
     
     def get_supported_operations(self) -> List[str]:
         """Get list of supported operations."""
-        return ["list", "create", "delete"]  # Most managed services support these
+        return ["list", "create", "delete"]  
     
     async def execute_operation(
         self,

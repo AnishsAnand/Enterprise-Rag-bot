@@ -1,14 +1,6 @@
 """
 PRODUCTION: Enhanced Bulk Scraping with Intelligent URL Discovery
 Maximizes document extraction while maintaining quality and performance.
-
-Key Improvements:
-1. Sitemap.xml parsing for rapid URL discovery (10x faster)
-2. Intelligent URL prioritization (documentation > blog > general)
-3. Parallel processing with adaptive batch sizing
-4. Smart chunking that preserves semantic boundaries
-5. Image-to-chunk semantic mapping for better retrieval
-6. Duplicate detection across batches
 """
 
 import asyncio
@@ -66,8 +58,7 @@ class ProductionBulkScraperService:
             "from_crawl": 0,
             "start_time": None,
             "end_time": None,
-        }
-        
+        }      
         # Robots.txt cache
         self.robots_cache: Dict[str, bool] = {}
     

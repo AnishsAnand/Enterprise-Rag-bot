@@ -13,10 +13,9 @@ from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 
 from app.core.config import settings
-from app.api.routes import scraper, rag, support, rag_widget, agent_chat, health
+from app.api.routes import rag_widget, agent_chat, health
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
-from app.api.routes.auth import router as auth_router
 from app.services.postgres_service import postgres_service
 from app.core.database import init_db
 
@@ -43,9 +42,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("❌ Database initialization failed (continuing): %s", e)
 
-
     app.state.postgres_ready = False
-
     try:
         await postgres_service.initialize()
         app.state.postgres_ready = True
@@ -53,15 +50,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception(
         "❌ PostgreSQL vector initialization failed (vector search disabled): %s",
-        e,
-    )
-
-   
-
+        e,)
     # Test AI Services
     logger.info("Testing AI Services...")
     ai_health = {"embedding": False, "generation": False}
-
     try:
         test_embeddings = await ai_service.generate_embeddings(["test embedding"])
         if test_embeddings and len(test_embeddings) > 0 and len(test_embeddings[0]) > 0:
@@ -71,7 +63,6 @@ async def lifespan(app: FastAPI):
             logger.warning("⚠️ Embedding service returned empty results")
     except Exception as e:
         logger.exception("❌ Embedding service test failed: %s", e)
-
     try:
         test_response = await ai_service.generate_enhanced_response("health", ["health check"])
         if test_response and isinstance(test_response, dict):
@@ -86,91 +77,69 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.exception("❌ Text generation service test failed: %s", e)
 
-
     try:
         stats = await postgres_service.get_collection_stats()
         doc_count = stats.get("document_count", 0) if isinstance(stats, dict) else 0
         logger.info("✅ PostgreSQL Vector Stats - Documents: %d", doc_count)
     except Exception as e:
         logger.exception("⚠️ Could not retrieve stats: %s", e)
-
     logger.info("=" * 70)
     logger.info("✅ Enterprise RAG Bot startup sequence complete")
     logger.info("📚 API documentation: http://localhost:8000/docs")
     logger.info("🏥 Health check: http://localhost:8000/health")
-
     yield
-
     # ===== Shutdown =====
     logger.info("=" * 70)
     logger.info("Shutting down Enterprise RAG Bot...")
-
     try:
         await postgres_service.close()
         logger.info("✅ PostgreSQL connection closed gracefully")
     except Exception as e:
         logger.warning("⚠️ Error closing PostgreSQL connection: %s", e)
-
     logger.info("✅ Enterprise RAG Bot shutdown complete")
     logger.info("=" * 70)
-
 # ===================== FastAPI App Initialization =====================
 app = FastAPI(
     title="Enterprise RAG Bot",
     description="Advanced RAG system with postgres vector database, web scraping, and AI-powered knowledge retrieval",
     version="2.0.0",
-    lifespan=lifespan,
-)
-
+    lifespan=lifespan,)
 # ===================== CORS Configuration =====================
 allowed_origins: List[str] = [
     "http://localhost:4200", 
     "http://127.0.0.1:4200",
-    "http://localhost:4201",      # Angular frontend (user-frontend)
-    "http://127.0.0.1:4201",      # Angular frontend (alternative)
+    "http://localhost:4201",      
+    "http://127.0.0.1:4201",      
     "http://localhost:3000",      # Open WebUI
     "http://127.0.0.1:3000",      # Open WebUI (alternative)
 ]
-
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
 if extra_origins:
     allowed_origins.extend([o.strip() for o in extra_origins.split(",") if o.strip()])
-
 logger.info("✅ CORS allowed origins: %s", allowed_origins)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
-)
+    allow_headers=["*"],)
 
 # ===================== API Routes =====================
 app.include_router(health.router)  # Add health check routes
-app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
-app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"])
-app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
-
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
-
-app.include_router(auth_router)
-
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent
 frontend_path = BASE_DIR / "dist" / "enterprise-rag-frontend"
 embedded_static_mounted = False
-
 if frontend_path.exists() and frontend_path.is_dir():
     app.mount("/", StaticFiles(directory=str(frontend_path), html=True), name="static")
     embedded_static_mounted = True
     logger.info("✅ Embedded frontend mounted at: %s", frontend_path)
 else:
     logger.warning("⚠️ Static frontend directory not found at %s. API will continue to run without embedded frontend.", frontend_path)
-
 # ===================== Widget Embed Script =====================
 @app.get("/widget/embed.js")
 def serve_embed_script():
@@ -209,7 +178,6 @@ if embedded_static_mounted:
         index_file = frontend_path / "index.html"
         if index_file.exists():
             return FileResponse(index_file)
-        
         logger.error("❌ index.html missing from frontend at %s", index_file)
         return JSONResponse({"detail": "index.html not found"}, status_code=500)
 
@@ -219,14 +187,12 @@ async def liveness_check():
     """
     Lightweight liveness probe endpoint.
     Returns 200 if the application process is running.
-    
     Use this for container/orchestration liveness probes.
     Endpoint response time: <10ms
     """
     return {
         "status": "alive",
-        "service": "enterprise-rag-bot"
-    }
+        "service": "enterprise-rag-bot"}
 
 @app.get("/health")
 def health():
@@ -244,7 +210,6 @@ async def readiness_check():
     """
     Comprehensive readiness check endpoint.
     Verifies all critical services (postgres, AI services, Database).
-    
     Use this for k8s/ECS readiness probes.
     Only returns 200 when all services are operational.
     """
@@ -252,7 +217,6 @@ async def readiness_check():
     postgres_status = "unavailable"
     postgres_docs = 0
     postgres_error = None
-
     try:
         stats = await postgres_service.get_collection_stats()
         if isinstance(stats, dict):
@@ -265,34 +229,28 @@ async def readiness_check():
         postgres_status = "unavailable"
         postgres_error = str(e)
         logger.exception("❌ postgres stats fetch failed: %s", e)
-
     # Check AI services
     ai_services_status = {
         "embedding": False,
-        "generation": False,
-    }
-
+        "generation": False,}
     try:
         test_emb = await ai_service.generate_embeddings(["health"])
         if test_emb and len(test_emb) > 0:
             ai_services_status["embedding"] = True
     except Exception as e:
         logger.debug("AI embedding service check failed: %s", e)
-
     try:
         test_gen = await ai_service.generate_response("health", [])
         if test_gen:
             ai_services_status["generation"] = True
     except Exception as e:
         logger.debug("AI generation service check failed: %s", e)
-
     # Determine overall health
     overall_status = "healthy"
     if postgres_status not in ("active", "healthy"):
         overall_status = "degraded"
     if not ai_services_status["embedding"] or not ai_services_status["generation"]:
         overall_status = "degraded" if overall_status == "healthy" else "unhealthy"
-
     response = {
         "status": overall_status,
         "timestamp": str(__import__("datetime").datetime.utcnow().isoformat()),
@@ -300,17 +258,12 @@ async def readiness_check():
             "postgres": {
                 "status": postgres_status,
                 "documents_stored": postgres_docs,
-                "error": postgres_error,
-            },
+                "error": postgres_error,},
             "ai_services": {
                 "embedding": "operational" if ai_services_status["embedding"] else "unavailable",
-                "generation": "operational" if ai_services_status["generation"] else "unavailable",
-            },
-            "database": "operational",  # Assume operational if no exception in init_db
-        },
-        "version": app.version,
-    }
-
+                "generation": "operational" if ai_services_status["generation"] else "unavailable",},
+            "database": "operational",  },
+        "version": app.version,}
     # Return appropriate status code
     status_code = 200 if overall_status == "healthy" else 503
     return JSONResponse(response, status_code=status_code)
@@ -338,8 +291,7 @@ async def api_root():
             "Production-grade reliability and scalability",
         ],
         "documentation": "/docs",
-        "health_check": "/health",
-    }
+        "health_check": "/health",}
 
 # ===================== Application Info Endpoint =====================
 @app.get("/api/info")
@@ -371,16 +323,13 @@ async def app_info():
             "web_scraping": True,
             "file_uploads": True,
             "bulk_scraping": True,
-            "widget_interface": True,
-        },
+            "widget_interface": True,},
         "endpoints": {
             "scraper": "/api/scraper",
             "rag": "/api/rag",
             "widget": "/api/rag-widget",
             "admin": "/api/admin",
-            "support": "/api/support",
-        },
-    }
+            "support": "/api/support",},}
 
 # ===================== Error Handlers =====================
 @app.exception_handler(HTTPException)
@@ -406,9 +355,7 @@ async def general_exception_handler(request, exc):
         content={
             "error": "Internal server error",
             "status_code": 500,
-            "detail": "An unexpected error occurred. Please check server logs."
-        }
-    )
+            "detail": "An unexpected error occurred. Please check server logs."})
 
 # ===================== Main Entry Point =====================
 if __name__ == "__main__":

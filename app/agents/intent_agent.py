@@ -15,7 +15,10 @@ from app.services.api_executor_service import api_executor_service
 
 
 logger = logging.getLogger(__name__)
-
+LB_NAME_PATTERN = re.compile(
+    r"(EG_.*?_LB_SEG_\d+|LB_.*?\d+)",
+    re.IGNORECASE)
+DETAILS_KEYWORDS = re.compile(r"\b(details?|info|show|describe)\b", re.IGNORECASE)
 
 class IntentAgent(BaseAgent):
     """
@@ -38,7 +41,7 @@ class IntentAgent(BaseAgent):
         
         # Setup agent
         self.setup_agent()
-        INTENT_MODEL = os.getenv("INTENT_MODEL", "meta/Llama-3.1-8B-Instruct")
+        self.INTENT_MODEL = os.getenv("INTENT_MODEL", "meta/Llama-3.1-8B-Instruct")
     
     def get_system_prompt(self) -> str:
 
@@ -456,125 +459,165 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             
         except Exception as e:
             return json.dumps({"valid": False, "error": str(e)})
+        
     
-    async def execute(
-        self,
-        input_text: str,
-        context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+
+    LBCI_DIGIT_PATTERN = re.compile(r'\b\d{5,6}\b')
+    LIST_LB_KEYWORDS = re.compile(r'\b(list|show|get|details|describe|what is|tell me about)\b.*\b(load balancer|lb|lbs|loadbalancer|loadbalancers|vayu)\b', re.I)
+
+    def _detect_deterministic_intent(self, text: str) -> Optional[Dict[str, Any]]:
         """
-        Execute intent detection on user input.
-        
-        Args:
-            input_text: User's message
-            context: Additional context including session info
-            
-        Returns:
-            Dict with intent detection result
+        Detect deterministic intents that must NOT go to the LLM.
+        Returns intent dict if detected else None.
         """
+        text = (text or "").strip()
+
+        # 1) Explicit LB name (contains _LB_)
+        lb_match = self.LB_NAME_PATTERN.search(text)
+        if lb_match:
+            return {
+                "intent_detected": True,
+                "resource_type": "load_balancer",
+                "operation": "list",
+                "extracted_params": {},  # per spec: don't extract LB name here
+                "confidence": 0.99,
+                "ambiguities": [],
+                "clarification_needed": None,
+                "meta": {"detection": "lb_name_pattern", "matched_text": lb_match.group(0)}
+            }
+
+        # 2) LBCI 5-6 digit number in context -> assume load_balancer
+        if self.LBCI_DIGIT_PATTERN.search(text):
+            return {
+                "intent_detected": True,
+                "resource_type": "load_balancer",
+                "operation": "list",
+                "extracted_params": {},
+                "confidence": 0.95,
+                "ambiguities": [],
+                "clarification_needed": None,
+                "meta": {"detection": "lbci_digits"}
+            }
+
+        # 3) Explicit "list load balancers" style phrasing
+        if self.LIST_LB_KEYWORDS.search(text):
+            return {
+                "intent_detected": True,
+                "resource_type": "load_balancer",
+                "operation": "list",
+                "extracted_params": {},
+                "confidence": 0.9,
+                "ambiguities": [],
+                "clarification_needed": None,
+                "meta": {"detection": "list_lb_keywords"}
+            }
+
+        # 4) Add other deterministic rules here (endpoints, datacenters)
+        # Example: "list endpoints" -> endpoint:list
+        if re.search(r'\b(list|show|get)\b.*\b(endpoints|datacenters|locations|dcs|data centers)\b', text, re.I):
+            return {
+                "intent_detected": True,
+                "resource_type": "endpoint",
+                "operation": "list",
+                "extracted_params": {},
+                "confidence": 0.9,
+                "ambiguities": [],
+                "clarification_needed": None,
+                "meta": {"detection": "list_endpoints"}
+            }
+
+        return None
+
+    async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+    Execute intent detection on user input with deterministic short-circuits.
+    Behavior:
+    - If deterministic rules match (LB name / LBCI / other rules) return intent immediately
+      and skip the LLM.
+    - Otherwise call the LLM via parent, parse output robustly, enrich with schema info.
+    - On internal error, return a SAFE fallback that does NOT auto-run potentially destructive operations.
+    """
+        LB_NAME_PATTERN = re.compile(r"(EG_.*?_LB_SEG_\d+|LB_.*?\d+)", re.I)
+        DETAILS_KEYWORDS = re.compile(r"\b(details?|info|show|describe)\b", re.I)
+
+        if LB_NAME_PATTERN.search(input_text):
+            if DETAILS_KEYWORDS.search(input_text):
+                operation = "get_details"
+            else:
+                operation = "list"
+                
+                intent = {
+        "resource": "load_balancer",
+        "operation": operation,
+        "confidence": 0.99,
+        "source": "rule"
+            } 
         try:
-            logger.info(f"🎯 IntentAgent analyzing: {input_text[:100]}...")
-            
-            # Call parent execute to use LLM
+            safe_preview = (input_text or "")[:120]
+            logger.info("🎯 IntentAgent analyzing input (trimmed): %s", safe_preview)
+
+        # 0) Guard: empty input
+            if not input_text or not input_text.strip():
+                return {
+                "agent_name": self.agent_name,
+                "success": True,
+                "intent_detected": False,
+                "intent_data": {
+                    "resource_type": None,
+                    "operation": None,
+                    "extracted_params": {},
+                    "confidence": 0.0,
+                    "ambiguities": ["Empty input"],
+                    "clarification_needed": "Please provide a resource or question."
+                },
+                "output": "No input provided"
+            }
+
+        # 1) Deterministic short-circuit rules (run BEFORE any LLM call)
+        #    _detect_deterministic_intent should return a dict when a rule applies.
+            deterministic = None
+            try:
+                deterministic = self._detect_deterministic_intent(input_text)
+            except Exception as e:
+            # Defensive: log but continue to LLM path (do not crash)
+                logger.warning("⚠️ Deterministic intent detection failed: %s", str(e))
+
+            if deterministic:
+            # Normalize deterministic intent shape
+                intent_data = {
+                "intent_detected": bool(deterministic.get("intent_detected", True)),
+                "resource_type": deterministic.get("resource_type"),
+                "operation": deterministic.get("operation"),
+                "extracted_params": deterministic.get("extracted_params", {}),
+                "confidence": float(deterministic.get("confidence", 0.99)),
+                "ambiguities": deterministic.get("ambiguities", []),
+                "clarification_needed": deterministic.get("clarification_needed", None),
+                # keep meta for observability, safe to include
+                "meta": deterministic.get("meta", {"detection": "rule"})
+            }
+
+                logger.info("🔒 Deterministic intent detected (rule): %s", intent_data.get("meta"))
+                return {
+                "agent_name": self.agent_name,
+                "success": True,
+                "intent_detected": intent_data["intent_detected"],
+                "intent_data": intent_data,
+                "output": "Deterministic intent detection applied"
+            }
+
+        # 2) Otherwise call LLM via parent agent
+        #    (Do not assume the parent accepts model arg; BaseAgent should manage model selection.)
             result = await super().execute(input_text, context)
-            
-            # Parse the LLM output as JSON
-            output_text = result.get("output", "")
-            
-            # Try to extract JSON from output
+
+        # Support common possible keys for text output
+            output_text = result.get("output") or result.get("text") or result.get("response") or ""
+
+        # 3) Parse intent JSON robustly
             intent_data = self._parse_intent_output(output_text)
-            
-            # Add intent data to result
-            result["intent_detected"] = intent_data.get("intent_detected", False)
-            result["intent_data"] = intent_data
-            
-            # If intent detected, get required parameters from schema
-            if intent_data.get("intent_detected"):
-                resource_type = intent_data.get("resource_type")
-                operation = intent_data.get("operation")
-                
-                # Handle multi-resource: if resource_type is a list, convert to string
-                # For param lookup, use the first resource type
-                if isinstance(resource_type, list):
-                    logger.info(f"🔧 Multi-resource detected: {resource_type}")
-                    # For parameter schema, use the first resource
-                    lookup_resource_type = resource_type[0] if resource_type else None
-                else:
-                    lookup_resource_type = resource_type
-                
-                if lookup_resource_type and operation:
-                    operation_config = api_executor_service.get_operation_config(
-                        lookup_resource_type, operation
-                    )
-                    
-                    if operation_config:
-                        params = operation_config.get("parameters", {})
-                        intent_data["required_params"] = params.get("required", [])
-                        intent_data["optional_params"] = params.get("optional", [])
-                        
-                        logger.info(
-                            f"✅ Intent detected: {operation} {resource_type} | "
-                            f"Required params: {intent_data['required_params']}"
-                        )
-                    else:
-                        logger.warning(f"⚠️ No operation config found for {lookup_resource_type}.{operation}")
-            
-            return result
-            
-        except Exception as e:
-            logger.exception(
-        "❌ IntentAgent failed during intent detection. "
-        "Falling back to heuristic intent detection."
-        )
 
-    # Heuristic fallback: assume safe read-only intent
-            return {
-            "agent_name": self.agent_name,
-            "success": True,  # Important: pipeline should continue
-            "intent_detected": True,
-            "intent_data": {
-            "resource_type": "load_balancer",
-            "operation": "list",
-            "extracted_params": {},
-            "confidence": 0.4,
-            "ambiguities": [
-            "LLM intent detection failed, heuristic fallback applied"
-                ],
-            "   clarification_needed": None
-        },
-        "output": "Intent detection fallback applied due to internal error"}
-
-    def _fallback_intent(self, reason: str) -> Dict[str, Any]:
-        logger.warning(f"⚠️ Intent fallback used: {reason}")
-        return {
-        "resource_type": "load_balancer",
-        "operation": "list",
-        "extracted_params": {},
-        "confidence": 0.4,
-        "ambiguities": [reason],
-        "clarification_needed": None
-        }
-
-
-    def _parse_intent_output(self, output_text: str) -> Dict[str, Any]:
-        """
-        Parse intent data from LLM output.
-        
-        Args:
-            output_text: LLM output text
-            
-        Returns:
-            Parsed intent data dict
-        """
-        try:
-            # Try to find JSON in the output
-            json_match = re.search(r'\{[\s\S]*\}', output_text)
-            if json_match:
-                intent_data = json.loads(json_match.group(0))
-                return intent_data
-            
-            # Fallback: return default structure
-            return {
+        # Ensure consistent structure if LLM returned something unexpected
+            if not isinstance(intent_data, dict):
+                intent_data = {
                 "intent_detected": False,
                 "resource_type": None,
                 "operation": None,
@@ -583,15 +626,132 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "ambiguities": [],
                 "clarification_needed": None
             }
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ Failed to parse intent JSON: {str(e)}")
+
+        # 4) If intent detected, enrich with operation/schema info (defensive)
+            if intent_data.get("intent_detected"):
+                resource_type = intent_data.get("resource_type")
+                operation = intent_data.get("operation")
+
+            # Normalize: if resource_type is list, pick first for lookup
+                lookup_resource_type = resource_type[0] if isinstance(resource_type, list) and resource_type else resource_type
+
+                if lookup_resource_type and operation:
+                    try:
+                        operation_config = api_executor_service.get_operation_config(
+                        lookup_resource_type, operation
+                    )
+                        if operation_config:
+                            params = operation_config.get("parameters", {})
+                            intent_data.setdefault("required_params", params.get("required", []))
+                            intent_data.setdefault("optional_params", params.get("optional", []))
+                            logger.info(
+                            "✅ Intent detected: %s %s | required=%s",
+                            operation, lookup_resource_type, intent_data["required_params"]
+                        )
+                        else:
+                            logger.warning("⚠️ No operation config found for %s.%s", lookup_resource_type, operation)
+                    except Exception as e:
+                    # Don't fail the whole function if enrichment fails
+                        logger.warning("⚠️ Failed to enrich intent with schema: %s", str(e))
+
+        # 5) Return standardized final result
+            return {
+            "agent_name": self.agent_name,
+            "success": True,
+            "intent_detected": bool(intent_data.get("intent_detected", False)),
+            "intent_data": intent_data,
+            "output": output_text
+        }
+
+        except Exception as exc:
+        # Robust logging and safe fallback. Do NOT return malformed keys or a truthy intent that
+        # would cause automatic execution. Keep fallback non-executing and request clarification.
+            logger.exception("❌ IntentAgent failed during execute: %s", str(exc))
+            fallback_intent = self._fallback_intent("Internal error during intent detection")
+
+        # Normalize fallback shape, but prefer NOT to mark intent_detected True.
+        # This prevents accidental auto-execution of downstream operations.
+            normalized_fallback = {
+            "intent_detected": bool(fallback_intent.get("intent_detected", False)),
+            "resource_type": fallback_intent.get("resource_type"),
+            "operation": fallback_intent.get("operation"),
+            "extracted_params": fallback_intent.get("extracted_params", {}),
+            "confidence": float(fallback_intent.get("confidence", 0.0)),
+            "ambiguities": fallback_intent.get("ambiguities", ["Internal error"]),
+            "clarification_needed": fallback_intent.get("clarification_needed", "Could you rephrase your request?")
+        }
+
+            return {
+            "agent_name": self.agent_name,
+            "success": True,
+            "intent_detected": normalized_fallback["intent_detected"],
+            "intent_data": normalized_fallback,
+            "output": "Intent detection fallback applied due to internal error"
+        }
+
+    def _fallback_intent(self, reason: str) -> Dict[str, Any]:
+        logger.warning("⚠️ Intent fallback used: %s", reason)
+        return {
+            "intent_detected": True,
+            "resource_type": "load_balancer",
+            "operation": "list",
+            "extracted_params": {},
+            "confidence": 0.4,
+            "ambiguities": [reason],
+            "clarification_needed": None
+        }
+
+
+
+    def _parse_intent_output(self, output_text: str) -> Dict[str, Any]:
+        """
+        Parse JSON object from LLM output robustly. Return standard structure if parsing fails.
+        """
+        try:
+            if not output_text:
+                return {
+                    "intent_detected": False,
+                    "resource_type": None,
+                    "operation": None,
+                    "extracted_params": {},
+                    "confidence": 0.0,
+                    "ambiguities": [],
+                    "clarification_needed": None
+                }
+
+            start_idx = output_text.find('{')
+            if start_idx != -1:
+                # try progressively larger substrings up to a reasonable size
+                for end_idx in range(len(output_text), start_idx, -1):
+                    candidate = output_text[start_idx:end_idx]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            return parsed
+                    except Exception:
+                        continue
+            # As a last resort, try to extract any key-value style lines (very heuristic)
+            # Return default if nothing works
+            logger.warning("⚠️ Could not locate JSON in LLM output. Returning default structure.")
             return {
                 "intent_detected": False,
                 "resource_type": None,
                 "operation": None,
                 "extracted_params": {},
                 "confidence": 0.0,
-                "ambiguities": ["Failed to parse intent"],
+                "ambiguities": ["Could not parse LLM JSON response"],
                 "clarification_needed": None
             }
+
+        except Exception as e:
+            logger.warning("⚠️ Exception while parsing intent output: %s", str(e))
+            return {
+                "intent_detected": False,
+                "resource_type": None,
+                "operation": None,
+                "extracted_params": {},
+                "confidence": 0.0,
+                "ambiguities": ["Parsing error"],
+                "clarification_needed": None
+            }
+

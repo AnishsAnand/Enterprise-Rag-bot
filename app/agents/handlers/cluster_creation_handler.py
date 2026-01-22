@@ -41,11 +41,11 @@ class ClusterCreationHandler:
             "workerPoolName",
             "nodeType",
             "flavor",
-            "additionalStorage",  # optional - additional disk storage
+            "additionalStorage", 
             "replicaCount",
-            "enableAutoscaling",  # optional
-            "maxReplicas",  # conditional
-            "tags"  # optional
+            "enableAutoscaling",  
+            "maxReplicas",  
+            "tags" 
         ]
     
     def _check_cancel_intent(self, input_text: str, state: Any) -> Optional[Dict[str, Any]]:

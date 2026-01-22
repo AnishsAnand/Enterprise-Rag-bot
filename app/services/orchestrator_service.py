@@ -28,9 +28,8 @@ class OrchestratorService:
         elif intent == "scrape_url":
             return await self._handle_scraping(task_id, query)
         else:
-            # fallback to regular chat
             answer = await ai_service.generate_text_response(query)
-            return {"type": "chat", "task_id": task_id, "answer": answer, "status": "completed"}
+            return {"type": "chat", "task_id": task_id, "answer": answer, "status": "completed"}  
 
     async def _handle_pdf_generation(self, task_id: str, query: str) -> Dict[str, Any]:
         """Generate a PDF document based on RAG knowledge."""

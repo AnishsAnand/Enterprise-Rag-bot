@@ -1472,7 +1472,7 @@
       "For location/feature-specific queries, filter results intelligently or use detail APIs"
     ]
       },
-  "api_pattern": "Same as business_unit - single call with IPC engagement ID returns all resources"
+  "api_pattern": " single call with IPC engagement ID returns all resources"
 }
 }
 }

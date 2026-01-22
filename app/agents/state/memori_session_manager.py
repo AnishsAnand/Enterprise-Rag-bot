@@ -13,19 +13,13 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
-import os
-
-# SQLAlchemy imports for direct session management alongside Memori
-from sqlalchemy import create_engine, Column, String, Text, DateTime, Boolean, JSON
+from sqlalchemy import create_engine, Column, String, Text, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import StaticPool
-
 from app.core.config import settings
-
 logger = logging.getLogger(__name__)
 
-# Create a separate base for session tables
 SessionBase = declarative_base()
 
 
@@ -35,42 +29,34 @@ class ConversationSessionRecord(SessionBase):
     This provides queryable, persistent storage for multi-turn conversations.
     """
     __tablename__ = "conversation_sessions"
-    
     session_id = Column(String(64), primary_key=True, index=True)
     user_id = Column(String(128), index=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     expires_at = Column(DateTime, nullable=True)
-    
     # Intent and operation
     intent = Column(String(128), nullable=True)
     resource_type = Column(String(64), nullable=True)
     operation = Column(String(32), nullable=True)
     user_query = Column(Text, nullable=True)
-    
     # Status
     status = Column(String(32), default="initiated")
     active_agent = Column(String(64), nullable=True)
-    
     # Parameters - stored as JSON for flexibility
     required_params = Column(JSON, default=list)
     optional_params = Column(JSON, default=list)
     collected_params = Column(JSON, default=dict)
     missing_params = Column(JSON, default=list)
     invalid_params = Column(JSON, default=dict)
-    
     # Conversation tracking
     conversation_history = Column(JSON, default=list)
     clarification_count = Column(String(8), default="0")
     max_clarifications = Column(String(8), default="5")
-    
     # Execution tracking
     execution_result = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
-    
     # Agent handoffs
     agent_handoffs = Column(JSON, default=list)
-    
     # Additional metadata stored as JSON for flexibility (named extra_data to avoid SQLAlchemy reserved word)
     extra_data = Column(JSON, default=dict)
     
@@ -99,34 +85,23 @@ class ConversationSessionRecord(SessionBase):
             "execution_result": self.execution_result,
             "error_message": self.error_message,
             "agent_handoffs": self.agent_handoffs or [],
-            "metadata": self.extra_data or {}
-        }
-
+            "metadata": self.extra_data or {}}
 
 class MemoriSessionManager:
     """
     Persistent session manager using SQL database.
-    
     Provides the same interface as ConversationStateManager but with 
     persistent storage that survives server restarts and scales across
     multiple instances.
-    
     Features:
     - Automatic session expiration
     - Queryable session history
     - Full audit trail
     - Support for SQLite (development) and PostgreSQL (production)
     """
-    
-    def __init__(
-        self,
-        database_url: Optional[str] = None,
-        session_ttl_hours: int = 24,
-        auto_cleanup: bool = True
-    ):
+    def __init__(self,database_url: Optional[str] = None,session_ttl_hours: int = 24,auto_cleanup: bool = True ):
         """
         Initialize the Memori session manager.
-        
         Args:
             database_url: SQL database connection string. Defaults to app settings.
             session_ttl_hours: Session time-to-live in hours
@@ -135,32 +110,25 @@ class MemoriSessionManager:
         self.database_url = database_url or settings.DATABASE_URL
         self.session_ttl_hours = session_ttl_hours
         self.auto_cleanup = auto_cleanup
-        
         # Create engine with appropriate settings for SQLite vs PostgreSQL
         if self.database_url.startswith("sqlite"):
             self.engine = create_engine(
                 self.database_url,
                 connect_args={"check_same_thread": False},
-                poolclass=StaticPool
-            )
+                poolclass=StaticPool)
         else:
             self.engine = create_engine(
                 self.database_url,
                 pool_size=5,
                 max_overflow=10,
-                pool_pre_ping=True
-            )
-        
+                pool_pre_ping=True)
         # Create session factory
         self.SessionFactory = sessionmaker(bind=self.engine)
-        
         # Create tables
         SessionBase.metadata.create_all(self.engine)
-        
         # In-memory cache for active sessions (hot cache)
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ttl_seconds = 300  # 5 minute cache
-        
         logger.info(f"✅ MemoriSessionManager initialized with database: {self._mask_connection_string()}")
     
     def _mask_connection_string(self) -> str:
@@ -177,10 +145,8 @@ class MemoriSessionManager:
     def save_state(self, state_dict: Dict[str, Any]) -> bool:
         """
         Save or update a conversation state to the database.
-        
         Args:
-            state_dict: Dictionary representation of ConversationState
-            
+            state_dict: Dictionary representation of ConversationState   
         Returns:
             True if saved successfully
         """
@@ -193,12 +159,9 @@ class MemoriSessionManager:
         try:
             # Check if record exists
             record = db.query(ConversationSessionRecord).filter_by(
-                session_id=session_id
-            ).first()
-            
+                session_id=session_id).first()
             now = datetime.utcnow()
             expires_at = now + timedelta(hours=self.session_ttl_hours)
-            
             if record:
                 # Update existing record
                 record.updated_at = now
@@ -247,35 +210,25 @@ class MemoriSessionManager:
                     execution_result=state_dict.get("execution_result"),
                     error_message=state_dict.get("error_message"),
                     agent_handoffs=state_dict.get("agent_handoffs", []),
-                    extra_data=state_dict.get("metadata", {})
-                )
+                    extra_data=state_dict.get("metadata", {}))
                 db.add(record)
-            
             db.commit()
-            
             # Update cache
-            self._cache[session_id] = {
-                "data": record.to_dict(),
-                "cached_at": datetime.utcnow()
-            }
-            
+            self._cache[session_id] = {"data": record.to_dict(),"cached_at": datetime.utcnow()}
             logger.debug(f"💾 Saved session state: {session_id}")
             return True
-            
         except Exception as e:
             db.rollback()
             logger.error(f"❌ Failed to save session state: {str(e)}")
             return False
         finally:
             db.close()
-    
+
     def load_state(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Load a conversation state from the database.
-        
         Args:
             session_id: Session identifier
-            
         Returns:
             Dictionary representation of state, or None if not found
         """
@@ -286,66 +239,51 @@ class MemoriSessionManager:
             if cache_age < self._cache_ttl_seconds:
                 logger.debug(f"📦 Cache hit for session: {session_id}")
                 return cache_entry["data"]
-        
         db = self._get_session()
         try:
             record = db.query(ConversationSessionRecord).filter_by(
-                session_id=session_id
-            ).first()
-            
+                session_id=session_id).first()
             if not record:
                 logger.debug(f"🔍 Session not found: {session_id}")
                 return None
-            
             # Check if expired
             if record.expires_at and record.expires_at < datetime.utcnow():
                 logger.info(f"⏰ Session expired: {session_id}")
                 self.delete_state(session_id)
                 return None
-            
             state_dict = record.to_dict()
-            
             # Update cache
             self._cache[session_id] = {
                 "data": state_dict,
-                "cached_at": datetime.utcnow()
-            }
-            
+                "cached_at": datetime.utcnow()}
             logger.debug(f"📖 Loaded session state: {session_id}")
             return state_dict
-            
         except Exception as e:
             logger.error(f"❌ Failed to load session state: {str(e)}")
             return None
         finally:
             db.close()
-    
+
     def delete_state(self, session_id: str) -> bool:
         """
         Delete a conversation state from the database.
-        
         Args:
-            session_id: Session identifier
-            
+            session_id: Session identifier 
         Returns:
             True if deleted, False if not found
         """
         # Remove from cache
         self._cache.pop(session_id, None)
-        
         db = self._get_session()
         try:
             result = db.query(ConversationSessionRecord).filter_by(
-                session_id=session_id
-            ).delete()
-            
+                session_id=session_id).delete()
             db.commit()
             
             if result > 0:
                 logger.info(f"🗑️ Deleted session: {session_id}")
                 return True
             return False
-            
         except Exception as e:
             db.rollback()
             logger.error(f"❌ Failed to delete session: {str(e)}")
@@ -353,36 +291,25 @@ class MemoriSessionManager:
         finally:
             db.close()
     
-    def get_user_sessions(
-        self, 
-        user_id: str, 
-        status: Optional[str] = None,
-        limit: int = 10
-    ) -> List[Dict[str, Any]]:
+    def get_user_sessions(self, user_id: str, status: Optional[str] = None,limit: int = 10) -> List[Dict[str, Any]]:
         """
         Get all sessions for a user.
-        
         Args:
             user_id: User identifier
             status: Optional status filter
             limit: Maximum number of sessions to return
-            
         Returns:
             List of session dictionaries
         """
         db = self._get_session()
         try:
             query = db.query(ConversationSessionRecord).filter_by(user_id=user_id)
-            
             if status:
                 query = query.filter_by(status=status)
-            
             query = query.order_by(ConversationSessionRecord.updated_at.desc())
             query = query.limit(limit)
-            
             records = query.all()
             return [r.to_dict() for r in records]
-            
         except Exception as e:
             logger.error(f"❌ Failed to get user sessions: {str(e)}")
             return []
@@ -392,7 +319,6 @@ class MemoriSessionManager:
     def get_active_sessions(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
         Get all active (non-completed/cancelled) sessions.
-        
         Returns:
             List of active session dictionaries
         """
@@ -403,9 +329,7 @@ class MemoriSessionManager:
             ).order_by(
                 ConversationSessionRecord.updated_at.desc()
             ).limit(limit).all()
-            
             return [r.to_dict() for r in records]
-            
         except Exception as e:
             logger.error(f"❌ Failed to get active sessions: {str(e)}")
             return []
@@ -415,7 +339,6 @@ class MemoriSessionManager:
     def cleanup_expired_sessions(self) -> int:
         """
         Remove expired sessions from the database.
-        
         Returns:
             Number of sessions cleaned up
         """
@@ -423,16 +346,11 @@ class MemoriSessionManager:
         try:
             now = datetime.utcnow()
             result = db.query(ConversationSessionRecord).filter(
-                ConversationSessionRecord.expires_at < now
-            ).delete()
-            
+                ConversationSessionRecord.expires_at < now).delete()
             db.commit()
-            
             if result > 0:
                 logger.info(f"🧹 Cleaned up {result} expired sessions")
-            
             return result
-            
         except Exception as e:
             db.rollback()
             logger.error(f"❌ Failed to cleanup expired sessions: {str(e)}")
@@ -443,29 +361,22 @@ class MemoriSessionManager:
     def cleanup_old_completed_sessions(self, max_age_hours: int = 24) -> int:
         """
         Clean up old completed/cancelled sessions.
-        
         Args:
             max_age_hours: Maximum age in hours before cleanup
-            
         Returns:
             Number of sessions cleaned up
         """
         db = self._get_session()
         try:
             cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
-            
             result = db.query(ConversationSessionRecord).filter(
                 ConversationSessionRecord.status.in_(["completed", "cancelled", "failed"]),
                 ConversationSessionRecord.updated_at < cutoff_time
             ).delete()
-            
             db.commit()
-            
             if result > 0:
                 logger.info(f"🧹 Cleaned up {result} old completed sessions")
-            
             return result
-            
         except Exception as e:
             db.rollback()
             logger.error(f"❌ Failed to cleanup old sessions: {str(e)}")
@@ -476,42 +387,34 @@ class MemoriSessionManager:
     def get_session_stats(self) -> Dict[str, Any]:
         """
         Get statistics about sessions in the database.
-        
         Returns:
             Dictionary with session statistics
         """
         db = self._get_session()
         try:
             from sqlalchemy import func
-            
             total = db.query(func.count(ConversationSessionRecord.session_id)).scalar()
-            
             status_counts = dict(
                 db.query(
                     ConversationSessionRecord.status,
                     func.count(ConversationSessionRecord.session_id)
-                ).group_by(ConversationSessionRecord.status).all()
-            )
-            
+                ).group_by(ConversationSessionRecord.status).all())
             # Get recent activity
             hour_ago = datetime.utcnow() - timedelta(hours=1)
             recent_active = db.query(func.count(ConversationSessionRecord.session_id)).filter(
                 ConversationSessionRecord.updated_at > hour_ago
             ).scalar()
-            
             return {
                 "total_sessions": total,
                 "status_breakdown": status_counts,
                 "active_last_hour": recent_active,
                 "cache_size": len(self._cache)
             }
-            
         except Exception as e:
             logger.error(f"❌ Failed to get session stats: {str(e)}")
             return {}
         finally:
             db.close()
-    
     def search_sessions(
         self,
         resource_type: Optional[str] = None,
@@ -522,21 +425,18 @@ class MemoriSessionManager:
     ) -> List[Dict[str, Any]]:
         """
         Search sessions with various filters.
-        
         Args:
             resource_type: Filter by resource type (e.g., "k8s_cluster")
             operation: Filter by operation (e.g., "create")
             status: Filter by status
             user_id: Filter by user
             limit: Maximum results
-            
         Returns:
             List of matching session dictionaries
         """
         db = self._get_session()
         try:
             query = db.query(ConversationSessionRecord)
-            
             if resource_type:
                 query = query.filter_by(resource_type=resource_type)
             if operation:
@@ -545,56 +445,42 @@ class MemoriSessionManager:
                 query = query.filter_by(status=status)
             if user_id:
                 query = query.filter_by(user_id=user_id)
-            
             query = query.order_by(ConversationSessionRecord.updated_at.desc())
             query = query.limit(limit)
-            
             records = query.all()
             return [r.to_dict() for r in records]
-            
         except Exception as e:
             logger.error(f"❌ Failed to search sessions: {str(e)}")
             return []
         finally:
             db.close()
     
-    def get_recent_active_sessions(
-        self,
-        max_age_minutes: int = 5,
-        limit: int = 10
-    ) -> List[Dict[str, Any]]:
+    def get_recent_active_sessions(self,max_age_minutes: int = 5,limit: int = 10) -> List[Dict[str, Any]]:
         """
         Get recently updated sessions that are in COLLECTING_PARAMS status.
         Used to find active conversations for session recovery.
-        
         Args:
             max_age_minutes: Maximum age of sessions to return
             limit: Maximum number of sessions to return
-            
         Returns:
             List of recent active session dictionaries, sorted by most recent first
         """
         db = self._get_session()
         try:
             cutoff_time = datetime.utcnow() - timedelta(minutes=max_age_minutes)
-            
             records = db.query(ConversationSessionRecord).filter(
                 ConversationSessionRecord.status == "collecting_params",
                 ConversationSessionRecord.updated_at >= cutoff_time
             ).order_by(
                 ConversationSessionRecord.updated_at.desc()
             ).limit(limit).all()
-            
             result = [r.to_dict() for r in records]
             logger.debug(f"🔍 Found {len(result)} recent active sessions within {max_age_minutes} minutes")
             return result
-            
         except Exception as e:
             logger.error(f"❌ Failed to get recent active sessions: {str(e)}")
             return []
         finally:
             db.close()
-
-
 # Global instance
 memori_session_manager = MemoriSessionManager()

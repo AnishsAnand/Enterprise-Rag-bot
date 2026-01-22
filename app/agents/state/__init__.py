@@ -6,8 +6,7 @@ from app.agents.state.conversation_state import (
     ConversationState,
     ConversationStatus,
     ConversationStateManager,
-    conversation_state_manager
-)
+    conversation_state_manager)
 
 __all__ = [
     "ConversationState",

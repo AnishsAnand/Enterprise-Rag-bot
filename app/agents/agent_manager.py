@@ -20,30 +20,23 @@ logger = logging.getLogger(__name__)
 class AgentManager:
     """
     Central manager for the multi-agent system.
-    Handles agent initialization, coordination, and lifecycle management.
-    
     Agent Flow:
         User → Orchestrator → IntentAgent → ValidationAgent → ExecutionAgent → ResourceAgents → API
     """
-    
     def __init__(self):
         """
         Initialize agent manager.
-        
         Note: RAGAgent uses the existing widget_query system, so no services needed.
         """
-        # Initialize all agents
         self.orchestrator: Optional[OrchestratorAgent] = None
         self.intent_agent: Optional[IntentAgent] = None
         self.validation_agent: Optional[ValidationAgent] = None
         self.execution_agent: Optional[ExecutionAgent] = None
         self.rag_agent: Optional[RAGAgent] = None
-        
         # Manager state
         self.initialized = False
         self.initialization_time: Optional[datetime] = None
         self.total_requests = 0
-        
         logger.info("✅ AgentManager created")
     
     def initialize(self) -> None:
@@ -51,16 +44,11 @@ class AgentManager:
         try:
             logger.info("🚀 Initializing multi-agent system...")
             
-            # Initialize specialized agents
             self.intent_agent = IntentAgent()
             self.validation_agent = ValidationAgent()
             self.execution_agent = ExecutionAgent()
             self.rag_agent = RAGAgent()  # Uses existing widget_query system
-            
-            # Initialize orchestrator
             self.orchestrator = OrchestratorAgent()
-            
-            # Wire specialized agents to orchestrator
             self.orchestrator.set_specialized_agents(
                 intent_agent=self.intent_agent,
                 validation_agent=self.validation_agent,
@@ -70,89 +58,54 @@ class AgentManager:
             
             self.initialized = True
             self.initialization_time = datetime.utcnow()
-            
             logger.info("✅ Multi-agent system initialized successfully")
             logger.info(f"   - OrchestratorAgent: {self.orchestrator.agent_name}")
             logger.info(f"   - IntentAgent: {self.intent_agent.agent_name}")
             logger.info(f"   - ValidationAgent: {self.validation_agent.agent_name}")
             logger.info(f"   - ExecutionAgent: {self.execution_agent.agent_name}")
             logger.info(f"   - RAGAgent: {self.rag_agent.agent_name}")
-            
         except Exception as e:
             logger.error(f"❌ Failed to initialize agent manager: {str(e)}")
             raise
     
-    def set_services(self, vector_service=None, ai_service=None) -> None:
-        """
-        Set or update services for agents (kept for backward compatibility).
-        
-        Note: RAGAgent uses widget_query system, so services are not needed.
-        
-        Args:
-            vector_service: Vector database service (not used)
-            ai_service: AI service (not used)
-        """
-        # Services are not needed since RAGAgent uses widget_query
-        logger.debug("✅ Services parameter accepted (not used by RAGAgent)")
-    
-    async def process_request(
-        self,
-        user_input: str,
-        session_id: str,
-        user_id: str,
-        user_roles: List[str] = None
-    ) -> Dict[str, Any]:
+    async def process_request(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None) -> Dict[str, Any]:
         """
         Process a user request through the multi-agent system.
-        
         Args:
             user_input: User's message
             session_id: Conversation session ID
             user_id: User identifier
-            user_roles: User's roles for permission checking
-            
+            user_roles: User's roles for permission checking   
         Returns:
             Dict with response and metadata
         """
         if not self.initialized:
             self.initialize()
-        
         try:
             self.total_requests += 1
             start_time = datetime.utcnow()
-            
             logger.info(
                 f"📥 Processing request #{self.total_requests} | "
-                f"Session: {session_id} | User: {user_id}"
-            )
-            
+                f"Session: {session_id} | User: {user_id}")
             # Process through orchestrator
             result = await self.orchestrator.orchestrate(
                 user_input=user_input,
                 session_id=session_id,
                 user_id=user_id,
-                user_roles=user_roles or []
-            )
-            
+                user_roles=user_roles or [])
             # Add metadata
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
-            
             result["metadata"] = {
                 "request_number": self.total_requests,
                 "duration_seconds": duration,
                 "timestamp": end_time.isoformat(),
                 "session_id": session_id,
-                "user_id": user_id
-            }
-            
+                "user_id": user_id}
             logger.info(
                 f"✅ Request #{self.total_requests} completed in {duration:.2f}s | "
-                f"Success: {result.get('success', False)}"
-            )
-            
+                f"Success: {result.get('success', False)}")
             return result
-            
         except Exception as e:
             logger.error(f"❌ Request processing failed: {str(e)}")
             return {
@@ -163,49 +116,37 @@ class AgentManager:
                     "request_number": self.total_requests,
                     "timestamp": datetime.utcnow().isoformat(),
                     "session_id": session_id,
-                    "user_id": user_id
-                }
-            }
+                    "user_id": user_id}}
     
     async def get_conversation_status(self, session_id: str) -> Dict[str, Any]:
         """
         Get the status of a conversation session.
-        
         Args:
             session_id: Session identifier
-            
         Returns:
             Dict with conversation status
         """
         state = conversation_state_manager.get_session(session_id)
-        
         if not state:
             return {
                 "found": False,
-                "message": "No active conversation found for this session"
-            }
-        
+                "message": "No active conversation found for this session" }
         return {
             "found": True,
-            "state": state.to_dict()
-        }
+            "state": state.to_dict()}
     
     async def reset_conversation(self, session_id: str) -> Dict[str, Any]:
         """
         Reset a conversation session.
-        
         Args:
             session_id: Session identifier
-            
         Returns:
             Dict with reset result
         """
         deleted = conversation_state_manager.delete_session(session_id)
-        
         return {
             "success": deleted,
-            "message": "Conversation reset successfully" if deleted else "No conversation found"
-        }
+            "message": "Conversation reset successfully" if deleted else "No conversation found"}
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -226,9 +167,7 @@ class AgentManager:
                 "intent": self.intent_agent.agent_name if self.intent_agent else None,
                 "validation": self.validation_agent.agent_name if self.validation_agent else None,
                 "execution": self.execution_agent.agent_name if self.execution_agent else None,
-                "rag": self.rag_agent.agent_name if self.rag_agent else None
-            }
-        }
+                "rag": self.rag_agent.agent_name if self.rag_agent else None}}
     
     def cleanup_old_sessions(self, max_age_hours: int = 24) -> int:
         """
@@ -246,29 +185,22 @@ class AgentManager:
         return (
             f"<AgentManager(initialized={self.initialized}, "
             f"requests={self.total_requests}, "
-            f"active_sessions={len(conversation_state_manager.get_active_sessions())})>"
-        )
-
+            f"active_sessions={len(conversation_state_manager.get_active_sessions())})>")
 
 # Global agent manager instance
 agent_manager: Optional[AgentManager] = None
 
-
 def get_agent_manager(vector_service=None, ai_service=None) -> AgentManager:
     """
     Get or create the global agent manager instance.
-    
     Args:
         vector_service: Vector database service (not used, kept for compatibility)
         ai_service: AI service (not used, kept for compatibility)
-        
     Returns:
         AgentManager instance
     """
     global agent_manager
-    
     if agent_manager is None:
         agent_manager = AgentManager()
         agent_manager.initialize()
-    
     return agent_manager

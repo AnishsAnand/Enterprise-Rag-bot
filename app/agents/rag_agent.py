@@ -2,16 +2,12 @@
 RAG Agent - Answers questions using the existing RAG system.
 Integrates with the existing rag_widget.widget_query for documentation queries.
 """
-
 from typing import Any, Dict, List, Optional
 from langchain.tools import Tool
 import logging
 import json
-
 from app.agents.base_agent import BaseAgent
-
 logger = logging.getLogger(__name__)
-
 
 class RAGAgent(BaseAgent):
     """
@@ -88,7 +84,7 @@ For current pricing details, I recommend:
 Is there anything else about cluster features or configuration I can help with?"
 
 Always be helpful, accurate, and transparent about the source of your information."""
-    
+
     def get_tools(self) -> List[Tool]:
         """Return tools for RAG agent."""
         return [
@@ -98,20 +94,13 @@ Always be helpful, accurate, and transparent about the source of your informatio
                 description=(
                     "Query the knowledge base using the existing RAG system. "
                     "This uses the trained Milvus vector database with admin-managed documentation. "
-                    "Input: user's question as a string"
-                )
-            )
-        ]
-    
+                    "Input: user's question as a string"))]
+
     def _query_knowledge_base(self, query: str) -> str:
         """
         Query knowledge base using the existing widget_query system.
-        
-        Args:
-            query: User's question
-            
-        Returns:
-            JSON string with RAG response
+        Args:query: User's question
+        Returns:JSON string with RAG response
         """
         try:
             # Import the existing widget_query function and models
@@ -125,50 +114,31 @@ Always be helpful, accurate, and transparent about the source of your informatio
                 include_sources=True,
                 enable_advanced_search=True,
                 search_depth="balanced",
-                auto_execute=False,  # Don't auto-execute tasks for Q&A
-                store_interaction=False  # Don't store agent internal queries
-            )
+                auto_execute=False, 
+                store_interaction=False)
             
-            # Call existing RAG system
             import asyncio
             loop = asyncio.get_event_loop()
             background_tasks = BackgroundTasks()
-            
-            result = loop.run_until_complete(
-                widget_query(widget_req, background_tasks)
-            )
-            
-            # Extract relevant information
+            result = loop.run_until_complete(widget_query(widget_req, background_tasks))
             response_data = {
                 "answer": result.get("answer", ""),
-                "sources": result.get("sources", [])[:3],  # Top 3 sources
+                "sources": result.get("sources", [])[:3],  
                 "confidence": result.get("confidence", 0.0),
-                "search_results_count": len(result.get("sources", []))
-            }
-            
+                "search_results_count": len(result.get("sources", []))}
             return json.dumps(response_data, indent=2)
-            
         except Exception as e:
             logger.error(f"❌ Knowledge base query failed: {str(e)}")
             return json.dumps({
                 "error": str(e),
-                "answer": "I encountered an error while searching the knowledge base."
-            })
-    
-    async def execute(
-        self,
-        input_text: str,
-        context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+                "answer": "I encountered an error while searching the knowledge base."})
+
+    async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute RAG query using the existing widget_query system.
-        
-        Args:
-            input_text: User's question
-            context: Additional context
-            
-        Returns:
-            Dict with RAG response
+        Args:input_text: User's question
+        context: Additional context
+        Returns:Dict with RAG response
         """
         try:
             logger.info(f"📚 RAGAgent answering: {input_text[:100]}...")
@@ -176,7 +146,6 @@ Always be helpful, accurate, and transparent about the source of your informatio
             # Import the existing widget_query function and models
             from app.api.routes.rag_widget import widget_query, WidgetQueryRequest
             from fastapi import BackgroundTasks
-            
             # Create request for existing RAG system
             widget_req = WidgetQueryRequest(
                 query=input_text,
@@ -184,25 +153,18 @@ Always be helpful, accurate, and transparent about the source of your informatio
                 include_sources=True,
                 enable_advanced_search=True,
                 search_depth="balanced",
-                auto_execute=False,  # Don't auto-execute tasks for Q&A
-                store_interaction=False,  # Don't store agent internal queries
-                force_rag_only=True  # CRITICAL: Skip agent routing to prevent infinite loop
+                auto_execute=False, 
+                store_interaction=False, 
+                force_rag_only=True  
             )
-            
             # Call existing RAG system
             background_tasks = BackgroundTasks()
             result = await widget_query(widget_req, background_tasks)
-            
             # Format response
             answer = result.get("answer", "")
             sources = result.get("sources", [])
             confidence = result.get("confidence", 0.0)
-            
-            # Sources section removed from display per user request
-            # Sources are still tracked in metadata for debugging
-            
             logger.info(f"✅ RAGAgent completed with {len(sources)} sources, confidence: {confidence}")
-            
             return {
                 "agent_name": self.agent_name,
                 "success": True,
@@ -213,10 +175,7 @@ Always be helpful, accurate, and transparent about the source of your informatio
                     "search_depth": "balanced",
                     "sources": sources[:3],  # Top 3 sources
                     "intent_detected": result.get("intent_detected"),
-                    "used_existing_rag": True
-                }
-            }
-            
+                    "used_existing_rag": True}}
         except Exception as e:
             logger.error(f"❌ RAG agent failed: {str(e)}")
             return {

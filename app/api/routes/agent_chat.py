@@ -86,7 +86,7 @@ async def agent_chat(request: AgentChatRequest):
         
         # Get agent manager (initializes if needed)
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         
@@ -131,7 +131,7 @@ async def get_conversation_status(session_id: str):
     """
     try:
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         
@@ -161,7 +161,7 @@ async def reset_conversation(session_id: str):
     """
     try:
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         
@@ -194,7 +194,7 @@ async def get_agent_stats():
     """
     try:
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         
@@ -219,7 +219,7 @@ async def cleanup_old_sessions(max_age_hours: int = 24):
     """
     try:
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         
@@ -247,7 +247,7 @@ async def agent_health_check():
     """
     try:
         manager = get_agent_manager(
-            vector_service=milvus_service,
+            vector_service=postgres_service,
             ai_service=ai_service
         )
         

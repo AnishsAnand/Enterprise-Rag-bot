@@ -50,12 +50,6 @@ class LocationEndpoint(Enum):
         self.display_name = display_name
         self.endpoint_id = endpoint_id
 
-# ======================== Fallback Parameter Class ========================
-if not PARAMS_AVAILABLE:
-    class ParameterType(Enum):
-        STRING = "string"
-        BOOLEAN = "boolean"
-        INTEGER = "integer"
     
     class Parameter:
         def __init__(self, name, description, required, param_type, default=None, choices=None, **kwargs):

@@ -82,284 +82,366 @@ class LoadBalancerAgent(BaseResourceAgent):
                 "response": f"An error occurred while {operation}ing load balancers: {str(e)}"
             }
     
-    async def _list_load_balancers(self,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
-
+    async def _list_load_balancers(self, params: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        List load balancers with AUTOMATIC detail fetching for specific LB queries.
+        """
         try:
-        # Extract context
+            # Extract context
             user_roles = context.get("user_roles", [])
             user_id = context.get("user_id")
             user_query = context.get("user_query", "").lower()
             force_refresh = params.get("force_refresh", False)
-        
+            
             logger.info(f"📋 Processing LB query: '{user_query}'")
-        
-        # ═════════════════════════════════════════════════════════════════
-        # STEP 1: Analyze query intent
-        # ═════════════════════════════════════════════════════════════════
+            
+            # ═════════════════════════════════════════════════════════════════
+            # STEP 1: Analyze query intent
+            # ═════════════════════════════════════════════════════════════════
             query_analysis = self._analyze_query_intent(user_query)
-        
-        # ═════════════════════════════════════════════════════════════════
-        # STEP 1.5: Handle DIRECT LBCI queries FIRST (CRITICAL FIX)
-        # ═════════════════════════════════════════════════════════════════
+            if query_analysis["is_specific_lb"]:
+                specific_lb_name = query_analysis["lb_identifier"]
+                list_result = await api_executor_service.list_load_balancers(...)
+                all_lbs = list_result.get("data", [])
+                matched_lb = self._find_matching_lb(specific_lb_name, all_lbs)
+                lbci = matched_lb.get("lbci") or matched_lb.get("circuitId")
+                return await self._fetch_complete_lb_details(load_balancer=matched_lb,
+                                                             user_query=user_query,
+                                                             query_intent=query_analysis,user_id=user_id,lbci=lbci )
+            # ═════════════════════════════════════════════════════════════════
+            # STEP 1.5: Handle DIRECT LBCI queries FIRST (if user knows LBCI)
+            # ═════════════════════════════════════════════════════════════════
             if query_analysis.get("is_lbci_query"):
                 lbci = query_analysis.get("lb_identifier")
                 logger.info(f"🎯 DIRECT LBCI QUERY DETECTED: {lbci}")
-            
-            # Route to dedicated LBCI handler
+                
                 return await self._handle_lbci_query(
-                lbci=lbci,
-                user_query=user_query,
-                user_id=user_id
-            )
-        
-        # ═════════════════════════════════════════════════════════════════
-        # STEP 2: Handle SPECIFIC load balancer queries (by name)
-        # ═════════════════════════════════════════════════════════════════
+                    lbci=lbci,
+                    user_query=user_query,
+                    user_id=user_id
+                )
+            
+            # ═════════════════════════════════════════════════════════════════
+            # STEP 2: Handle SPECIFIC load balancer queries (by NAME)
+            # ═════════════════════════════════════════════════════════════════
             if query_analysis["is_specific_lb"]:
                 specific_lb_name = query_analysis["lb_identifier"]
-                logger.info(f"🎯 SPECIFIC LB QUERY: '{specific_lb_name}'")
-
+                logger.info(f"🎯 SPECIFIC LB QUERY BY NAME: '{specific_lb_name}'")
+                
+                # First, get list of all LBs to find the one user wants
                 raw_roles = context.get("user_roles")
                 user_roles = list(raw_roles) if isinstance(raw_roles, (list, tuple, set)) else []
                 ipc_engagement_id = await self._get_ipc_engagement_id(
-                user_id=user_id,
-                user_roles=user_roles,
-                force_refresh=force_refresh
-            )
-            
+                    user_id=user_id,
+                    user_roles=user_roles,
+                    force_refresh=force_refresh
+                )
+                
                 if not ipc_engagement_id:
                     return {
-                    "success": False,
-                    "error": "Failed to get IPC engagement ID",
-                    "response": "Unable to retrieve engagement information."
-                }
-
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "response": "Unable to retrieve engagement information."
+                    }
+                
+                # Get list of all load balancers
                 list_result = await api_executor_service.list_load_balancers(
-                ipc_engagement_id=ipc_engagement_id,
-                user_id=user_id,
-                force_refresh=False 
-            )
-            
+                    ipc_engagement_id=ipc_engagement_id,
+                    user_id=user_id,
+                    force_refresh=False
+                )
+                
                 if not list_result.get("success"):
                     return {
-                    "success": False,
-                    "error": list_result.get("error"),
-                    "response": f"Failed to find load balancer: {list_result.get('error')}"
-                }
-            
+                        "success": False,
+                        "error": list_result.get("error"),
+                        "response": f"Failed to find load balancer: {list_result.get('error')}"
+                    }
+                
                 all_lbs = list_result.get("data", [])
-            
-            # Find matching LB (fuzzy matching)
+                
+                # Find matching LB (fuzzy matching)
                 matched_lb = self._find_matching_lb(specific_lb_name, all_lbs)
-            
+                
                 if not matched_lb:
-                # No match - provide helpful error
+                    # No match - provide helpful error
                     available_names = [lb.get("name") for lb in all_lbs[:5] if lb.get("name")]
                     return {
-                    "success": False,
-                    "error": "Load balancer not found",
-                    "response": (
-                        f"❌ **Load Balancer Not Found**\n\n"
-                        f"I couldn't find a load balancer matching '{specific_lb_name}'.\n\n"
-                        f"**Available load balancers:**\n" +
-                        "\n".join([f"- {name}" for name in available_names]) +
-                        f"\n\n💡 **Tip:** Use 'list load balancers' to see all available LBs."
-                    ),
-                    "metadata": {
-                        "query_type": "specific",
-                        "requested_name": specific_lb_name,
-                        "available_lbs": available_names
+                        "success": False,
+                        "error": "Load balancer not found",
+                        "response": (
+                            f"❌ **Load Balancer Not Found**\n\n"
+                            f"I couldn't find a load balancer matching '{specific_lb_name}'.\n\n"
+                            f"**Available load balancers:**\n" +
+                            "\n".join([f"- {name}" for name in available_names]) +
+                            f"\n\n💡 **Tip:** Use 'list load balancers' to see all available LBs."
+                        ),
+                        "metadata": {
+                            "query_type": "specific",
+                            "requested_name": specific_lb_name,
+                            "available_lbs": available_names
+                        }
                     }
-                }
-            
-            # Found the LB - extract LBCI
+                
+                # Found the LB - extract LBCI
                 lbci = matched_lb.get("lbci") or matched_lb.get("circuitId") or matched_lb.get("LBCI")
-            
-            # ═════════════════════════════════════════════════════════════
-            # Check if user wants detailed information
-            # ═════════════════════════════════════════════════════════════
-                detail_keywords = [
-                "more", "detail", "info", "about", "configuration", "config",
-                "show me", "tell me", "give me", "get", "describe",
-                "virtual service", "vip", "listener", "pool", "members",
-                "complete", "full", "all information", "everything",
-                "settings", "properties", "attributes"
-            ]
-                wants_details = (
-                query_analysis.get("wants_details") or
-                query_analysis.get("wants_virtual_services") or
-                any(keyword in user_query for keyword in detail_keywords)
-            )
-            
-                if lbci and wants_details:
-                # Auto-fetch detailed configuration
-                    logger.info(f"📊 Auto-fetching DETAILED info for {matched_lb.get('name')}")
-                    return await self._fetch_complete_lb_details(
+                
+                if not lbci:
+                    # LB found but no LBCI - return basic info only
+                    logger.warning(f"⚠️ LB '{matched_lb.get('name')}' has no LBCI, returning basic info only")
+                    
+                    formatted_response = await self.format_response_with_llm(
+                        operation="list",
+                        raw_data=[matched_lb],
+                        user_query=user_query,
+                        context={
+                            "query_type": "specific",
+                            "lb_name": matched_lb.get("name"),
+                            "total_count": 1,
+                            "no_lbci": True
+                        }
+                    )
+                    
+                    return {
+                        "success": True,
+                        "data": [matched_lb],
+                        "response": formatted_response,
+                        "metadata": {
+                            "query_type": "specific",
+                            "count": 1,
+                            "lb_name": matched_lb.get("name"),
+                            "lbci": None,
+                            "warning": "No LBCI found for this load balancer"
+                        }
+                    }
+                
+                # ═════════════════════════════════════════════════════════
+                # CRITICAL: ALWAYS fetch complete details when user asks about specific LB
+                # ═════════════════════════════════════════════════════════
+                logger.info(f"📊 AUTOMATICALLY fetching COMPLETE details for {matched_lb.get('name')} (LBCI: {lbci})")
+                
+                return await self._fetch_complete_lb_details(
                     load_balancer=matched_lb,
                     user_query=user_query,
                     query_intent=query_analysis,
                     user_id=user_id,
                     lbci=lbci
                 )
-                else:
-                    logger.info(f"📋 Returning BASIC info for {matched_lb.get('name')}")
-                
-                    formatted_response = await self.format_response_with_llm(
-                    operation="list",
-                    raw_data=[matched_lb],
-                    user_query=user_query,
-                    context={
-                        "query_type": "specific",
-                        "lb_name": matched_lb.get("name"),
-                        "total_count": 1,
-                        "show_detail_hint": True,
-                        "specific_lb_requested": True
-                    }
-                )
-                
-                    return {
-                    "success": True,
-                    "data": [matched_lb],
-                    "response": formatted_response,
-                    "metadata": {
-                        "query_type": "specific",
-                        "count": 1,
-                        "lb_name": matched_lb.get("name"),
-                        "lbci": lbci
-                    }
-                }
-        # ═════════════════════════════════════════════════════════════════
-        # STEP 3: Handle GENERAL list queries
-        # ═════════════════════════════════════════════════════════════════
+            
+            # ═════════════════════════════════════════════════════════════════
+            # STEP 3: Handle GENERAL list queries
+            # ═════════════════════════════════════════════════════════════════
             else:
                 logger.info(f"🌍 GENERAL LIST QUERY")
                 raw_roles = context.get("user_roles")
                 user_roles = list(raw_roles) if isinstance(raw_roles, (list, tuple, set)) else []
                 ipc_engagement_id = await self._get_ipc_engagement_id(
-                user_id=user_id,
-                user_roles=user_roles,
-                force_refresh=force_refresh
-            )
+                    user_id=user_id,
+                    user_roles=user_roles,
+                    force_refresh=force_refresh
+                )
+                
                 if not ipc_engagement_id:
                     return {
-                    "success": False,
-                    "error": "Failed to get IPC engagement ID",
-                    "response": "Unable to retrieve engagement information."
-                }
+                        "success": False,
+                        "error": "Failed to get IPC engagement ID",
+                        "response": "Unable to retrieve engagement information."
+                    }
+                
                 result = await api_executor_service.list_load_balancers(
-                ipc_engagement_id=ipc_engagement_id,
-                user_id=user_id,
-                force_refresh=force_refresh
-            )
-            
+                    ipc_engagement_id=ipc_engagement_id,
+                    user_id=user_id,
+                    force_refresh=force_refresh
+                )
+                
                 if not result.get("success"):
                     error_msg = result.get("error", "Unknown error")
                     return {
-                    "success": False,
-                    "error": error_msg,
-                    "response": f"Failed to retrieve load balancers: {error_msg}"
-                }
-            
+                        "success": False,
+                        "error": error_msg,
+                        "response": f"Failed to retrieve load balancers: {error_msg}"
+                    }
+                
                 load_balancers = result.get("data", [])
                 original_count = len(load_balancers)
                 is_cached = result.get("cached", False)
-            
+                
                 logger.info(f"✅ Retrieved {original_count} load balancer(s) from API")
+                
+                # Enrich with location data
                 enriched_lbs = await self._enrich_load_balancers_with_location(
-                load_balancers,
-                user_id,
-                ipc_engagement_id
-            )
-            
-            # ═════════════════════════════════════════════════════════════
-            # STEP 4: Apply filters
-            # ═════════════════════════════════════════════════════════════
+                    load_balancers,
+                    user_id,
+                    ipc_engagement_id
+                )
+                
+                # Apply filters
                 filtered_lbs = enriched_lbs
                 filter_reasons = []
-
+                
                 if query_analysis.get("location_filter"):
                     location = query_analysis["location_filter"]
                     logger.info(f"🔍 Applying location filter: {location}")
                     filtered_lbs = self._filter_by_location(filtered_lbs, location)
                     filter_reasons.append(f"location: {location}")
                     logger.info(f"   → {len(filtered_lbs)} LBs matched")
+                
                 if query_analysis.get("status_filter"):
                     status = query_analysis["status_filter"]
                     logger.info(f"🔍 Applying status filter: {status}")
                     filtered_lbs = self._filter_by_status(filtered_lbs, status)
                     filter_reasons.append(f"status: {status}")
                     logger.info(f"   → {len(filtered_lbs)} LBs matched")
+                
                 if query_analysis.get("feature_filters"):
                     for feature in query_analysis["feature_filters"]:
                         logger.info(f"🔍 Applying feature filter: {feature}")
                         filtered_lbs = self._filter_by_feature(filtered_lbs, feature)
                         filter_reasons.append(f"feature: {feature}")
                         logger.info(f"   → {len(filtered_lbs)} LBs matched")
-            
+                
                 total_count = len(filtered_lbs)
                 filter_reason = " + ".join(filter_reasons) if filter_reasons else None
-            # ═════════════════════════════════════════════════════════════
-            # STEP 5: Format response
-            # ═════════════════════════════════════════════════════════════
+                
+                # Format response
                 formatted_response = await self.format_response_with_llm(
-                operation="list",
-                raw_data=filtered_lbs,
-                user_query=user_query,
-                context={
-                    "query_type": "general",
-                    "total_count": total_count,
-                    "original_count": original_count,
-                    "filter_applied": filter_reason is not None,
-                    "filter_reason": filter_reason,
-                    "cached": is_cached,
-                    "ipc_engagement_id": ipc_engagement_id
-                }
-            )
-            # ═════════════════════════════════════════════════════════════
-            # STEP 6: Handle empty results with helpful messages
-            # ═════════════════════════════════════════════════════════════
+                    operation="list",
+                    raw_data=filtered_lbs,
+                    user_query=user_query,
+                    context={
+                        "query_type": "general",
+                        "total_count": total_count,
+                        "original_count": original_count,
+                        "filter_applied": filter_reason is not None,
+                        "filter_reason": filter_reason,
+                        "cached": is_cached,
+                        "ipc_engagement_id": ipc_engagement_id
+                    }
+                )
+                
+                # Handle empty results
                 if total_count == 0:
                     if original_count > 0:
-                    # Filters removed all LBs - suggest alternatives
                         available_locations = sorted(list(set([
-                        lb.get("_location") 
-                        for lb in enriched_lbs 
-                        if lb.get("_location") and lb.get("_location") != "Unknown"
-                    ])))
-                    
+                            lb.get("_location") 
+                            for lb in enriched_lbs 
+                            if lb.get("_location") and lb.get("_location") != "Unknown"
+                        ])))
+                        
                         formatted_response = (
-                        f"⚖️ **No Load Balancers Match Your Criteria**\n\n"
-                        f"Found {original_count} total LBs, but none matched: **{filter_reason}**\n\n"
-                        f"**Available locations:**\n" +
-                        "\n".join([f"- {loc}" for loc in available_locations[:10]]) +
-                        f"\n\n**Suggestions:**\n"
-                        f"- Try 'list load balancers' to see all\n"
-                        f"- Check spelling: '{filter_reason}'\n"
-                        f"- Use format: 'list load balancers in [location]'"
-                    )
+                            f"⚖️ **No Load Balancers Match Your Criteria**\n\n"
+                            f"Found {original_count} total LBs, but none matched: **{filter_reason}**\n\n"
+                            f"**Available locations:**\n" +
+                            "\n".join([f"- {loc}" for loc in available_locations[:10]]) +
+                            f"\n\n**Suggestions:**\n"
+                            f"- Try 'list load balancers' to see all\n"
+                            f"- Check spelling: '{filter_reason}'\n"
+                            f"- Use format: 'list load balancers in [location]'"
+                        )
                     else:
                         formatted_response = (
-                        f"⚖️ **No Load Balancers Found**\n\n"
-                        f"Your engagement currently has no load balancers configured.\n\n"
-                        f"💡 **Tip:** Contact your administrator to create load balancers."
-                    )
-            
+                            f"⚖️ **No Load Balancers Found**\n\n"
+                            f"Your engagement currently has no load balancers configured.\n\n"
+                            f"💡 **Tip:** Contact your administrator to create load balancers."
+                        )
+                
                 return {
-                "success": True,
-                "data": filtered_lbs,
-                "response": formatted_response,
-                "metadata": {
-                    "query_type": "general",
-                    "count": total_count,
-                    "original_count": original_count,
-                    "filter_applied": filter_reason is not None,
-                    "filter_reason": filter_reason,
-                    "cached": is_cached
+                    "success": True,
+                    "data": filtered_lbs,
+                    "response": formatted_response,
+                    "metadata": {
+                        "query_type": "general",
+                        "count": total_count,
+                        "original_count": original_count,
+                        "filter_applied": filter_reason is not None,
+                        "filter_reason": filter_reason,
+                        "cached": is_cached
+                    }
                 }
-            }
+        
         except Exception as e:
             logger.error(f"❌ Error in _list_load_balancers: {str(e)}", exc_info=True)
             raise
+
+    async def _fetch_complete_lb_details(self,load_balancer: Dict[str, Any],user_query: str,query_intent: Dict[str, Any],user_id: str,lbci: str) -> Dict[str, Any]:
+        """
+    Fetch COMPLETE details for a specific load balancer.
+    Called when user asks about a specific LB by name or LBCI.
+    
+    ALWAYS fetches:
+    1. Configuration details (getDetails API)
+    2. Virtual services (virtualservices API)
+    
+    Args:
+        load_balancer: Basic LB info from list
+        user_query: Original user query
+        query_intent: Parsed query intent
+        user_id: User ID
+        lbci: Load Balancer Circuit ID
+        
+    Returns:
+        Dict with complete LB details
+    """
+        logger.info(f"📊 Fetching COMPLETE details for {load_balancer.get('name')} (LBCI: {lbci})")
+    
+    # 1️⃣ Fetch configuration details
+        logger.info(f"📋 Fetching configuration details...")
+        details_result = await api_executor_service.get_load_balancer_details(
+        lbci=lbci,
+        user_id=user_id)
+        details = None
+        details_error = None
+        if details_result.get("success"):
+            details = details_result.get("data")
+            logger.info(f"✅ Got configuration details")
+        else:
+            details_error = details_result.get("error")
+            logger.warning(f"⚠️ Details failed: {details_error}")
+    # 2️⃣ Fetch virtual services
+        logger.info(f"🌐 Fetching virtual services...")
+        vs_result = await api_executor_service.get_load_balancer_virtual_services(
+        lbci=lbci,
+        user_id=user_id)
+    
+        virtual_services = []
+        vs_error = None
+        if vs_result.get("success"):
+            virtual_services = vs_result.get("data", [])
+            logger.info(f"✅ Got {len(virtual_services)} virtual services")
+        else:
+            vs_error = vs_result.get("error")
+            logger.warning(f"⚠️ Virtual services failed: {vs_error}")
+    # 3️⃣ Build combined data structure
+        combined_data = {
+        "load_balancer": load_balancer,
+        "details": details,
+        "virtual_services": virtual_services,
+        "errors": {
+            "details": details_error,
+            "virtual_services": vs_error}}
+    # 4️⃣ Format using ENHANCED detailed formatter
+        response = await self._format_detailed_response_with_llm(
+        raw_data=combined_data,
+        user_query=user_query,
+        context={
+            "lbci": lbci,
+            "lb_name": load_balancer.get("name"),
+            "vs_count": len(virtual_services),
+            "query_type": "specific_detailed",
+            "has_details": details is not None,
+            "has_virtual_services": len(virtual_services) > 0})
+        return {
+        "success": True,
+        "data": combined_data,
+        "response": response,
+        "metadata": {
+            "lbci": lbci,
+            "lb_name": load_balancer.get("name"),
+            "vs_count": len(virtual_services),
+            "query_type": "specific_detailed",
+            "has_details": details is not None,
+            "has_virtual_services": len(virtual_services) > 0}}
+
     async def _handle_lbci_query(self,lbci: str,user_query: str,user_id: str = None) -> Dict[str, Any]:
         logger.info(f"⚖️ LBCI QUERY HANDLER: {lbci}")
     # 1️⃣ Fetch virtual services (MANDATORY - this is what user wants!)
@@ -456,104 +538,220 @@ class LoadBalancerAgent(BaseResourceAgent):
         return filtered
     
     async def _format_detailed_response_with_llm(self,raw_data: Dict[str, Any],user_query: str,context: Dict[str, Any]) -> str:
-        """Format detailed LB response with virtual services - PRODUCTION READY."""
+        """Format load balancer with virtual services in user-friendly format."""
         from app.services.ai_service import ai_service
+    
         lb = raw_data.get("load_balancer", {})
         details = raw_data.get("details", {})
         virtual_services = raw_data.get("virtual_services", [])
         errors = raw_data.get("errors", {})
+    
         lb_name = context.get("lb_name", "Unknown")
         lbci = context.get("lbci", "N/A")
-        vs_count = context.get("vs_count", 0)
-    # Build comprehensive prompt for LLM
-        prompt = f"""Format this load balancer information in a production-ready, user-friendly way.
+        vs_count = len(virtual_services)
+    
+    # Build PRODUCTION-READY prompt
+        prompt = f"""You are formatting load balancer information for a network engineer. 
+Format this data in a clear, professional manner suitable for production operations.
 
-**User Query:** {user_query}
+**Load Balancer:** {lb_name}
+**LBCI:** {lbci}
 
-**Load Balancer:** {lb_name} (LBCI: {lbci})
-
-**Basic Information:**
-{json.dumps(lb, indent=2) if lb else "⚠️ Basic info not available"}
+**Virtual Services Data:**
+{json.dumps(virtual_services, indent=2)}
 
 **Configuration Details:**
-{json.dumps(details, indent=2) if details else "⚠️ Configuration details not available"}
+{json.dumps(details, indent=2) if details else "Configuration details unavailable"}
 
-**Virtual Services ({vs_count}):**
-{json.dumps(virtual_services, indent=2) if virtual_services else "⚠️ No virtual services configured"}
+**REQUIRED FORMAT:**
 
-**Errors (if any):**
-- Details API: {errors.get('details') or '✅ Success'}
-- Virtual Services API: {errors.get('virtual_services') or '✅ Success'}
+# Load Balancer: {lb_name}
 
-**FORMATTING REQUIREMENTS:**
+**Circuit ID (LBCI):** `{lbci}`
 
-1. **Header** - Clear LB name with status emoji
-   ⚖️ **EG_Tata_Com_167_LB_SEG_388** ✅
+## Virtual Services ({vs_count} configured)
 
-2. **Basic Configuration Section:**
-   - LBCI (Load Balancer Circuit ID): `312798`
-   - Location/Endpoint: Mumbai / Delhi / Chennai
-   - Status: ✅ ACTIVE / ⚠️ DEGRADED / ❌ DOWN
-   - Protocol & Port
+For each virtual service, display:
 
-3. **Virtual Services Section - CRITICAL:**
-   For EACH virtual service, display:
-```
-   🌐 **Virtual Service: TESTPUBLIC**
-   - VIP: 100.94.45.12:9056
-   - Protocol: HTTP
-   - Status: ⚠️ DOWN (use ✅ for UP, ⚠️ for DOWN/degraded)
-   - Load Balancing: Round Robin
-   - Health Monitor: System-TCP
-   - Pool Path: IPC_VS_1602_DWZ_4762_TESTPUBLIC
-```
-   
-   **IMPORTANT Virtual Service Fields:**
-   - virtualServerName → Service name
-   - vipIp + virtualServerport → VIP address
-   - status → UP/DOWN (with emoji)
-   - poolAlgorithm → Load balancing method
-   - monitor → Health check configuration
-   - virtualServerPath → Pool path
-   - protocol → HTTP/HTTPS/TCP
-   - persistenceType → Session persistence (if any)
+### [Number]. [Virtual Server Name]
 
-4. **Handle Missing Data Gracefully:**
-   - If configuration details failed: Show basic info only + mention error
-   - If virtual services failed/empty: Say "No virtual services found" or show error
-   - Use "N/A" for missing individual fields
+| Property | Value |
+|----------|-------|
+| **VIP Address** | [vipIp]:[virtualServerport] |
+| **Protocol** | [protocol] |
+| **Status** | [emoji] [status] |
+| **Load Balancing** | [poolAlgorithm] |
+| **Health Monitor** | [monitor array as comma-separated] |
+| **Persistence** | [persistenceType] ([persistenceValue]) |
+| **Pool Members** | [poolMembers count or details] |
+| **Pool Path** | `[virtualServerPath]` |
 
-5. **Visual Hierarchy:**
-   - Use ### headers for sections
-   - Use emojis sparingly: ✅ (up/success), ⚠️ (down/warning), ❌ (error), 🔒 (SSL), 🌐 (virtual service)
-   - Use bullet points for properties
-   - Use code blocks ` ` for technical IDs/paths
+**Status Icons:**
+- UP = ✅
+- DOWN = ⚠️
+- DEGRADED = 🟡
+- UNKNOWN = ❓
 
-6. **Production Requirements:**
-   - Be concise but complete
-   - Highlight DOWN status or errors prominently
-   - Easy to scan quickly
-   - Include actionable information
+**Special Notes:**
+- If certificate is configured, mention: **SSL Certificate:** [certificateName]
+- If pool members exist, list them
+- If persistence is null, show "None"
+- Use proper formatting with tables for readability
 
-**CRITICAL:** Return ONLY the formatted markdown response. NO preamble, NO "Here's the formatted output", NO meta-commentary. Start directly with the ⚖️ header."""
+**Example Output:**
+
+### 1. TESTPUBLIC
+
+| Property | Value |
+|----------|-------|
+| **VIP Address** | 100.94.45.12:9056 |
+| **Protocol** | HTTP |
+| **Status** | ⚠️ DOWN |
+| **Load Balancing** | Round Robin |
+| **Health Monitor** | System-TCP |
+| **Persistence** | None |
+| **Pool Path** | `IPC_VS_1602_DWZ_4762_TESTPUBLIC` |
+
+---
+
+## Configuration Summary
+
+If configuration details are available, add a summary section with:
+- Total virtual services
+- Active vs. inactive services
+- Most common protocol
+- Health monitor types in use
+
+**Important Rules:**
+1. Use EXACT field names from the API response
+2. Handle null values gracefully (show "N/A" or "None")
+3. Format arrays as comma-separated strings
+4. Use code blocks for technical paths
+5. Include ALL virtual services
+6. If no virtual services: show "ℹ️ No virtual services configured"
+
+Return ONLY the formatted markdown. NO preamble or explanation."""
 
         try:
             response = await ai_service._call_chat_with_retries(
             prompt=prompt,
-            max_tokens=2500,
-            temperature=0.3,
-            timeout=20
-        )
+            max_tokens=4000,  
+            temperature=0.1,   
+            timeout=30)
             return response.strip()
+    
         except Exception as e:
             logger.error(f"❌ LLM formatting failed: {e}")
-        # Fallback: Manual formatting
-            return self._manual_format_detailed_lb(lb, details, virtual_services, errors, lbci, lb_name)
+        # Fallback to manual formatting
+            return self._manual_format_virtual_services(lb_name, lbci, virtual_services, errors)
         
-    def _manual_format_detailed_lb(self,lb: Dict,details: Dict,virtual_services: List,errors: Dict,lbci: str,lb_name: str) -> str:
-        output = f"⚖️ **{lb_name}**\n\n"
+    def _manual_format_virtual_services(self,lb_name: str,lbci: str,virtual_services: List[Dict],errors: Dict) -> str:
+        """Manual fallback formatter with production-quality output."""
+    
+        output = f"# Load Balancer: {lb_name}\n\n"
+        output += f"**Circuit ID (LBCI):** `{lbci}`\n\n"
+    
+    # Check for errors
+        vs_error = errors.get("virtual_services")
+        details_error = errors.get("details")
+    
+        if vs_error and details_error:
+            output += "⚠️ **Error:** Unable to retrieve load balancer information\n\n"
+            output += f"- Virtual Services Error: {vs_error}\n"
+            output += f"- Details Error: {details_error}\n\n"
+            return output
+    
+    # Check if empty
+        if not virtual_services:
+            output += "## Virtual Services (0 configured)\n\n"
+            output += "ℹ️ No virtual services are currently configured for this load balancer.\n"
+            return output
+    
+        output += f"## Virtual Services ({len(virtual_services)} configured)\n\n"
+    
+    # Format each virtual service
+        for idx, vs in enumerate(virtual_services, 1):
+            vs_name = vs.get("virtualServerName", "Unknown")
+            vip = vs.get("vipIp", "N/A")
+            port = vs.get("virtualServerport", "N/A")
+            protocol = vs.get("protocol", "N/A")
+            status = vs.get("status", "Unknown").upper()
+            algorithm = vs.get("poolAlgorithm", "N/A")
+            monitors = vs.get("monitor", [])
+            pool_path = vs.get("virtualServerPath", "N/A")
+            persistence_type = vs.get("persistenceType") or "None"
+            persistence_value = vs.get("persistenceValue", "")
+            pool_members = vs.get("poolMembers", [])
+            cert_name = vs.get("certificateName")
+        
+        # Status emoji
+            status_map = {
+            "UP": "✅",
+            "DOWN": "⚠️",
+            "DEGRADED": "🟡",
+            "UNKNOWN": "❓"}
+            status_emoji = status_map.get(status, "❓")
+        
+        # Format monitors
+            if isinstance(monitors, list) and monitors:
+                monitor_str = ", ".join(monitors)
+            elif monitors:
+                monitor_str = str(monitors)
+            else:
+                monitor_str = "N/A"
+        
+        # Format persistence
+            if persistence_type != "None" and persistence_value:
+                persistence_str = f"{persistence_type} ({persistence_value})"
+            else:
+                persistence_str = persistence_type
+        
+        # Build virtual service entry
+            output += f"### {idx}. {vs_name}\n\n"
+            output += "| Property | Value |\n"
+            output += "|----------|-------|\n"
+            output += f"| **VIP Address** | {vip}:{port} |\n"
+            output += f"| **Protocol** | {protocol} |\n"
+            output += f"| **Status** | {status_emoji} {status} |\n"
+            output += f"| **Load Balancing** | {algorithm} |\n"
+            output += f"| **Health Monitor** | {monitor_str} |\n"
+            output += f"| **Persistence** | {persistence_str} |\n"
+        
+            if pool_members:
+                member_count = len(pool_members) if isinstance(pool_members, list) else "Available"
+                output += f"| **Pool Members** | {member_count} |\n"
+        
+            if cert_name:
+                output += f"| **SSL Certificate** | {cert_name} |\n"
+        
+            output += f"| **Pool Path** | `{pool_path}` |\n\n"
+    
+    # Add summary
+        output += "---\n\n## Configuration Summary\n\n"
+    
+        active_count = sum(1 for vs in virtual_services if vs.get("status", "").upper() == "UP")
+        down_count = sum(1 for vs in virtual_services if vs.get("status", "").upper() == "DOWN")
+    
+        protocols = {}
+        for vs in virtual_services:
+            proto = vs.get("protocol", "Unknown")
+            protocols[proto] = protocols.get(proto, 0) + 1
+    
+        output += f"- **Total Services:** {len(virtual_services)}\n"
+        output += f"- **Active (UP):** {active_count}\n"
+        output += f"- **Down:** {down_count}\n"
+        output += f"- **Protocols:** {', '.join(f'{k}({v})' for k, v in protocols.items())}\n"
+    
+        return output
+
+        
+    def _manual_format_lb_details(self,lb: Dict,virtual_services: List,lbci: str,lb_name: str) -> str:
+        """Manual fallback formatting if LLM fails."""
+        status_emoji = "✅" if lb.get("status", "").upper() == "ACTIVE" else "⚠️"
+        output = f"⚖️ **{lb_name}** {status_emoji}\n\n"
         output += f"**LBCI:** `{lbci}`\n"
-        output += f"**Status:** {lb.get('status', 'Unknown')}\n\n"
+        output += f"**Status:** {lb.get('status', 'Unknown')}\n"
+        output += f"**Location:** {lb.get('location', 'N/A')}\n\n"
         if virtual_services:
             output += f"### Virtual Services ({len(virtual_services)})\n\n"
             for vs in virtual_services:
@@ -563,247 +761,330 @@ class LoadBalancerAgent(BaseResourceAgent):
                 protocol = vs.get("protocol", "N/A")
                 status = vs.get("status", "Unknown")
                 algo = vs.get("poolAlgorithm", "N/A")
-                monitor = vs.get("monitor", [])
+                monitors = vs.get("monitor", [])
+                pool_path = vs.get("virtualServerPath", "N/A")
                 status_emoji = "✅" if status.upper() == "UP" else "⚠️"
                 output += f"🌐 **{vs_name}**\n"
                 output += f"- VIP: {vip}:{port}\n"
                 output += f"- Protocol: {protocol}\n"
                 output += f"- Status: {status_emoji} {status}\n"
                 output += f"- Load Balancing: {algo}\n"
-                if monitor:
-                    monitors_str = ", ".join(monitor) if isinstance(monitor, list) else monitor
-                    output += f"- Health Monitor: {monitors_str}\n"
-                pool_path = vs.get("virtualServerPath")
-                if pool_path:
+                if monitors:
+                    monitor_str = ", ".join(monitors) if isinstance(monitors, list) else monitors
+                    output += f"- Health Monitor: {monitor_str}\n"
+                if pool_path and pool_path != "N/A":
                     output += f"- Pool Path: `{pool_path}`\n"
                 output += "\n"
         else:
-            output += f"\n### Virtual Services\n\n"
-            if errors.get("virtual_services"):
-                output += f"⚠️ Failed to retrieve: {errors.get('virtual_services')}\n"
-            else:
-                output += f"ℹ️ No virtual services configured\n"
+            output += "### Virtual Services\n\nℹ️ No virtual services configured\n"
         return output
+
     def _analyze_query_intent(self, user_query: str) -> Dict[str, Any]:
         """
-        Query intent analysis with better LB name detection.
-        Improvements:
-        - More accurate detail intent detection
-        - Handles both "list details" and specific LB queries
-        """
+        ENHANCED query analysis - detects LB names from production patterns.
+    """
         query_lower = user_query.lower().strip()
-        original_query = user_query.strip()  
+        original_query = user_query.strip()
     
-    # Initialize result
         result = {
         "is_specific_lb": False,
         "lb_identifier": None,
         "is_lbci_query": False,
-        "wants_details": False,
-        "wants_virtual_services": False,
+        "wants_details": True, 
+        "wants_virtual_services": True, 
         "location_filter": None,
         "status_filter": None,
-        "feature_filters": []
-        }
-
+        "feature_filters": []}
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 1: LBCI Detection (5-6 digit numbers)
+    # ═══════════════════════════════════════════════════════════
         lbci_patterns = [
-    r'\blbci[:\s=]+(\d{5,6})\b',             
-    r'\blb[:\s=]+(\d{5,6})\b',               
-    r'(?:load\s*balancer|lb)\s+(\d{5,6})\b',  
-    r'^\s*(\d{5,6})\s*$',                    
-    r'\b(\d{5,6})\b(?=\s*(?:details|info|virtual\s*service))', 
-]
+        r'\blbci[:\s=]+(\d{5,6})\b',                            
+        r'\blb[:\s=]+(\d{5,6})\b',                              
+        r'(?:load\s*balancer|lb)\s+(\d{5,6})\b',                 
+        r'^\s*(\d{5,6})\s*$',                                   
+        r'\b(\d{5,6})\b(?=\s*(?:details?|info|virtual\s*service))', 
+        r'\b(\d{5,6})\b'                                       ]
+    
         for pattern in lbci_patterns:
             match = re.search(pattern, query_lower)
             if match:
                 lbci = match.group(1)
-                result["is_specific_lb"] = True
-                result["is_lbci_query"] = True
-                result["lb_identifier"] = lbci  
-                result["wants_details"] = True  
-                result["wants_virtual_services"] = True  
-                logger.info(f"🎯 LBCI QUERY DETECTED: {lbci}")
+                result.update({
+                "is_specific_lb": True,
+                "is_lbci_query": True,
+                "lb_identifier": lbci,
+                "wants_details": True,       
+                "wants_virtual_services": True 
+                })
+                logger.info(f"🎯 DETECTED LBCI: {lbci}")
                 return result
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 1: Virtual services intent (independent signal)
-    # ═════════════════════════════════════════════════════════════════════
+    
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 2: Check for GENERAL query keywords (before specific LB detection)
+    # ═══════════════════════════════════════════════════════════
+        general_keywords = [
+        "all load balancers", "all lbs",
+        "list load balancers", "list lbs",
+        "show load balancers", "show lbs",
+        "show me load balancers", "show me lbs",
+        "how many load balancers", "how many lbs",
+        "count load balancers", "count lbs"]
+        is_general_query = any(keyword in query_lower for keyword in general_keywords)
+        if is_general_query:
+            logger.info(f"🌍 Detected GENERAL query: {user_query}")
+    
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 3: Production LB Name Patterns (only if not general query)
+    # ═══════════════════════════════════════════════════════════
+        if not is_general_query:
+        # Pattern A: EG_* 
+            match = re.search(r'\b(EG_[A-Za-z0-9_]+)\b', original_query)
+            if match:
+                lb_name = match.group(1)
+                result.update({
+                "is_specific_lb": True,
+                "lb_identifier": lb_name,
+                "wants_details": True,
+                "wants_virtual_services": True
+            })
+                logger.info(f"🎯 DETECTED LB NAME (EG_): {lb_name}")
+                return result
+        
+        # Pattern B: LB_* 
+            match = re.search(r'\b(LB_[A-Za-z0-9_]+)\b', original_query)
+            if match:
+                lb_name = match.group(1)
+                result.update({
+                "is_specific_lb": True,
+                "lb_identifier": lb_name,
+                "wants_details": True,
+                "wants_virtual_services": True
+            })
+                logger.info(f"🎯 DETECTED LB NAME (LB_): {lb_name}")
+                return result
+        # Pattern C: *_LB_*
+            match = re.search(r'\b([A-Za-z0-9]+_LB_[A-Za-z0-9_]+)\b', original_query)
+            if match:
+                lb_name = match.group(1)
+            # Validate it's not a false positive
+                if len(lb_name.split("_")) >= 3:
+                    result.update({
+                    "is_specific_lb": True,
+                    "lb_identifier": lb_name,
+                    "wants_details": True,
+                    "wants_virtual_services": True
+                    })
+                    logger.info(f"🎯 DETECTED LB NAME (_LB_): {lb_name}")
+                    return result
+        # Pattern D: "details/show/info/get about X" where X has underscores
+            match = re.search(
+            r'(?:details?|show|info(?:rmation)?|get|describe|list)\s+(?:about|for|on|of|the)?\s*([A-Z][A-Za-z0-9_\-]+)',
+            original_query)
+            if match:
+                potential_name = match.group(1)
+            # Must have underscore to be LB name (avoid matching single words)
+                if '_' in potential_name and len(potential_name.split("_")) >= 2:
+                    result.update({
+                    "is_specific_lb": True,
+                    "lb_identifier": potential_name,
+                    "wants_details": True,
+                    "wants_virtual_services": True})
+                    logger.info(f"🎯 DETECTED LB NAME (details pattern): {potential_name}")
+                    return result
+        # Pattern E: Standalone LB name at start of query (e.g., "EG_Tata_Com_167")
+            match = re.search(r'^\s*([A-Z][A-Za-z0-9_\-]+_LB_[A-Z0-9_]+)', original_query)
+            if match:
+                lb_name = match.group(1)
+                result.update({
+                "is_specific_lb": True,
+                "lb_identifier": lb_name,
+                "wants_details": True,
+                "wants_virtual_services": True
+            })
+                logger.info(f"🎯 DETECTED LB NAME (standalone): {lb_name}")
+                return result
+        # Pattern F: "load balancer named/called X"
+            match = re.search(
+            r'(?:load balancer|lb)s?\s+(?:named|called)\s+["\']?([a-zA-Z0-9_\-]+)',
+            query_lower)
+            if match:
+                lb_name = match.group(1)
+            # Find in original query to preserve case
+                original_match = re.search(
+                r'(?:load balancer|lb)s?\s+(?:named|called)\s+["\']?([a-zA-Z0-9_\-]+)',original_query,
+                re.IGNORECASE)
+                if original_match:
+                    lb_name = original_match.group(1)
+                    if '_' in lb_name:
+                        result.update({
+                        "is_specific_lb": True,
+                        "lb_identifier": lb_name,
+                        "wants_details": True,
+                        "wants_virtual_services": True
+                    })
+                        logger.info(f"🎯 DETECTED LB NAME (named/called pattern): {lb_name}")
+                        return result
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 4: Detail & Virtual Services Intent Detection
+    # ═══════════════════════════════════════════════════════════
         vs_keywords = [
         "virtual service", "virtual services", "vip", "vips",
         "listener", "listeners", "frontend", "front end"
     ]
         result["wants_virtual_services"] = any(kw in query_lower for kw in vs_keywords)
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 2: GENERAL vs SPECIFIC query detection (GENERAL takes precedence)
-    # ═════════════════════════════════════════════════════════════════════
-        general_keywords = [
-        "all load balancers", "all lbs",
-        "list load balancers", "list lbs",
-        "show load balancers", "show lbs",
-        "show me load balancers",
-        "how many load balancers", "how many lbs",
-        "count load balancers", "count lbs"
-        ]
-        is_general_query = any(keyword in query_lower for keyword in general_keywords)
-        if is_general_query:
-            logger.info(f"🌍 Detected GENERAL query: {user_query}")
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 3: SPECIFIC load balancer detection (ENHANCED PATTERNS)
-    # ═════════════════════════════════════════════════════════════════════
-        if not is_general_query:
-            specific_patterns = [
-            # Pattern 1: Exact LB name patterns (case-sensitive, covers Tata LB naming)
-            r'\b((?:EG_|LB_)?[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*_LB_[A-Z0-9_]+)\b',
-            # Pattern 2: "load balancer named X" or "lb called X"
-            r'(?:load balancer|lb)s?\s+(?:named|called)\s+["\']?([a-zA-Z0-9_\-]+)',
-            # Pattern 3: "show/get/describe/list/details (for/of/about) X"
-            r'(?:show|get|describe|list|details?)\s+(?:for|of|about|the)?\s*(?:load balancer|lb)?\s*["\']?([A-Z][A-Za-z0-9_\-]+)',
-            # Pattern 4: "X details" or "X configuration"
-            r'\b([A-Z][A-Za-z0-9_\-]+_LB_[A-Z0-9_]+)\s+(?:details?|info|config)',
-            # Pattern 5: Standalone LB name at start of query
-            r'^\s*([A-Z][A-Za-z0-9_\-]+_LB_[A-Z0-9_]+)',
-            # Pattern 6: "details/info on/about X"
-            r'(?:details?|info(?:rmation)?|configuration|config)\s+(?:on|about|for)\s+["\']?([a-zA-Z0-9_\-]+)'
-            ]
-        
-            for pattern in specific_patterns:
-                match = re.search(pattern, original_query, re.IGNORECASE if "(?:" in pattern else 0)
-                if match:
-                    extracted_name = match.group(1)
-                    if "_LB_" in extracted_name or len(extracted_name.split("_")) >= 3:
-                        result["is_specific_lb"] = True
-                        result["lb_identifier"] = extracted_name
-                        logger.info(f"🎯 Detected SPECIFIC LB: '{result['lb_identifier']}' (pattern match)")
-                        break
-    
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 4: Detail intent detection (ENHANCED - context-aware)
-    # ═════════════════════════════════════════════════════════════════════
+    # Detail intent detection (context-aware)
         strong_detail_keywords = [
         "details", "detail", "configuration", "config", "information about",
         "tell me about", "show me about", "describe", "explain",
-        "full details", "complete details", "more information"
-        ]
+        "full details", "complete details", "more information",
+        "complete configuration"]
         weak_detail_keywords = [
-        "about", "more", "get", "show"
-        ]
+        "about", "more", "get", "show"]
         has_strong_signal = any(kw in query_lower for kw in strong_detail_keywords)
         has_weak_signal = any(kw in query_lower for kw in weak_detail_keywords)
-
-        result["wants_details"] = has_strong_signal or (has_weak_signal and result["is_specific_lb"])
-    
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 5: Location filter extraction (ENHANCED - handles lowercase)
-    # ═════════════════════════════════════════════════════════════════════
+    # Set wants_details based on context
+        if result["is_specific_lb"]:
+        # For specific LB queries, default to True if any signal exists
+            result["wants_details"] = has_strong_signal or has_weak_signal
+        else:
+        # For general queries, only set True for strong signals
+            result["wants_details"] = has_strong_signal
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 5: Location Filter Extraction
+    # ═══════════════════════════════════════════════════════════
+        location_map = {
+        "mumbai": "Mumbai", "mum": "Mumbai", "bom": "Mumbai", "bombay": "Mumbai", "bkc": "Mumbai",
+        "delhi": "Delhi", "del": "Delhi", "ncr": "Delhi", "new delhi": "Delhi",
+        "chennai": "Chennai", "che": "Chennai", "maa": "Chennai", "madras": "Chennai", "amb": "Chennai",
+        "bangalore": "Bengaluru", "bengaluru": "Bengaluru", "blr": "Bengaluru",
+        "hyderabad": "Hyderabad", "hyd": "Hyderabad",
+        "pune": "Pune", "pun": "Pune",
+        "kolkata": "Kolkata", "kol": "Kolkata", "calcutta": "Kolkata",
+        "ahmedabad": "Ahmedabad", "amd": "Ahmedabad"}
+    # Pattern-based location extraction
         location_patterns = [
-        # Pattern 1: "in/at/from Location" (case-insensitive)
-        r'\b(?:in|at|from|for)\s+([a-zA-Z]+(?:\s*-?\s*[a-zA-Z]+)?)\b',
-        # Pattern 2: "datacenter/dc/location Location"
-        r'\b(?:datacenter|dc|location)\s+([a-zA-Z]+(?:\s*-?\s*[a-zA-Z]+)?)\b',
-        # Pattern 3: Direct city names
-        r'\b(mumbai|delhi|chennai|bengaluru|bangalore|hyderabad|pune|kolkata|ahmedabad)\b'
-        ]
-    
+        r'\b(?:in|at|from|for)\s+([a-z]+(?:\s*-?\s*[a-z]+)?)\b',  
+        r'\b(?:datacenter|dc|location)\s+([a-z]+(?:\s*-?\s*[a-z]+)?)\b',  ]
+    # Stopwords to filter out
+        stopwords = {
+        "the", "this", "that", "these", "those", "with", "from",
+        "what", "where", "when", "which", "who", "how", "all",
+        "details", "list", "show", "get"}
         for pattern in location_patterns:
-            match = re.search(pattern, query_lower, re.IGNORECASE)
+            match = re.search(pattern, query_lower)
             if match:
                 location_raw = match.group(1).strip()
-            
-            # Filter out common English stopwords
-                stopwords = ["the", "this", "that", "these", "those", "with", "from", 
-                        "what", "where", "when", "which", "who", "how"]
-            
-                if location_raw.lower() not in stopwords:
-                    location_normalized = location_raw.lower()
-                    if location_normalized in ["bangalore", "bengaluru", "blr"]:
-                        result["location_filter"] = "Bengaluru"
-                    elif location_normalized in ["mumbai", "bombay", "mum", "bom"]:
-                        result["location_filter"] = "Mumbai"
-                    elif location_normalized in ["delhi", "new delhi", "ncr", "del"]:
-                        result["location_filter"] = "Delhi"
-                    elif location_normalized in ["chennai", "madras", "che", "maa"]:
-                        result["location_filter"] = "Chennai"
-                    elif location_normalized in ["hyderabad", "hyd"]:
-                        result["location_filter"] = "Hyderabad"
-                    elif location_normalized in ["pune", "pun"]:
-                        result["location_filter"] = "Pune"
-                    else:
-                        result["location_filter"] = location_raw.title()
-                
-                    logger.info(f"📍 Detected location filter: '{result['location_filter']}'")
+                location_clean = location_raw.replace(" ", "").replace("-", "")
+            # Skip stopwords
+                if location_raw not in stopwords:
+                # Try to match in location map
+                    if location_clean in location_map:
+                        result["location_filter"] = location_map[location_clean]
+                        logger.info(f"📍 DETECTED LOCATION (pattern): {result['location_filter']}")
+                        break
+                    elif location_raw in location_map:
+                        result["location_filter"] = location_map[location_raw]
+                        logger.info(f"📍 DETECTED LOCATION (pattern): {result['location_filter']}")
+                        break
+    # Fallback: Direct city name matching
+        if not result["location_filter"]:
+            for keyword, location in location_map.items():
+                if keyword in query_lower:
+                    result["location_filter"] = location
+                    logger.info(f"📍 DETECTED LOCATION (direct): {location}")
                     break
-    
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 6: Status filter detection
-    # ═════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 6: Status Filter Detection
+    # ═══════════════════════════════════════════════════════════
         if "active" in query_lower and "inactive" not in query_lower:
             result["status_filter"] = "active"
+            logger.info(f"🔍 STATUS FILTER: active")
         elif "inactive" in query_lower:
             result["status_filter"] = "inactive"
+            logger.info(f"🔍 STATUS FILTER: inactive")
+        elif "down" in query_lower:
+            result["status_filter"] = "down"
+            logger.info(f"🔍 STATUS FILTER: down")
         elif "degraded" in query_lower:
             result["status_filter"] = "degraded"
+            logger.info(f"🔍 STATUS FILTER: degraded")
         elif "healthy" in query_lower:
             result["status_filter"] = "healthy"
+            logger.info(f"🔍 STATUS FILTER: healthy")
         elif "unhealthy" in query_lower:
             result["status_filter"] = "unhealthy"
-    
-    # ═════════════════════════════════════════════════════════════════════
-    # STEP 7: Feature filters detection (multi-value)
-    # ═════════════════════════════════════════════════════════════════════
+            logger.info(f"🔍 STATUS FILTER: unhealthy")
+    # ═══════════════════════════════════════════════════════════
+    # PRIORITY 7: Feature Filters Detection
+    # ═══════════════════════════════════════════════════════════
         if any(kw in query_lower for kw in ["ssl", "secure", "encrypted"]):
             result["feature_filters"].append("ssl")
+            logger.info(f"🔍 FEATURE FILTER: ssl")
         if "https" in query_lower:
-            result["feature_filters"].append("https")
+            if "ssl" not in result["feature_filters"]:
+                result["feature_filters"].append("https")
+            logger.info(f"🔍 FEATURE FILTER: https")
         elif "http" in query_lower and "https" not in query_lower:
             result["feature_filters"].append("http")
+            logger.info(f"🔍 FEATURE FILTER: http")
         if "tcp" in query_lower:
             result["feature_filters"].append("tcp")
+            logger.info(f"🔍 FEATURE FILTER: tcp")
         if "udp" in query_lower:
             result["feature_filters"].append("udp")
-        logger.debug(f"🔍 Query analysis result: {result}")
+            logger.info(f"🔍 FEATURE FILTER: udp")
+    # ═══════════════════════════════════════════════════════════
+    # Final logging
+    # ═══════════════════════════════════════════════════════════
+        logger.debug(f"🔍 Query analysis complete: {result}")
         return result
-    
-    def _find_matching_lb(
-        self,
-        lb_identifier: str,
-        all_lbs: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
+    def _find_matching_lb(self, lb_identifier: str, all_lbs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
         Find load balancer matching the identifier.
-        
-        Checks:
-        - name (exact and partial match)
-        - lbci/circuitId (exact match)
-        
-        Returns first match or None.
+        ENHANCED fuzzy matching for production names.
         """
         identifier_lower = lb_identifier.lower()
-        # Try exact name match first
+        identifier_clean = identifier_lower.replace("_", "").replace("-", "")
+        # Try exact match first (case-insensitive)
         for lb in all_lbs:
-            lb_name = lb.get("name", "").lower()
+            lb_name = (lb.get("name") or "").lower()
             if lb_name == identifier_lower:
-                logger.info(f"✅ Exact name match: {lb.get('name')}")
+                logger.info(f"✅ EXACT MATCH: {lb.get('name')}")
                 return lb
         # Try exact LBCI match
         for lb in all_lbs:
-            lbci = (lb.get("lbci") or lb.get("circuitId") or lb.get("LBCI") or "").lower()
+            lbci = str(lb.get("lbci") or lb.get("circuitId") or "").lower()
             if lbci == identifier_lower:
-                logger.info(f"✅ Exact LBCI match: {lbci}")
+                logger.info(f"✅ EXACT LBCI MATCH: {lbci}")
                 return lb
-        # Try partial name match
+        # Try partial match (removing underscores/hyphens)
         for lb in all_lbs:
-            lb_name = lb.get("name", "").lower()
-            if identifier_lower in lb_name or lb_name in identifier_lower:
-                logger.info(f"✅ Partial name match: {lb.get('name')}")
+            lb_name = (lb.get("name") or "").lower()
+            lb_name_clean = lb_name.replace("_", "").replace("-", "")
+            
+            if identifier_clean in lb_name_clean or lb_name_clean in identifier_clean:
+                logger.info(f"✅ PARTIAL MATCH: {lb.get('name')}")
                 return lb
-        logger.warning(f"❌ No match found for: {lb_identifier}")
+        # Try fuzzy matching (words in any order)
+        identifier_words = set(re.findall(r'\w+', identifier_lower))
+        best_match = None
+        best_score = 0
+        for lb in all_lbs:
+            lb_name = (lb.get("name") or "").lower()
+            lb_words = set(re.findall(r'\w+', lb_name))
+            common_words = identifier_words & lb_words
+            score = len(common_words) / max(len(identifier_words), len(lb_words))
+            if score > best_score and score > 0.5: 
+                best_score = score
+                best_match = lb
+        if best_match:
+            logger.info(f"✅ FUZZY MATCH ({best_score:.0%}): {best_match.get('name')}")
+            return best_match
+        logger.warning(f"❌ NO MATCH for: {lb_identifier}")
         return None
     
-    async def _get_ipc_engagement_id(
-    self,
-    user_id: str,
-    user_roles=None,
-    force_refresh: bool = False
-) -> Optional[int]:
+    async def _get_ipc_engagement_id(self,user_id: str,user_roles=None,force_refresh: bool = False) -> Optional[int]:
         """Get IPC engagement ID (helper method)."""
 
     # 🛡️ HARDEN against OpenWebUI / Gateway garbage
@@ -820,11 +1101,7 @@ class LoadBalancerAgent(BaseResourceAgent):
         force_refresh=force_refresh)
         return ipc_engagement_id
 
-    async def _get_load_balancer_details(
-        self,
-        params: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def _get_load_balancer_details(self,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
         """Get detailed configuration for a specific load balancer."""
         try:
             lbci = params.get("lbci")

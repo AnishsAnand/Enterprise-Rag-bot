@@ -8,20 +8,14 @@ from langchain.tools import Tool
 import logging
 import json
 import re
-
 from app.agents.base_agent import BaseAgent
 from app.agents.state.conversation_state import conversation_state_manager
 from app.services.api_executor_service import api_executor_service
 from app.services.ai_service import ai_service
-
-# Import new modular handlers (optional - for future refactoring)
-# from app.agents.handlers.cluster_creation_handler import ClusterCreationHandler
-# from app.agents.tools.parameter_extraction import ParameterExtractor
 from app.agents.handlers.cluster_creation_handler import ClusterCreationHandler
 from app.agents.tools.parameter_extraction import ParameterExtractor
 
 logger = logging.getLogger(__name__)
-
 
 class ValidationAgent(BaseAgent):
     """
@@ -38,16 +32,12 @@ class ValidationAgent(BaseAgent):
             ),
             temperature=0.2
         )
-
         # Initialize handlers and tools
         self.cluster_creation_handler = ClusterCreationHandler()
         self.param_extractor = ParameterExtractor()
-
-        # Setup agent
         self.setup_agent()
 
     def get_system_prompt(self) -> str:
-        """Return system prompt for validation agent."""
         return """You are the Validation Agent, responsible for ensuring all parameters are correct and complete.
 
 **Your responsibilities:**
@@ -116,7 +106,6 @@ Please use only lowercase letters, numbers, and hyphens (e.g., 'my-cluster-01').
 Remember: You have tools to fetch real-time data and match user input intelligently. Use them!"""
 
     def get_tools(self) -> List[Tool]:
-        """Return tools for validation agent."""
         return [
             Tool(
                 name="validate_parameters",
@@ -165,10 +154,7 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                 description=(
                     "Match user's natural language selection to available options. "
                     "For example, match 'delhi dc' or 'bengaluru' to actual endpoint names. "
-                    "Input: JSON with user_text and available_options list"
-                )
-            )
-        ]
+                    "Input: JSON with user_text and available_options list"))]
 
     def _validate_parameters(self, input_json: str) -> str:
         """Validate parameters against schema."""
@@ -179,14 +165,11 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             params = data.get("params", {})
 
             validation_result = api_executor_service.validate_parameters(
-                resource_type, operation, params
-            )
-
+                resource_type, operation, params)
             return json.dumps(validation_result, indent=2)
-
         except Exception as e:
             return json.dumps({"valid": False, "errors": [str(e)]})
-
+        
     def _get_missing_params(self, session_id: str) -> str:
         """Get missing parameters from conversation state."""
         try:
@@ -199,7 +182,6 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                 "collected_params": list(state.collected_params.keys()),
                 "invalid_params": state.invalid_params
             }, indent=2)
-
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -209,15 +191,11 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             data = json.loads(input_json)
             user_text = data.get("user_text", "")
             expected_params = data.get("expected_params", [])
-
             # Simple extraction logic (can be enhanced with NER/LLM)
             extracted = {}
-
             # Try to match expected parameters in user text
             for param in expected_params:
                 param_lower = param.lower()
-
-                # Look for patterns like "name: value" or "name is value"
                 import re
                 pattern = rf'{param_lower}[:\s]+([^\s,]+)'
                 match = re.search(pattern, user_text.lower())
@@ -225,43 +203,29 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                 if match:
                     extracted[param] = match.group(1)
                 elif len(expected_params) == 1:
-                    # If only one parameter expected, assume entire input is the value
                     extracted[param] = user_text.strip()
-
             return json.dumps(extracted, indent=2)
-
         except Exception as e:
             return json.dumps({"error": str(e)})
-
     def _update_conversation_params(self, input_json: str) -> str:
         """Update conversation state with parameters."""
         try:
             data = json.loads(input_json)
             session_id = data.get("session_id")
             params = data.get("params", {})
-
             state = conversation_state_manager.get_session(session_id)
             if not state:
                 return json.dumps({"success": False, "error": "Session not found"})
-
-            # Add parameters to state
             state.add_parameters(params)
-
-            # Persist state after update
             conversation_state_manager.update_session(state)
-
-            # Check if ready to execute
             ready = state.is_ready_to_execute()
-
             return json.dumps({
                 "success": True,
                 "ready_to_execute": ready,
                 "missing_params": list(state.missing_params)
             }, indent=2)
-
         except Exception as e:
             return json.dumps({"success": False, "error": str(e)})
-
     async def _fetch_available_options(self, option_type: str) -> str:
         """Fetch available options dynamically from API."""
         try:
@@ -300,11 +264,9 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                     })
 
             elif option_type_lower in ["k8s_versions", "kubernetes_versions", "versions"]:
-                # Fetch available Kubernetes versions (you can add API call here)
-                # For now, return common versions
+                # Fetch available Kubernetes versions
                 versions = ["v1.27.16", "v1.28.15", "v1.29.12", "v1.30.14"]
                 formatted_options = [{"id": v, "name": v, "description": f"Kubernetes {v}"} for v in versions]
-
                 return json.dumps({
                     "option_type": "k8s_versions",
                     "count": len(formatted_options),
@@ -315,13 +277,11 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                         "\n\nWhich version would you like?"
                     )
                 }, indent=2)
-
             else:
                 return json.dumps({
                     "error": f"Unknown option type: {option_type}",
                     "supported_types": ["endpoints", "k8s_versions"]
                 })
-
         except Exception as e:
             logger.error(f"Error fetching options: {e}")
             return json.dumps({"error": str(e)})
@@ -336,7 +296,6 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             if not user_query or not available_options:
                 return json.dumps({"extracted": False, "error": "Missing user_query or available_options"})
 
-            # Build the prompt for LLM
             options_str = "\n".join([f"- {opt['name']}" for opt in available_options])
 
             prompt = f"""You are a location extraction specialist. Extract the data center/endpoint name(s) from the user's query.
@@ -404,7 +363,6 @@ Respond with ONLY ONE of these formats:
                 return json.dumps({"matched": False, "error": "Missing user_text or available_options"})
 
             # === LLM-BASED MATCHING (NO PRIMITIVE PATTERNS!) ===
-            # Build the list of available options for LLM
             options_list = "\n".join([f"  {i+1}. {opt['name']} (ID: {opt['id']})" for i, opt in enumerate(available_options)])
 
             matching_prompt = f"""Match the user's response to the correct data center(s) from the API response.
@@ -490,49 +448,27 @@ If NO location is mentioned in user's response:
             logger.error(f"Error matching selection: {e}")
             return json.dumps({"matched": False, "error": str(e)})
     
-    async def _handle_cluster_creation(
-        self,
-        input_text: str,
-        state: Any
-    ) -> Dict[str, Any]:
+    async def _handle_cluster_creation(self,input_text: str,state: Any) -> Dict[str, Any]:
         """
         Delegate cluster creation workflow to specialized handler.
-        
         Args:
             input_text: User's current input
             state: Conversation state
-            
         Returns:
             Dict with next prompt or ready_to_execute flag
         """
         logger.info(f"🎯 Delegating to ClusterCreationHandler")
         return await self.cluster_creation_handler.handle(input_text, state)
 
-    async def _extract_location_from_query(
-        self,
-        user_query: str,
-        available_endpoints: List[Dict[str, Any]]
-    ) -> Optional[str]:
+    async def _extract_location_from_query(self,user_query: str,available_endpoints: List[Dict[str, Any]]) -> Optional[str]:
         """
         Delegate to ParameterExtractor tool.
         """
         return await self.param_extractor.extract_location_from_query(user_query, available_endpoints)
     
-    async def _match_user_selection(
-        self,
-        input_text: str,
-        available_options: List[Dict[str, Any]]
-    ) -> str:
-        """
-        Delegate to ParameterExtractor tool.
-        """
+    async def _match_user_selection(self,input_text: str,available_options: List[Dict[str, Any]]) -> str:
         return await self.param_extractor.match_user_selection(input_text, available_options)
-    
-    def _fallback_pattern_match(
-        self,
-        user_text: str,
-        available_options: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _fallback_pattern_match(self,user_text: str,available_options: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Fallback pattern matching when LLM fails.
         Uses simple string matching for common cases.
@@ -549,17 +485,12 @@ If NO location is mentioned in user's response:
                 "matched": True,
                 "all": True,
                 "matched_ids": matched_ids,
-                "matched_names": matched_names
-            }
-        
+                "matched_names": matched_names}
         # Split by common delimiters
         parts = re.split(r'[,;]|\band\b|\bor\b', user_lower)
         parts = [p.strip() for p in parts if p.strip()]
-        
         matched_ids = []
         matched_names = []
-        
-        # Common abbreviations and aliases
         aliases = {
             "blr": ["bengaluru", "bangalore"],
             "del": ["delhi"],
@@ -575,12 +506,10 @@ If NO location is mentioned in user's response:
             part_clean = re.sub(r'[^\w\s-]', '', part).strip()
             if not part_clean:
                 continue
-            
             # Try direct match first
             for opt in available_options:
                 opt_name = (opt.get("name") or "").lower()
                 opt_id = opt.get("id")
-                
                 # Exact or partial match
                 if (part_clean in opt_name or opt_name in part_clean or 
                     any(alias in opt_name for key, values in aliases.items() if part_clean.startswith(key) for alias in values)):
@@ -589,92 +518,68 @@ If NO location is mentioned in user's response:
                         matched_names.append(opt.get("name"))
                         logger.info(f"✅ Pattern matched '{part}' to '{opt.get('name')}'")
                         break
-        
         if matched_ids:
             return {
                 "matched": True,
                 "matched_ids": matched_ids,
                 "matched_names": matched_names
             }
-        
         logger.info(f"❌ No pattern match found for '{user_text}'")
         return {"matched": False}
 
-    async def execute(
-        self,
-        input_text: str,
-        context: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
+    async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Execute validation and parameter collection with INTELLIGENT tools.
-
         Args:
             input_text: User's response
             context: Context including session_id and conversation_state
-
         Returns:
             Dict with validation result
         """
         try:
             logger.info(f"✅ ValidationAgent processing: {input_text[:100]}...")
-
             # Get conversation state
             session_id = context.get("session_id") if context else None
             state = conversation_state_manager.get_session(session_id) if session_id else None
-
             if not state:
                 return {
                     "agent_name": self.agent_name,
                     "success": False,
                     "error": "No conversation state found",
-                    "output": "I couldn't find our conversation. Let's start over."
-                }
-
-            # STEP 3: USE INTELLIGENT TOOLS for parameter collection
-            
+                    "output": "I couldn't find our conversation. Let's start over."}
+            # USE INTELLIGENT TOOLS for parameter collection
             # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
             # This must be checked BEFORE missing_params check because cluster creation
-            # has its own internal workflow that doesn't rely on schema-defined required params
             if state.operation == "create" and state.resource_type == "k8s_cluster":
                 logger.info("🎯 Routing to customer cluster creation workflow")
                 return await self._handle_cluster_creation(input_text, state)
-            
             if state.missing_params:
-                # SPECIAL HANDLING FOR ENDPOINT LISTING (no user input needed - just fetch and display)
+                # SPECIAL HANDLING FOR ENDPOINT LISTING 
                 if state.operation == "list" and state.resource_type == "endpoint":
                     logger.info("🎯 Endpoint listing - fetching endpoints directly (no user selection needed)")
-                    
                     # For endpoint listing, we just need engagement_id which is fetched automatically
-                    # Mark engagement_id as collected (it will be fetched by API executor)
+                    # Mark engagement_id as collected 
                     state.add_parameter("engagement_id", "auto", is_valid=True)
-                    
                     # Persist state
                     conversation_state_manager.update_session(state)
-                    
                     return {
                         "agent_name": self.agent_name,
                         "success": True,
                         "output": "Fetching available endpoints...",
-                        "ready_to_execute": True
-                    }
-                
+                        "ready_to_execute": True }
                 # SPECIAL HANDLING FOR OTHER CREATE OPERATIONS
-                # For create, we need to collect params in order: name → endpoint → other params
                 elif state.operation == "create":
                     # Check what's missing and prioritize logical order
                     param_priority = ["clusterName", "name", "endpoint_id", "endpoints"]
-
                     # Find the first missing param in priority order
                     next_param_to_collect = None
                     for priority_param in param_priority:
                         if priority_param in state.missing_params:
                             next_param_to_collect = priority_param
                             break
-
                     # If user provided input, try to extract the parameter value using LLM
                     if input_text and next_param_to_collect and "endpoint" not in next_param_to_collect.lower():
                         logger.info(f"🤖 Using LLM to extract {next_param_to_collect} from: '{input_text}'")
-                        
                         # Use LLM to understand if user provided the value
                         extraction_prompt = f"""User was asked to provide '{next_param_to_collect}' for creating a Kubernetes cluster.
 User's response: "{input_text}"
@@ -691,45 +596,32 @@ User response: "I want to name it myCluster" → VALUE: myCluster
 User response: "something" → VALUE: something
 User response: "what should I name it?" → UNCLEAR: User is asking a question
 """
-                        
+                 
                         try:
                             llm_response = await ai_service._call_chat_with_retries(
                                 prompt=extraction_prompt,
                                 max_tokens=100,
-                                temperature=0.0
-                            )
-
+                                temperature=0.0)
                             result = llm_response.strip()
                             logger.info(f"🤖 LLM extraction result: '{result}'")
-                            
                             if result.startswith("VALUE:"):
                                 extracted_value = result.replace("VALUE:", "").strip()
                                 logger.info(f"✅ Extracted {next_param_to_collect} = '{extracted_value}'")
-                                
-                                # Add parameter to state
+
                                 state.add_parameter(next_param_to_collect, extracted_value, is_valid=True)
-                                
-                                # Persist state after parameter collection
                                 conversation_state_manager.update_session(state)
-                                
                                 # Continue to next missing param or endpoint collection
-                                # Don't return here, let it flow to endpoint collection or completion check
-                                
                         except Exception as e:
                             logger.error(f"Error in LLM extraction: {e}")
-                    
                     # If still missing the same param (LLM couldn't extract), ask again
                     if next_param_to_collect and next_param_to_collect in state.missing_params and "endpoint" not in next_param_to_collect.lower():
                         logger.info(f"🔍 CREATE workflow: Still need {next_param_to_collect}")
-
                         # Ask for the parameter conversationally
                         response = f"Great! Let's create a new Kubernetes cluster.\n\n"
-
                         if "name" in next_param_to_collect.lower():
                             response += "What would you like to name your cluster?"
                         else:
                             response += f"Please provide: {next_param_to_collect}"
-
                         return {
                             "agent_name": self.agent_name,
                             "success": True,
@@ -738,29 +630,22 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             "missing_params": list(state.missing_params),
                             "next_param": next_param_to_collect
                         }
-
                 # Check if we need endpoint/datacenter parameter
                 if "endpoints" in state.missing_params or "endpoint_id" in state.missing_params or "endpoint_ids" in state.missing_params:
                     logger.info("🔍 Collecting endpoint parameter using intelligent tools")
-
                     # Fetch available endpoints dynamically
                     endpoints_json = await self._fetch_available_options("endpoints")
                     endpoints_data = json.loads(endpoints_json)
-
                     if endpoints_data.get("options"):
                         available_options = endpoints_data["options"]
-
                         # ALWAYS use input_text for NEW requests (not cached state.user_query!)
                         # Only use state.user_query if this is a follow-up response to "Which endpoint?"
                         # We detect follow-up by checking if we already asked a question
                         is_follow_up = len(state.conversation_history) > 1 and any(
                             "which one would you like" in msg.get("content", "").lower()
-                            for msg in state.conversation_history if msg.get("role") == "assistant"
-                        )
-                        
+                            for msg in state.conversation_history if msg.get("role") == "assistant")
                         text_to_analyze = input_text if not is_follow_up else input_text
                         logger.info(f"🔍 Analyzing query: '{text_to_analyze}' for location extraction (is_follow_up: {is_follow_up})")
-
                         # USE LLM FOR INTELLIGENT EXTRACTION (not primitive pattern matching!)
                         try:
                             extraction_result_json = await self._extract_location_from_query_json(json.dumps({
@@ -771,25 +656,20 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         except Exception as e:
                             logger.warning(f"⚠️ Location extraction failed: {e}")
                             extraction_result = {}
-
                         if extraction_result.get("extracted"):
                             # LLM extracted a location!
                             extracted_location = extraction_result.get("location", "")
                             logger.info(f"🤖 LLM extracted location: '{extracted_location}'")
-                            
                             # SPECIAL CASE: If location is "all", immediately match all endpoints
                             if extracted_location.lower().strip() == "all":
                                 logger.info(f"🌍 User requested ALL data centers!")
                                 matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
                                 matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
-                                
                                 # Add to state
                                 state.add_parameter("endpoints", matched_ids, is_valid=True)
                                 state.add_parameter("endpoint_names", matched_names, is_valid=True)
-                                
                                 # Persist state after parameter collection
                                 conversation_state_manager.update_session(state)
-                                
                                 # Check if ready to execute now that we've collected endpoints
                                 if state.is_ready_to_execute():
                                     logger.info("✅ All parameters collected, ready to execute")
@@ -797,15 +677,11 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                         "agent_name": self.agent_name,
                                         "success": True,
                                         "output": f"Great! Fetching data from all {len(matched_ids)} data centers...",
-                                        "ready_to_execute": True
-                                    }
-                            
+                                        "ready_to_execute": True}
                             text_to_match = extracted_location
                         else:
-                            # No location in original query, use current input for matching
                             text_to_match = input_text
                             logger.info(f"🔍 No location in query, using current input: '{text_to_match}'")
-
                         # Try to match user input to available endpoints (LLM-based!)
                         try:
                             match_result_json = await self._match_user_selection_json(json.dumps({
@@ -816,25 +692,20 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         except Exception as e:
                             logger.warning(f"⚠️ LLM matching failed: {e}")
                             match_result = {}
-                        
                         # FALLBACK: If LLM failed, try simple pattern matching
                         if not match_result.get("matched"):
                             logger.info("🔄 LLM matching failed, trying fallback pattern matching...")
                             match_result = self._fallback_pattern_match(text_to_match, available_options)
-
                         if match_result.get("matched"):
                             # Successfully matched!
                             matched_ids = match_result.get("matched_ids", [])
                             matched_names = match_result.get("matched_names", [])
                             logger.info(f"✅ Matched '{input_text}' to {matched_names} (IDs: {matched_ids})")
-
                             # Add to state
                             state.add_parameter("endpoints", matched_ids, is_valid=True)
                             state.add_parameter("endpoint_names", matched_names, is_valid=True)
-                            
                             # Persist state after parameter collection
                             conversation_state_manager.update_session(state)
-                            
                             # Check if ready to execute now that we've collected endpoints
                             if state.is_ready_to_execute():
                                 logger.info("✅ All parameters collected, ready to execute")
@@ -842,30 +713,23 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                     "agent_name": self.agent_name,
                                     "success": True,
                                     "output": f"Great! Fetching clusters from {', '.join(matched_names)}...",
-                                    "ready_to_execute": True
-                                }
-                            
+                                    "ready_to_execute": True}
                             # If still missing params, continue to collect them
-                            # Fall through to the readiness check at the bottom
-
                         elif match_result.get("ambiguous"):
                             # Multiple matches - ask for clarification
                             clarification = match_result.get("clarification_needed", "")
-                            
                             # Set status to AWAITING_SELECTION - we need user to pick one
                             from app.agents.state.conversation_state import ConversationStatus
                             state.status = ConversationStatus.AWAITING_SELECTION
-                            
                             # Persist state so it's available for next request
                             conversation_state_manager.update_session(state)
-                            
+
                             return {
                                 "agent_name": self.agent_name,
                                 "success": True,
                                 "output": clarification,
                                 "ready_to_execute": False,
-                                "missing_params": list(state.missing_params)
-                            }
+                                "missing_params": list(state.missing_params)}
                         else:
                             # No match - show available options
                             prompt = endpoints_data.get("prompt_suggestion", "")
@@ -877,31 +741,24 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             from app.agents.state.conversation_state import ConversationStatus
                             state.status = ConversationStatus.AWAITING_SELECTION
                             logger.info(f"🔄 Set conversation status to AWAITING_SELECTION for session {state.session_id}")
-                            
                             # Persist state so it's available for next request
                             conversation_state_manager.update_session(state)
-
                             return {
                                 "agent_name": self.agent_name,
                                 "success": True,
                                 "output": prompt,
                                 "ready_to_execute": False,
                                 "missing_params": list(state.missing_params),
-                                "available_options": available_options
-                            }
+                                "available_options": available_options}
                     else:
-                        # Couldn't fetch endpoints
                         return {
                             "agent_name": self.agent_name,
                             "success": False,
                             "output": "I couldn't fetch the available data centers. Please try again.",
-                            "error": endpoints_data.get("error")
-                        }
-
+                            "error": endpoints_data.get("error")}
                 # For other parameters, use simple extraction
                 else:
                     extracted_params = self._simple_param_extraction(input_text, state.missing_params)
-
                     if extracted_params:
                         # Validate extracted parameters
                         validation_result = api_executor_service.validate_parameters(
@@ -909,7 +766,6 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             state.operation,
                             {**state.collected_params, **extracted_params}
                         )
-
                         # Add valid parameters to state
                         for param_name, param_value in extracted_params.items():
                             if validation_result["valid"] or param_name not in validation_result.get("errors", []):
@@ -918,7 +774,6 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                 param_errors = [e for e in validation_result.get("errors", []) if param_name in e]
                                 error_msg = param_errors[0] if param_errors else "Invalid value"
                                 state.mark_parameter_invalid(param_name, error_msg)
-
             # Check if ready to execute
             if state.is_ready_to_execute():
                 response = (
@@ -927,19 +782,15 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                 )
                 for param, value in state.collected_params.items():
                     response += f"- {param}: {value}\n"
-
                 response += "\nShall I proceed with this operation?"
-
                 return {
                     "agent_name": self.agent_name,
                     "success": True,
                     "output": response,
                     "ready_to_execute": True
                 }
-
             # Generate response asking for missing parameters
             response = self._generate_collection_message(state)
-
             return {
                 "agent_name": self.agent_name,
                 "success": True,
@@ -947,63 +798,48 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                 "ready_to_execute": False,
                 "missing_params": list(state.missing_params)
             }
-
         except Exception as e:
             logger.error(f"❌ Validation failed: {str(e)}")
             return {
                 "agent_name": self.agent_name,
                 "success": False,
                 "error": str(e),
-                "output": f"I encountered an error while validating: {str(e)}"
-            }
+                "output": f"I encountered an error while validating: {str(e)}"}
 
-    def _simple_param_extraction(
-        self,
-        user_text: str,
-        expected_params: set
-    ) -> Dict[str, Any]:
+    def _simple_param_extraction(self,user_text: str,expected_params: set) -> Dict[str, Any]:
         """
         Simple parameter extraction from user text.
-
         Args:
             user_text: User's input text
             expected_params: Set of expected parameter names
-
         Returns:
             Dict of extracted parameters
         """
         extracted = {}
-
         # If only one parameter expected and input is simple, use entire input
         if len(expected_params) == 1:
             param_name = list(expected_params)[0]
             extracted[param_name] = user_text.strip()
         else:
-            # Try to extract multiple parameters
             import re
             for param in expected_params:
-                # Look for "param: value" or "param = value" patterns
                 pattern = rf'{re.escape(param)}[:\s=]+([^\n,]+)'
                 match = re.search(pattern, user_text, re.IGNORECASE)
 
                 if match:
                     extracted[param] = match.group(1).strip()
-
         return extracted
-
+    
     def _generate_collection_message(self, state) -> str:
         """
         Generate a message asking for missing parameters.
-
         Args:
             state: Conversation state
-
         Returns:
             Message string
         """
         if not state.missing_params:
             return "All parameters collected!"
-
         # Show invalid parameters first
         message = ""
         if state.invalid_params:
@@ -1011,10 +847,8 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
             for param, error in state.invalid_params.items():
                 message += f"- {param}: {error}\n"
             message += "\n"
-
         # Ask for missing parameters
         missing_list = sorted(state.missing_params)
-
         if len(missing_list) == 1:
             param = missing_list[0]
             message += f"I need one more thing: **{param}**. Could you provide that?"
@@ -1029,5 +863,4 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
             for param in missing_list[:3]:
                 message += f"- {param}\n"
             message += f"\n(Plus {len(missing_list) - 3} more after these)"
-
         return message

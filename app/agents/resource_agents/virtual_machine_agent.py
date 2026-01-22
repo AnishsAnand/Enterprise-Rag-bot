@@ -1,46 +1,33 @@
 """
 Virtual Machine Agent - Handles VM/Instance operations.
 """
-
 from typing import Any, Dict, List
 import logging
-
 from app.agents.resource_agents.base_resource_agent import BaseResourceAgent
 from app.services.api_executor_service import api_executor_service
-
 logger = logging.getLogger(__name__)
-
 
 class VirtualMachineAgent(BaseResourceAgent):
     """Agent for virtual machine operations."""
-    
     def __init__(self):
         super().__init__(
             agent_name="VirtualMachineAgent",
             agent_description="Specialized agent for VM/Instance operations with intelligent filtering",
             resource_type="vm",
-            temperature=0.2
-        )
-    
+            temperature=0.2)
+
     def get_supported_operations(self) -> List[str]:
         return ["list", "create", "stop", "start", "delete"]
     
-    async def execute_operation(
-        self,
-        operation: str,
-        params: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def execute_operation(self,operation: str,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
         try:
             logger.info(f"🖥️ VirtualMachineAgent executing: {operation}")
-            
             if operation == "list":
                 return await self._list_vms(params, context)
             else:
                 return {
                     "success": False,
-                    "response": f"Operation '{operation}' for VMs is not yet implemented."
-                }
+                    "response": f"Operation '{operation}' for VMs is not yet implemented."}
         except Exception as e:
             logger.error(f"❌ VirtualMachineAgent error: {str(e)}", exc_info=True)
             return {"success": False, "error": str(e), "response": f"Error: {str(e)}"}
@@ -49,23 +36,18 @@ class VirtualMachineAgent(BaseResourceAgent):
         """List VMs with intelligent filtering."""
         try:
             # Handle both parameter naming conventions
-            # ValidationAgent might pass "endpoints" while schema expects "endpoint_filter"
             endpoint_ids = params.get("endpoints") or params.get("endpoint_ids") or []
             endpoint_names = params.get("endpoint_names") or []
             endpoint_filter = params.get("endpoint_filter") or params.get("endpoint")
             zone_filter = params.get("zone_filter") or params.get("zone")
             department_filter = params.get("department_filter") or params.get("department")
-            
             # INTELLIGENT MAPPING: If we have endpoint_ids but no endpoint_filter, 
-            # AND endpoint is a short abbreviation, use the full endpoint name
             if endpoint_ids and not endpoint_filter and endpoint_names:
                 endpoint_filter = endpoint_names[0] if len(endpoint_names) == 1 else None
                 logger.info(f"🔍 Using endpoint filter from endpoint_names: {endpoint_filter}")
             elif endpoint_filter and not endpoint_names:
-                # endpoint_filter is a short abbreviation like "blr" from IntentAgent
                 # Try to map it to full name using ValidationAgent's logic
                 logger.info(f"🔍 Got abbreviation '{endpoint_filter}', will fetch full endpoint name")
-                
                 # Map common abbreviations
                 abbrev_map = {
                     "blr": "Bengaluru",
@@ -73,50 +55,37 @@ class VirtualMachineAgent(BaseResourceAgent):
                     "mum": "Mumbai-BKC",
                     "chennai": "Chennai-AMB",
                     "singapore": "Singapore East",
-                    "sg": "Singapore East"
-                }
-                
+                    "sg": "Singapore East"}
                 mapped_name = abbrev_map.get(endpoint_filter.lower())
                 if mapped_name:
                     endpoint_filter = mapped_name
                     logger.info(f"✅ Mapped abbreviation to full name: {endpoint_filter}")
-            
             logger.info(f"🔍 Listing VMs with filters: endpoint={endpoint_filter}, zone={zone_filter}, dept={department_filter}")
-            
             result = await api_executor_service.list_vms(
                 endpoint_filter=endpoint_filter,
                 zone_filter=zone_filter,
-                department_filter=department_filter
-            )
-            
+                department_filter=department_filter)
             if not result.get("success"):
                 return {
                     "success": False,
                     "error": result.get("error"),
-                    "response": f"Failed to list VMs: {result.get('error')}"
-                }
-            
+                    "response": f"Failed to list VMs: {result.get('error')}"}
             vms = result.get("data", [])
             logger.info(f"✅ Found {len(vms)} VMs")
-            
             # Simplify VM data for better LLM processing
             simplified_vms = self._simplify_vm_data(vms)
-            
             # Use common LLM formatter
             user_query = context.get("user_query", "")
             formatted_response = await self.format_response_with_llm(
                 operation="list",
                 raw_data=simplified_vms,
                 user_query=user_query,
-                context={"endpoint_names": endpoint_names}
-            )
-            
+                context={"endpoint_names": endpoint_names})
             return {
                 "success": True,
                 "data": vms,
                 "response": formatted_response,
-                "metadata": {"count": len(vms), "endpoints": endpoint_names}
-            }
+                "metadata": {"count": len(vms), "endpoints": endpoint_names}}
         except Exception as e:
             logger.error(f"❌ Error listing VMs: {str(e)}", exc_info=True)
             raise
@@ -135,7 +104,5 @@ class VirtualMachineAgent(BaseResourceAgent):
                 "storage": vm.get("storage", 0),
                 "isPpuMeteringEnabled": vm.get("isPpuMeteringEnabled", "no"),
                 "isBudgetingEnabled": vm.get("isBudgetingEnabled", "no"),
-                "tags": vm.get("tags", [])
-            })
+                "tags": vm.get("tags", [])})
         return simplified_vms
-
