@@ -1,5 +1,5 @@
-# user_main.py (Merged: User Chat UI + Action Agent / ActionBot orchestration)
-# Entrypoint: user_main:app
+# action_agent_main.py (User Chat UI + Action Agent orchestration)
+# Entrypoint: app.action_agent_main:app
 import os
 import logging
 from pathlib import Path
@@ -696,4 +696,10 @@ if __name__ == "__main__":
     host = os.getenv("USER_APP_HOST", "0.0.0.0")
     port = int(os.getenv("USER_APP_PORT", "8001"))
     reload_flag = os.getenv("DEV_RELOAD", "false").lower() in ("1", "true", "yes")
-    uvicorn.run("user_main:app", host=host, port=port, reload=reload_flag, log_level=os.getenv("LOG_LEVEL", "info"))
+    uvicorn.run(
+        "app.action_agent_main:app",
+        host=host,
+        port=port,
+        reload=reload_flag,
+        log_level=os.getenv("LOG_LEVEL", "info"),
+    )

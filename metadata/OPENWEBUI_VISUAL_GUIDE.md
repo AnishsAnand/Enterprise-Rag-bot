@@ -151,7 +151,6 @@ Step 1: User Types Message
 │  Data Layer                                             │
 │  • ChromaDB/Milvus: Document search                     │
 │  • PostgreSQL: Conversation state                       │
-│  • Redis: Caching                                       │
 │  • External APIs: Cluster creation                      │
 └────────┬────────────────────────────────────────────────┘
          │
@@ -203,10 +202,10 @@ Port 3000                         Port 8000
                     ┌─────────────────────┼─────────────────────┐
                     │                     │                     │
                     ▼                     ▼                     ▼
-         ┌─────────────────┐   ┌─────────────────┐   ┌──────────────┐
-         │  PostgreSQL     │   │     Redis       │   │   Milvus     │
-         │  Port 5432      │   │   Port 6379     │   │  Port 19530  │
-         │                 │   │                 │   │              │
+         ┌─────────────────┐   ┌──────────────┐
+         │  PostgreSQL     │   │   Milvus     │
+         │  Port 5432      │   │  Port 19530  │
+         │                 │   │              │
          │  • Conversations│   │  • Cache        │   │  • Vectors   │
          │  • User data    │   │  • Sessions     │   │  • Semantic  │
          │  • History      │   │  • Rate limits  │   │    Search    │
@@ -237,17 +236,12 @@ Creates:
    ├─ Image: Built from Dockerfile
    ├─ Port: 8000 → 8000
    ├─ Volumes: ./app, ./uploads
-   └─ Depends on: postgres, redis, milvus
+   └─ Depends on: postgres, milvus
 
 📦 Container: enterprise-rag-postgres
    ├─ Image: postgres:15-alpine
    ├─ Port: 5432 → 5432
    └─ Volume: postgres-data
-
-📦 Container: enterprise-rag-redis
-   ├─ Image: redis:7-alpine
-   ├─ Port: 6379 → 6379
-   └─ Volume: redis-data
 
 📦 Container: enterprise-rag-milvus
    ├─ Image: milvusdb/milvus:latest
@@ -270,7 +264,6 @@ Creates:
 💾 Volumes:
    ├─ open-webui-data      (Chat history, users)
    ├─ postgres-data        (Database)
-   ├─ redis-data           (Cache)
    ├─ milvus-data          (Vectors)
    ├─ etcd-data            (Metadata)
    └─ minio-data           (Objects)
@@ -446,7 +439,6 @@ Service Breakdown:
 ├─ Open WebUI:        500 MB RAM
 ├─ FastAPI Backend:   512 MB RAM
 ├─ PostgreSQL:        256 MB RAM
-├─ Redis:             128 MB RAM
 ├─ Milvus:            1 GB RAM
 ├─ Etcd:              256 MB RAM
 └─ MinIO:             512 MB RAM
@@ -463,7 +455,6 @@ Service Breakdown:
 ├─ Open WebUI:        1 GB RAM
 ├─ FastAPI Backend:   2 GB RAM
 ├─ PostgreSQL:        2 GB RAM
-├─ Redis:             1 GB RAM
 ├─ Milvus:            4 GB RAM
 ├─ Etcd:              1 GB RAM
 └─ MinIO:             2 GB RAM

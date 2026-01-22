@@ -381,14 +381,30 @@ class ReportsAgent(BaseResourceAgent):
 
         if ("datacenter" in query_lower or "data center" in query_lower or "location" in query_lower) and not params.get("datacenter"):
             return "report_datacenter"
-        if ("cluster" in query_lower or "cluster name" in query_lower) and not params.get("clusterName"):
-            return "report_cluster"
         if ("date" in query_lower or "created date" in query_lower or "date range" in query_lower) and not (
             params.get("startDate") or params.get("endDate")
         ):
             return "report_dates"
+        if self._wants_cluster_filter(query_lower) and not params.get("clusterName"):
+            return "report_cluster"
 
         return None
+
+    def _wants_cluster_filter(self, query_lower: str) -> bool:
+        if not query_lower:
+            return False
+        explicit_phrases = [
+            "cluster name",
+            "cluster names",
+            "cluster list",
+            "cluster filter",
+            "filter cluster",
+            "filter by cluster",
+            "by cluster",
+            "cluster:",
+            "cluster="
+        ]
+        return any(phrase in query_lower for phrase in explicit_phrases)
 
     async def _get_filter_options(
         self,

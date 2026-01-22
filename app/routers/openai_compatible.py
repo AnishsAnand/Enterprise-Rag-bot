@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Header, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, AsyncGenerator
+import os
 import time
 import uuid
 import json
@@ -168,7 +169,10 @@ async def get_rich_content_from_widget(
     """
     try:
         # Construct widget request
-        widget_url = "http://127.0.0.1:8001/api/widget/query"  # Internal call
+        widget_url = os.getenv(
+            "WIDGET_INTERNAL_URL",
+            "http://127.0.0.1:8000/api/widget/query",
+        )
         
         widget_payload = {
             "query": query,

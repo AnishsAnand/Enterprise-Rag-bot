@@ -1,6 +1,6 @@
 # docker-compose.yml (Infrastructure services only)
 # Backend runs locally, infrastructure runs in Docker
-# Includes: Milvus, PostgreSQL, Redis, etcd, MinIO, Prometheus, Grafana, Open WebUI
+# Includes: Milvus, PostgreSQL, etcd, MinIO, Prometheus, Grafana, Open WebUI
 
 services:
   # ============================================================================
@@ -24,26 +24,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
-    restart: unless-stopped
-    networks:
-      - rag-network
-
-  # ============================================================================
-  # Redis - Caching and session management
-  # ============================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: ragbot-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     restart: unless-stopped
     networks:
       - rag-network
@@ -167,7 +147,7 @@ services:
 
   # ============================================================================
   # Open WebUI - Modern chat interface
-  # Connects to local backend at host.docker.internal:8001
+  # Connects to local backend at host.docker.internal:8000
   # ============================================================================
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -176,7 +156,7 @@ services:
       - "3000:8080"
     environment:
       # Connection to local RAG Bot backend (running outside Docker)
-      - OPENAI_API_BASE_URL=http://host.docker.internal:8001/api/v1
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/api/v1
       - OPENAI_API_KEY=${OPENWEBUI_API_KEY:-vayu-maya-secure-key-2024}
       
       # Feature flags
@@ -214,7 +194,7 @@ services:
 
   # ============================================================================
   # Prometheus - Metrics collection and monitoring
-  # Scrapes local backend at host.docker.internal:8000 and :8001
+  # Scrapes local backend at host.docker.internal:8000
   # ============================================================================
   prometheus:
     image: prom/prometheus:latest
@@ -288,8 +268,6 @@ networks:
 volumes:
   postgres_data:
     driver: local
-  redis_data:
-    driver: local
   milvus_data:
     driver: local
   etcd_data:
@@ -325,7 +303,6 @@ volumes:
 #   - MinIO Console:   http://localhost:9001 (minioadmin/minioadmin)
 #   - Milvus:          localhost:19530
 #   - PostgreSQL:      localhost:5435 (ragbot/ragbot_secret_2024)
-#   - Redis:           localhost:6379
 #
 #   Local backend (run manually):
 #   - Admin API:       http://localhost:8000

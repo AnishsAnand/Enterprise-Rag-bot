@@ -19,8 +19,6 @@ NC='\033[0m' # No Color
 # Service URLs
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5435}"
-REDIS_HOST="${REDIS_HOST:-localhost}"
-REDIS_PORT="${REDIS_PORT:-6379}"
 MILVUS_HOST="${MILVUS_HOST:-localhost}"
 MILVUS_PORT="${MILVUS_PORT:-19530}"
 RAG_ADMIN_HOST="${RAG_ADMIN_HOST:-localhost}"
@@ -82,21 +80,6 @@ check_postgres() {
     echo -n "Checking PostgreSQL readiness... "
     
     if docker exec enterprise-rag-postgres pg_isready -U ragbot -d ragbot_sessions >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ OK${NC}"
-        PASSED=$((PASSED + 1))
-        return 0
-    else
-        echo -e "${RED}✗ FAILED${NC}"
-        FAILED=$((FAILED + 1))
-        return 1
-    fi
-}
-
-check_redis() {
-    TOTAL=$((TOTAL + 1))
-    echo -n "Checking Redis ping... "
-    
-    if docker exec enterprise-rag-redis redis-cli ping | grep -q PONG; then
         echo -e "${GREEN}✓ OK${NC}"
         PASSED=$((PASSED + 1))
         return 0
@@ -203,8 +186,6 @@ echo ""
 echo "=== Infrastructure Services ==="
 check_service "PostgreSQL" "$POSTGRES_HOST" "$POSTGRES_PORT"
 check_postgres
-check_service "Redis" "$REDIS_HOST" "$REDIS_PORT"
-check_redis
 check_service "Etcd" "localhost" "2379"
 check_service "MinIO" "localhost" "9000"
 check_milvus_health

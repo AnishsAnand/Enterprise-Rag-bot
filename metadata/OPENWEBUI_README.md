@@ -144,7 +144,6 @@ Open WebUI provides:
 │  • LangChain/LangGraph Agents                            │
 │  • ChromaDB/Milvus (Vector DB)                           │
 │  • PostgreSQL (Data)                                     │
-│  • Redis (Cache)                                         │
 └──────────────────────────────────────────────────────────┘
 ```
 

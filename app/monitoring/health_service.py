@@ -39,17 +39,16 @@ class HealthService:
         # Check all services in parallel
         results = await asyncio.gather(
             self._check_database(),
-            self._check_cache(),
             self._check_ai_services(),
             self._check_disk_space(),
             return_exceptions=True
         )
         
-        db_status, cache_status, ai_status, disk_status = results
+        db_status, ai_status, disk_status = results
         
         # Determine overall health
         overall_status = self._determine_overall_status(
-            db_status, cache_status, ai_status, disk_status
+            db_status, ai_status, disk_status
         )
         
         execution_time = (datetime.utcnow() - start_time).total_seconds()
@@ -60,16 +59,15 @@ class HealthService:
             "version": "2.0.0",
             "components": {
                 "database": db_status,
-                "cache": cache_status,
                 "ai_services": ai_status,
                 "disk": disk_status,
             },
             "metrics": {
                 "check_duration_ms": round(execution_time * 1000, 2),
                 "healthy_components": sum(1 for comp in [
-                    db_status, cache_status, ai_status, disk_status
+                    db_status, ai_status, disk_status
                 ] if isinstance(comp, dict) and comp.get("status") == "healthy"),
-                "total_components": 4,
+                "total_components": 3,
             }
         }
     
@@ -88,16 +86,14 @@ class HealthService:
         Readiness check (all dependencies are available).
         """
         db_ready = await self._check_database_ready()
-        cache_ready = await self._check_cache_ready()
         
-        ready = db_ready and cache_ready
+        ready = db_ready
         
         return {
             "ready": ready,
             "timestamp": datetime.utcnow().isoformat(),
             "components": {
                 "database": "ready" if db_ready else "not_ready",
-                "cache": "ready" if cache_ready else "not_ready",
             }
         }
     
@@ -131,32 +127,6 @@ class HealthService:
             return {
                 "status": "unhealthy",
                 "type": "PostgreSQL",
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat()
-            }
-    
-    async def _check_cache(self) -> Dict[str, Any]:
-        """Check Redis cache status"""
-        try:
-            # Attempt ping through redis service
-            # This would require redis_service implementation
-            # For now, assume healthy if import succeeds
-            
-            return {
-                "status": "healthy",
-                "type": "Redis",
-                "details": {
-                    "purpose": "session_and_cache",
-                    "memory_policy": "allkeys-lru"
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        
-        except Exception as e:
-            logger.warning(f"Cache health check failed: {e}")
-            return {
-                "status": "degraded",
-                "type": "Redis",
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -260,14 +230,6 @@ class HealthService:
         try:
             stats = await postgres_service.get_collection_stats()
             return isinstance(stats, dict)
-        except Exception:
-            return False
-    
-    async def _check_cache_ready(self) -> bool:
-        """Quick cache readiness check"""
-        try:
-            # Implement based on actual redis_service
-            return True
         except Exception:
             return False
     

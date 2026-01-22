@@ -51,7 +51,6 @@ echo "-------------------------------------------"
 services=(
     "enterprise-rag-bot:8001"
     "enterprise-rag-postgres:5432"
-    "enterprise-rag-redis:6379"
     "enterprise-rag-milvus:9091"
     "enterprise-rag-minio:9000"
     "enterprise-rag-openwebui:8080"

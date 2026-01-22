@@ -47,6 +47,6 @@ RUN chown -R root:root /var/www /app
 
 RUN which supervisord && which nginx && which uvicorn
 
-EXPOSE 4200 4201 8000 8001
+EXPOSE 4200 4201 8000
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

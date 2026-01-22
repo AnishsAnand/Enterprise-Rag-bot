@@ -35,28 +35,6 @@ services:
       - rag-network
 
   # ============================================================================
-  # Redis
-  # ============================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: enterprise-rag-redis
-    command: >
-      redis-server
-      --appendonly yes
-      --maxmemory 512mb
-      --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks:
-      - rag-network
-
-  # ============================================================================
   # Etcd
   # ============================================================================
   etcd:
@@ -155,32 +133,25 @@ services:
       # 🔥 FIX: Docker-native Postgres connection
       DATABASE_URL: postgresql://ragbot:${POSTGRES_PASSWORD}@postgres:5432/ragbot_sessions
 
-      REDIS_URL: redis://redis:6379/0
-
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
 
-      USER_APP_HOST: 0.0.0.0
-      USER_APP_PORT: 8001
-      ADMIN_APP_HOST: 0.0.0.0
-      ADMIN_APP_PORT: 8000
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
 
       ENABLE_OPENAI_COMPATIBLE_API: "true"
 
     ports:
       - "8000:8000"
-      - "8001:8001"
       - "4200:4200"
       - "4201:4201"
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
       milvus:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8001/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -196,7 +167,7 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: enterprise-rag-openwebui
     environment:
-      OPENAI_API_BASE_URL: http://enterprise-rag-bot:8001/api/v1
+      OPENAI_API_BASE_URL: http://enterprise-rag-bot:8000/api/v1
       OPENAI_API_KEY: ${OPENWEBUI_API_KEY}
 
       ENABLE_OPENAI_API: "true"
@@ -228,7 +199,6 @@ networks:
 # ============================================================================
 volumes:
   postgres_data:
-  redis_data:
   etcd_data:
   minio_data:
   milvus_data:

@@ -49,40 +49,6 @@ services:
         max-file: "3"
 
   # ============================================================================
-  # Redis (Caching & Session Store)
-  # ============================================================================
-  redis:
-    image: redis:7-alpine
-    container_name: enterprise-rag-redis
-    restart: unless-stopped
-    command: >
-      sh -c '
-        if [ -n "${REDIS_PASSWORD:-}" ]; then
-          redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD}"
-        else
-          redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-        fi
-      '
-    volumes:
-      - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    healthcheck:
-      test: ["CMD", "sh", "-c", "if [ -n \"${REDIS_PASSWORD:-}\" ]; then redis-cli -a \"${REDIS_PASSWORD}\" ping; else redis-cli ping; fi"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - rag-network
-    environment:
-      TZ: ${TIMEZONE:-UTC}
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # ============================================================================
   # Enterprise RAG Bot (Main Backend Service)
   # ============================================================================
   enterprise-rag-bot:
@@ -96,8 +62,6 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     environment:
       # Application
@@ -115,12 +79,6 @@ services:
       POSTGRES_TABLE: ${POSTGRES_TABLE:-enterprise_rag}
       DATABASE_URL: postgresql://${POSTGRES_USER:-ragbot}:${POSTGRES_PASSWORD:-ragbot_secret_2024}@postgres:5432/${POSTGRES_DB:-enterprise_rag}
 
-      # Redis
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_DB: 0
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
-
       # Security
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production-use-openssl-rand-hex-32}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
@@ -129,8 +87,6 @@ services:
       # API
       API_HOST: 0.0.0.0
       API_PORT: 8000
-      USER_APP_HOST: 0.0.0.0
-      USER_APP_PORT: 8001
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:4200,http://localhost:4201,http://localhost:80}
 
       # AI Services
@@ -167,7 +123,6 @@ services:
 
     ports:
       - "${API_PORT:-8000}:8000"
-      - "${USER_APP_PORT:-8001}:8001"
     volumes:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
@@ -198,7 +153,7 @@ services:
         condition: service_healthy
     environment:
       # OpenAI API Configuration (points to our RAG backend)
-      OPENAI_API_BASE_URL: http://enterprise-rag-bot:8001/api/v1
+      OPENAI_API_BASE_URL: http://enterprise-rag-bot:8000/api/v1
       OPENAI_API_KEY: ${OPENWEBUI_API_KEY:?OPENWEBUI_API_KEY is required}
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
@@ -278,8 +233,6 @@ networks:
 # ============================================================================
 volumes:
   postgres_data:
-    driver: local
-  redis_data:
     driver: local
   open_webui_data:
     driver: local

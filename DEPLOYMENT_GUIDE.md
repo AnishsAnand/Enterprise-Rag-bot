@@ -30,7 +30,6 @@ Edit `.env` with your configuration:
 ```env
 # Critical - Change these values!
 POSTGRES_PASSWORD=your-secure-password
-REDIS_PASSWORD=your-redis-password
 SECRET_KEY=your-32-char-secret-key-here
 OPENROUTER_API_KEY=your-api-key
 OPENWEBUI_API_KEY=your-webui-api-key
@@ -46,7 +45,7 @@ ALLOWED_ORIGINS=http://localhost:3000,http://localhost:4200
 ### 2. Start Services
 
 ```bash
-# Start all services (PostgreSQL, Redis, RAG Bot, Open WebUI, Nginx)
+# Start all services (PostgreSQL, RAG Bot, Open WebUI, Nginx)
 docker-compose -f docker-compose.prod.yml up -d
 
 # Verify all services are running
@@ -82,10 +81,10 @@ curl http://localhost:8000/docs
       │  (Port 3000)│         │  (Port 8000/8001) │
       └──────┬──────┘         └────┬──────────┬───┘
              │                     │          │
-      ┌──────▼────────────────┬────▼──────┬───▼─────────┐
-      │   PostgreSQL + pgvector│   Redis    │  AI Services│
-      │   (Vector Database)   │  (Cache)   │ (Embedding) │
-      └───────────────────────┴────────────┴─────────────┘
+      ┌──────▼────────────────┬────────────┐
+      │   PostgreSQL + pgvector│ AI Services│
+      │   (Vector Database)   │ (Embedding)│
+      └───────────────────────┴────────────┘
 ```
 
 ## Key Components
@@ -95,12 +94,6 @@ curl http://localhost:8000/docs
 - **Port**: 5432 (internal), 5433 (host)
 - **Data**: Persisted in `postgres_data` volume
 - **Extensions**: pgvector (HNSW indexing)
-
-### Redis
-- **Purpose**: Session cache, rate limiting
-- **Port**: 6379 (internal only)
-- **Data**: Persisted in `redis_data` volume
-- **Memory**: 256MB max with LRU eviction
 
 ### RAG Bot Backend
 - **Purpose**: Main application (authentication, RAG search, API)
@@ -158,7 +151,6 @@ curl http://localhost:8000/docs
    - Use read replicas for high traffic
 
 3. **Caching Strategy**
-   - Redis for session management
    - Application-level caching for embeddings
    - CDN for static assets
 
@@ -416,14 +408,6 @@ In docker-compose, adjust:
 ```yaml
 environment:
   POSTGRES_INIT_ARGS: "-c shared_buffers=512MB -c effective_cache_size=2GB"
-```
-
-### Redis
-
-```yaml
-environment:
-  REDIS_MAXMEMORY: "512mb"
-  REDIS_MAXMEMORY_POLICY: "allkeys-lru"
 ```
 
 ### RAG Parameters

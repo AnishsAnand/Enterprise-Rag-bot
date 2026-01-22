@@ -104,7 +104,7 @@ echo -e "${GREEN}✓ Cleanup complete${NC}"
 # Pull latest images
 echo ""
 echo -e "${YELLOW}📥 Pulling base images...${NC}"
-docker-compose pull postgres redis etcd minio open-webui
+docker-compose pull postgres etcd minio open-webui
 
 # Build application
 echo ""
@@ -115,7 +115,7 @@ docker-compose build --no-cache
 # Start infrastructure services first
 echo ""
 echo -e "${YELLOW}🚀 Starting infrastructure services...${NC}"
-docker-compose up -d postgres redis etcd minio
+docker-compose up -d postgres etcd minio
 
 echo -e "${BLUE}   Waiting for infrastructure to be ready...${NC}"
 sleep 10

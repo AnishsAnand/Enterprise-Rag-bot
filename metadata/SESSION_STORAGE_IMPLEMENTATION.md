@@ -178,7 +178,7 @@ await api_executor_service._clear_user_session(user_id)
 
 ### Potential Additions
 1. **Zones Caching**: Cache zone data per engagement
-2. **Persistent Storage**: Use Redis/database for cross-restart persistence
+2. **Persistent Storage**: Use database for cross-restart persistence
 3. **TTL Per Resource**: Different cache durations for different resources
 4. **Cache Metrics**: Track hit/miss rates for optimization
 5. **Proactive Refresh**: Background refresh before expiration

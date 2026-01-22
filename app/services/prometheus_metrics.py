@@ -310,7 +310,7 @@ class PrometheusMetrics:
         self.database_connections = Gauge(
             'vayu_database_connections',
             'Active database connections',
-            ['database']  # postgres, milvus, redis
+            ['database']  # postgres, milvus
         )
         
         self.cache_hits_total = Counter(

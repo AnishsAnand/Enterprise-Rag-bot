@@ -29,7 +29,6 @@ pandas==2.1.4
 sqlalchemy==2.0.23
 alembic==1.12.1
 psycopg2-binary==2.9.9
-redis==5.0.1
 celery==5.3.4
 
 fastapi-mail==1.4.1
