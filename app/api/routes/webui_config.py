@@ -144,7 +144,7 @@ async def get_app_config(
     # Base config (always returned)
     base_config = {
         "status": True,
-        "name": os.getenv("APP_NAME", "Enterprise RAG Bot"),
+        "name": os.getenv("APP_NAME", "Vayu Maya"),
         "version": "2.0.0",
         "default_locale": os.getenv("DEFAULT_LOCALE", "en-US"),
         "oauth": {
@@ -229,23 +229,39 @@ async def get_app_config(
 
 
 def _get_default_prompt_suggestions() -> List[Dict[str, Any]]:
-    """Get default prompt suggestions for the UI"""
+    """Get default prompt suggestions for the UI - Vayu Maya cloud management queries"""
     return [
         {
-            "title": "Help me write",
-            "content": "Help me write a professional email about..."
+            "title": "List my Kubernetes clusters",
+            "content": "Show me all Kubernetes clusters in my environment"
         },
         {
-            "title": "Explain a concept",
-            "content": "Explain the concept of..."
+            "title": "Create a new VM",
+            "content": "I want to create a new virtual machine"
         },
         {
-            "title": "Summarize text",
-            "content": "Summarize the following text:"
+            "title": "List available datacenters",
+            "content": "What datacenters or endpoints are available?"
         },
         {
-            "title": "Code assistance",
-            "content": "Help me write code to..."
+            "title": "Show my VMs",
+            "content": "List all virtual machines in my account"
+        },
+        {
+            "title": "Create K8s cluster",
+            "content": "Help me create a new Kubernetes cluster"
+        },
+        {
+            "title": "Check load balancers",
+            "content": "Show all load balancers and their status"
+        },
+        {
+            "title": "View business units",
+            "content": "List all business units and departments"
+        },
+        {
+            "title": "Managed services",
+            "content": "What managed services do I have running?"
         },
     ]
 
@@ -302,7 +318,7 @@ async def get_app_changelog():
 @router.get("/manifest.json")
 async def get_manifest():
     """PWA manifest"""
-    app_name = os.getenv("APP_NAME", "Enterprise RAG Bot")
+    app_name = os.getenv("APP_NAME", "Vayu Maya")
     return {
         "name": app_name,
         "short_name": app_name,
@@ -317,6 +333,32 @@ async def get_manifest():
                 "type": "image/png",
                 "sizes": "500x500",
                 "purpose": "any"
+            }
+        ]
+    }
+
+
+# ==================== Model Endpoints ====================
+
+@router.get("/api/models")
+async def list_models():
+    """
+    List available models.
+    This endpoint is for frontends that expect /api/models.
+    """
+    import time
+    now = int(time.time())
+    
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "Vayu Maya",
+                "object": "model",
+                "created": now,
+                "owned_by": "Tata Communications",
+                "name": "Vayu Maya",
+                "description": "AI-powered cloud management assistant"
             }
         ]
     }

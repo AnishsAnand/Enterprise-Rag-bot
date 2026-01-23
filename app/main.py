@@ -18,7 +18,7 @@ from app.api.routes import (
     rag_widget,
     agent_chat,
     health,
-    chat_persistence,
+    # chat_persistence,  # REMOVED: Using PostgreSQL-backed webui_chats instead
     orchestrator,
     openwebui_auth,
     tata_auth,
@@ -27,6 +27,7 @@ from app.api.routes import (
 from app.api.routes.user_chat import router as user_chat_router
 from app.api.routes.webui_chats import router as webui_chats_router
 from app.api.routes.webui_config import router as webui_config_router
+from app.api.routes.webui_tasks import router as webui_tasks_router
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
@@ -175,7 +176,7 @@ app.include_router(health.router)  # Add health check routes
 app.include_router(rag_widget.router, prefix="/api", tags=["rag-widget"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"], include_in_schema=False)
 app.include_router(agent_chat.router, tags=["agent-chat"])
-app.include_router(chat_persistence.router)
+# REMOVED: chat_persistence.router (in-memory) - replaced with PostgreSQL-backed webui_chats
 app.include_router(user_chat_router)
 app.include_router(orchestrator.router)
 app.include_router(openwebui_auth.router)
@@ -184,9 +185,10 @@ app.include_router(user_credentials.router)
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
 
-# WebUI-compatible APIs (OpenWebUI replacement)
-app.include_router(webui_chats_router)  # /api/v1/chats endpoints
+# WebUI-compatible APIs (OpenWebUI replacement) - PostgreSQL backed
+app.include_router(webui_chats_router)  # /api/v1/chats endpoints (persistent storage)
 app.include_router(webui_config_router)  # /api/config endpoint
+app.include_router(webui_tasks_router)   # /api/task endpoints (title generation)
 
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent

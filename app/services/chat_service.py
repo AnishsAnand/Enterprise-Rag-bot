@@ -20,6 +20,53 @@ from app.models.chat_models import (
 log = logging.getLogger(__name__)
 
 
+def _extract_title_from_messages(chat_data: Dict[str, Any], max_length: int = 50) -> Optional[str]:
+    """
+    Extract a title from the first user message in the chat.
+    Returns None if no suitable title can be extracted.
+    """
+    try:
+        history = chat_data.get("history", {})
+        messages = history.get("messages", {})
+        
+        if not messages:
+            return None
+        
+        # Find the first user message (earliest by looking at parentId chain)
+        first_user_message = None
+        for msg_id, msg in messages.items():
+            if msg.get("role") == "user" and msg.get("parentId") is None:
+                first_user_message = msg
+                break
+        
+        # If not found by parentId, just get any user message
+        if not first_user_message:
+            for msg_id, msg in messages.items():
+                if msg.get("role") == "user":
+                    first_user_message = msg
+                    break
+        
+        if not first_user_message:
+            return None
+        
+        content = first_user_message.get("content", "").strip()
+        if not content:
+            return None
+        
+        # Clean up and truncate
+        # Remove markdown, code blocks, etc.
+        title = content.split("\n")[0].strip()  # Take first line
+        
+        # Truncate if too long
+        if len(title) > max_length:
+            title = title[:max_length - 3].rsplit(" ", 1)[0] + "..."
+        
+        return title if title else None
+    except Exception as e:
+        log.warning(f"Error extracting title from messages: {e}")
+        return None
+
+
 class ChatService:
     """Service class for chat CRUD operations"""
 
@@ -36,7 +83,14 @@ class ChatService:
             chat_id = str(uuid.uuid4())
             now = int(time.time())
             
+            # Get title: explicit > auto-generated from messages > default
             title = form_data.chat.get("title", "New Chat")
+            if title == "New Chat":
+                auto_title = _extract_title_from_messages(form_data.chat)
+                if auto_title:
+                    title = auto_title
+                    # Update the chat data to reflect the generated title
+                    form_data.chat["title"] = title
             
             chat = Chat(
                 id=chat_id,
@@ -301,7 +355,25 @@ class ChatService:
                 return None
             
             chat.chat = chat_data
-            chat.title = chat_data.get("title", chat.title or "New Chat")
+            
+            # Title priority:
+            # 1. Explicit title in chat_data
+            # 2. Auto-generate from first user message if still "New Chat"
+            # 3. Keep existing title
+            explicit_title = chat_data.get("title")
+            if explicit_title and explicit_title != "New Chat":
+                chat.title = explicit_title
+            elif chat.title == "New Chat" or not chat.title:
+                # Try to auto-generate from first user message
+                auto_title = _extract_title_from_messages(chat_data)
+                if auto_title:
+                    chat.title = auto_title
+                    # Also update the title in chat_data for consistency
+                    chat_data["title"] = auto_title
+                    chat.chat = chat_data
+                else:
+                    chat.title = explicit_title or chat.title or "New Chat"
+            
             chat.updated_at = int(time.time())
             
             db.commit()
