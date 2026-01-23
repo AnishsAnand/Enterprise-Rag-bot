@@ -88,29 +88,29 @@ services:
   # ---------------------------------------------------------------------------
   # Open WebUI (connects to local RAG app via host.docker.internal)
   # ---------------------------------------------------------------------------
-  open-webui:
-    image: ghcr.io/open-webui/open-webui:main
-    container_name: enterprise-rag-openwebui
-    restart: unless-stopped
-    environment:
-      OPENAI_API_BASE_URL: http://host.docker.internal:8000/api/v1
-      OPENAI_API_KEY: ${OPENWEBUI_API_KEY:-sk-dummy-key}
-      ENABLE_OPENAI_API: "true"
-      ENABLE_OLLAMA_API: "false"
-      WEBUI_AUTH: "true"
-      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-in-production}
-      WEBUI_NAME: ${WEBUI_NAME:-Vayu Maya - AI Cloud Assistant}
-      # Custom logo
-      WEBUI_LOGO_URL: "/static/logo.jpg"
-    volumes:
-      - openwebui_data:/app/backend/data
-      - ./logo.jpg:/app/backend/static/logo.jpg:ro
-    ports:
-      - "${WEBUI_PORT:-3000}:8080"
-    networks:
-      - rag-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+  # open-webui:
+  #   image: ghcr.io/open-webui/open-webui:main
+  #   container_name: enterprise-rag-openwebui
+  #   restart: unless-stopped
+  #   environment:
+  #     OPENAI_API_BASE_URL: http://host.docker.internal:8000/api/v1
+  #     OPENAI_API_KEY: ${OPENWEBUI_API_KEY:-sk-dummy-key}
+  #     ENABLE_OPENAI_API: "true"
+  #     ENABLE_OLLAMA_API: "false"
+  #     WEBUI_AUTH: "true"
+  #     WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-change-me-in-production}
+  #     WEBUI_NAME: ${WEBUI_NAME:-Vayu Maya - AI Cloud Assistant}
+  #     # Custom logo
+  #     WEBUI_LOGO_URL: "/static/logo.jpg"
+  #   volumes:
+  #     - openwebui_data:/app/backend/data
+  #     - ./logo.jpg:/app/backend/static/logo.jpg:ro
+  #   ports:
+  #     - "${WEBUI_PORT:-3000}:8080"
+  #   networks:
+  #     - rag-network
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
 
 # ---------------------------------------------------------------------------
 # Networks
@@ -126,4 +126,4 @@ volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
-  openwebui_data:
+  #openwebui_data:
