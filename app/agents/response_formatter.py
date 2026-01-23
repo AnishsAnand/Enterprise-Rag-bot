@@ -151,6 +151,204 @@ class ResponseFormatter:
             return str(result)
     
     @staticmethod
+    def format_firewall_list(data: Dict[str, Any]) -> str:
+        """
+        Format firewall listing response into user-friendly text.
+        
+        Maps raw API fields to clean display names matching the UI:
+        - NAME (combination of name fields)
+        - IP
+        - TYPE (Fortinet, Vayu Firewall(F), Vayu Firewall(N))
+        - STATUS
+        - LOCATION
+        
+        Args:
+            data: Firewall data from API
+            
+        Returns:
+            Formatted string for display
+        """
+        try:
+            if not data.get("success"):
+                return f"❌ Failed to retrieve firewalls: {data.get('error', 'Unknown error')}"
+            
+            firewalls = data.get("data", [])
+            if not firewalls:
+                return "🔥 No firewalls found."
+            
+            total = data.get("total", len(firewalls))
+            metadata = data.get("metadata", {})
+            location_filter = metadata.get("location_filter")
+            
+            # Build summary
+            response = f"🔥 Found **{total} firewall(s)**"
+            if location_filter:
+                response += f" in **{location_filter}**"
+            response += "\n\n"
+            
+            # Group by location/endpoint if available
+            by_location = {}
+            for fw in firewalls:
+                # Extract location from endpoint info or name
+                location = fw.get("_location") or fw.get("endpointName") or "Unknown Location"
+                if location not in by_location:
+                    by_location[location] = []
+                by_location[location].append(fw)
+            
+            # Build table for each location
+            for location, location_firewalls in sorted(by_location.items()):
+                response += f"### 📍 {location}\n\n"
+                
+                # Create markdown table (matching UI: Name, IP, Type)
+                response += "| Name | IP | Type |\n"
+                response += "|------|-----|------|\n"
+                
+                for fw in location_firewalls[:20]:  # Max 20 per location
+                    # Extract name - try multiple fields
+                    name = ResponseFormatter._extract_firewall_name(fw)
+                    
+                    # Extract IP - check multiple possible field names
+                    ip = (
+                        fw.get("ip") or 
+                        fw.get("IP") or 
+                        fw.get("managementIp") or 
+                        fw.get("MANAGEMENTIP") or
+                        "N/A"
+                    )
+                    # Handle edge cases like IP = 0 or "None"
+                    if ip in [0, "0", "None", "null", None, ""]:
+                        ip = "N/A"
+                    
+                    # Extract type with user-friendly mapping
+                    fw_type = ResponseFormatter._extract_firewall_type(fw)
+                    
+                    response += f"| **{name}** | {ip} | {fw_type} |\n"
+                
+                if len(location_firewalls) > 20:
+                    response += f"\n*... and {len(location_firewalls) - 20} more firewalls*\n"
+                
+                response += "\n"
+            
+            # Add helpful tip
+            response += "💡 **Tip:** Ask about a specific firewall by name for more details.\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error formatting firewall list: {e}", exc_info=True)
+            # Fallback - show count at minimum
+            count = len(data.get("data", []))
+            return f"🔥 Found **{count} firewall(s)** (formatting error: {str(e)})"
+    
+    @staticmethod
+    def _extract_firewall_name(fw: Dict[str, Any]) -> str:
+        """
+        Extract user-friendly firewall name from raw API data.
+        UI format example: "ANP_Test (ANP_Test)" or "axis-dry-run (TataCo_725)"
+        
+        API returns:
+        - displayName: Main firewall name (e.g., "ANP_Test")
+        - department: Array of [{name: "dept_name", id: "..."}]
+        - basicDetails: May contain name/label info
+        """
+        # Priority 1: displayName (the main firewall name from API)
+        name = (
+            fw.get("displayName") or 
+            fw.get("name") or 
+            fw.get("technicalName") or
+            fw.get("firewallName") or 
+            fw.get("componentName")
+        )
+        
+        # Priority 2: Check basicDetails for name
+        basic_details = fw.get("basicDetails") or fw.get("BASICDETAILS") or {}
+        if not name and isinstance(basic_details, dict):
+            name = (
+                basic_details.get("name") or 
+                basic_details.get("displayName") or
+                basic_details.get("firewallName") or
+                basic_details.get("label")
+            )
+        
+        # Priority 3: Get department/tenant name for context (shown in parentheses)
+        department = fw.get("department") or fw.get("DEPARTMENT")
+        dept_name = None
+        
+        if isinstance(department, list) and department:
+            # Department is a list of dicts like [{"name": "qatest0801", "id": "6083"}]
+            first_dept = department[0]
+            if isinstance(first_dept, dict):
+                dept_name = first_dept.get("name") or first_dept.get("departmentName")
+        elif isinstance(department, dict):
+            dept_name = department.get("name") or department.get("departmentName")
+        elif isinstance(department, str):
+            dept_name = department
+        
+        # Also check for tenant/engagement name fields
+        if not dept_name:
+            dept_name = fw.get("tenantName") or fw.get("engagementName")
+        
+        # Build display name matching UI format: "FirewallName (DepartmentName)"
+        if name and dept_name and name != dept_name:
+            return f"{name} ({dept_name})"
+        elif name:
+            return name
+        elif dept_name:
+            # If no name but have department, use department as primary
+            return dept_name
+        else:
+            # Fallback to ID
+            fw_id = fw.get("id") or fw.get("firewallId") or fw.get("circuitId") or fw.get("ENDCOMPID")
+            return f"Firewall-{fw_id}" if fw_id else "Unknown"
+    
+    @staticmethod
+    def _extract_firewall_type(fw: Dict[str, Any]) -> str:
+        """
+        Extract user-friendly firewall type.
+        Maps raw values to UI display:
+        - "IZO FW (F)" -> "Vayu Firewall(F)" with icon
+        - "IZO FW (N)" -> "Vayu Firewall(N)" with icon
+        - "Fortinet" -> "Fortinet" with icon
+        
+        API fields (in priority order):
+        - LOGO: Contains "IZO FW (F)", "IZO FW (N)", "Fortinet"
+        - component: Contains "Vayu Firewall(F)", etc.
+        - componentType: May have type info
+        """
+        # LOGO field is the primary source for firewall type (from raw API)
+        logo = fw.get("LOGO") or fw.get("logo") or ""
+        # component field is used by some API responses
+        component = fw.get("component") or fw.get("COMPONENT") or ""
+        # componentType as fallback
+        component_type = fw.get("componentType") or fw.get("COMPONENTTYPE") or ""
+        fw_type = fw.get("type") or fw.get("firewallType") or ""
+        
+        # Combine all type sources for checking
+        logo_str = str(logo).upper() if logo else ""
+        component_str = str(component).upper() if component else ""
+        type_str = str(component_type or fw_type).upper()
+        
+        # Check all sources for type identification
+        all_type_info = f"{logo_str} {component_str} {type_str}"
+        
+        # Map to user-friendly types (order matters - check specific first)
+        if "FORTINET" in all_type_info:
+            return "🟧 Fortinet"
+        elif "IZO FW (F)" in all_type_info or "FW (F)" in all_type_info or "VAYU FIREWALL(F)" in all_type_info:
+            return "🔵 Vayu Firewall(F)"
+        elif "IZO FW (N)" in all_type_info or "FW (N)" in all_type_info or "VAYU FIREWALL(N)" in all_type_info:
+            return "🟢 Vayu Firewall(N)"
+        elif "IZO" in all_type_info or "VAYU" in all_type_info:
+            return "🔷 Vayu Firewall"
+        elif logo:
+            # Return raw logo value if we couldn't map it
+            return str(logo)
+        elif component:
+            return str(component)
+        else:
+            return "Unknown"
+
+    @staticmethod
     def format_rag_response(data: Dict[str, Any]) -> str:
         """
         Format RAG agent response.
@@ -599,6 +797,10 @@ class ResponseFormatter:
                 
                 elif "metadata" in data and data.get("metadata", {}).get("resource_type") == "load_balancer":
                     return ResponseFormatter.format_load_balancer_list(data)
+                
+                # Check for firewall response
+                elif "metadata" in data and data.get("metadata", {}).get("resource_type") == "firewall":
+                    return ResponseFormatter.format_firewall_list(data)
                 
                 # Check for endpoints
                 elif "endpoints" in data:

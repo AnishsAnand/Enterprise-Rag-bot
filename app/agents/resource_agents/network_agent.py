@@ -4,7 +4,6 @@ PRODUCTION: Load balancer functionality moved to LoadBalancerAgent.
 """
 
 from typing import Any, Dict, List, Optional
-import json
 import logging
 
 from app.agents.resource_agents.base_resource_agent import BaseResourceAgent
@@ -99,70 +98,102 @@ class NetworkAgent(BaseResourceAgent):
                     "response": f"Failed to list firewalls: {result.get('error')}"}
             firewalls = result.get("data", [])
             logger.info(f"✅ Found {len(firewalls)} firewalls")
-            # Prefer deterministic formatting to avoid LB-style fields
-            formatted_response = self._format_firewall_dynamic_table(
-                firewalls,
-                params.get("endpoint_names", []),
-                endpoint_ids
+            
+            # Enrich firewalls with location data
+            endpoint_names = params.get("endpoint_names", [])
+            enriched_firewalls = self._enrich_firewalls_with_location(
+                firewalls, endpoint_ids, endpoint_names
             )
+            
+            # Use LLM formatter for intelligent, user-friendly formatting
+            # (consistent with all other agents: VM, K8s, LoadBalancer, etc.)
+            formatted_response = await self.format_response_with_llm(
+                operation="list",
+                raw_data=enriched_firewalls,
+                user_query=user_query,
+                context={
+                    "query_type": "general",
+                    "total_count": len(enriched_firewalls),
+                    "location_filter": params.get("location_filter"),
+                    "endpoint_names": endpoint_names
+                }
+            )
+            
             return {
                 "success": True,
-                "data": firewalls,
+                "data": enriched_firewalls,
                 "response": formatted_response,
                 "metadata": {
-                    "count": len(firewalls),
-                    "resource_type": "firewall"} }
+                    "count": len(enriched_firewalls),
+                    "resource_type": "firewall"
+                }
+            }
         except Exception as e:
             logger.error(f"❌ Error listing firewalls: {str(e)}", exc_info=True)
             raise
 
-    def _format_firewall_dynamic_table(
+    def _enrich_firewalls_with_location(
         self,
         firewalls: List[Dict[str, Any]],
-        endpoint_names: List[str],
-        endpoint_ids: Optional[List[int]] = None
-    ) -> str:
-        """Render firewall list using raw API fields."""
-        if not firewalls:
-            return "🔥 No firewalls found for the selected datacenter(s)."
-
+        endpoint_ids: Optional[List[int]] = None,
+        endpoint_names: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Enrich firewall data with location information.
+        
+        Args:
+            firewalls: Raw firewall data from API
+            endpoint_ids: List of endpoint IDs queried
+            endpoint_names: List of endpoint/datacenter names
+            
+        Returns:
+            Enriched firewall list with _location field
+        """
+        # Build endpoint ID to name mapping
         endpoint_map = {}
-        if endpoint_ids and endpoint_names and len(endpoint_ids) == len(endpoint_names):
-            endpoint_map = {eid: name for eid, name in zip(endpoint_ids, endpoint_names)}
-
-        # Build a stable set of columns from the raw payload keys
-        columns = []
+        if endpoint_ids and endpoint_names:
+            for eid, name in zip(endpoint_ids, endpoint_names):
+                if eid is not None:
+                    endpoint_map[eid] = name
+        
+        enriched = []
         for fw in firewalls:
-            if isinstance(fw, dict):
-                for key in fw.keys():
-                    if key not in columns and key not in ["_queried_endpoint_id"]:
-                        columns.append(key)
-            if len(columns) >= 8:
-                break
-
-        if not columns:
-            return "🔥 No firewall fields available from the API response."
-
-        summary = f"🔥 Found **{len(firewalls)} firewalls** across **{len(endpoint_names) or 1} datacenter(s)**"
-        if len(endpoint_names) == 1:
-            summary += f"\n\n**Location:** {endpoint_names[0]}"
-
-        lines = [summary, ""]
-        header = " | ".join(columns + (["endpoint"] if endpoint_map else []))
-        separator = " | ".join(["---"] * (len(columns) + (1 if endpoint_map else 0)))
-        lines.append(f"| {header} |")
-        lines.append(f"| {separator} |")
-
-        for fw in firewalls:
-            row_values = []
-            for col in columns:
-                val = fw.get(col, "")
-                if isinstance(val, (dict, list)):
-                    val = json.dumps(val)[:120]
-                row_values.append(str(val))
-            if endpoint_map:
-                endpoint_id = fw.get("_queried_endpoint_id")
-                row_values.append(endpoint_map.get(endpoint_id, ""))
-            lines.append("| " + " | ".join(row_values) + " |")
-
-        return "\n".join(lines)
+            enriched_fw = {**fw}  # Copy original data
+            
+            # Try to get location from endpoint mapping
+            queried_endpoint = fw.get("_queried_endpoint_id")
+            if queried_endpoint and queried_endpoint in endpoint_map:
+                enriched_fw["_location"] = endpoint_map[queried_endpoint]
+            else:
+                # Try to extract from firewall data
+                location = (
+                    fw.get("endpointName") or 
+                    fw.get("locationName") or 
+                    fw.get("datacenter") or
+                    self._extract_location_from_fw_name(fw)
+                )
+                enriched_fw["_location"] = location or "Unknown"
+            
+            enriched.append(enriched_fw)
+        
+        return enriched
+    
+    def _extract_location_from_fw_name(self, fw: Dict[str, Any]) -> Optional[str]:
+        """Extract location from firewall name if possible."""
+        name = fw.get("name") or fw.get("firewallName") or ""
+        name_lower = name.lower()
+        
+        location_patterns = {
+            "Mumbai": ["mumbai", "bkc", "mum"],
+            "Delhi": ["delhi", "del", "ncr"],
+            "Chennai": ["chennai", "che", "amb"],
+            "Bengaluru": ["bengaluru", "bangalore", "blr"],
+            "Hyderabad": ["hyderabad", "hyd"],
+            "Pune": ["pune"]
+        }
+        
+        for location, patterns in location_patterns.items():
+            if any(p in name_lower for p in patterns):
+                return location
+        
+        return None

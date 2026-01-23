@@ -25,6 +25,8 @@ from app.api.routes import (
     user_credentials,
 )
 from app.api.routes.user_chat import router as user_chat_router
+from app.api.routes.webui_chats import router as webui_chats_router
+from app.api.routes.webui_config import router as webui_config_router
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
@@ -181,6 +183,11 @@ app.include_router(tata_auth.router)
 app.include_router(user_credentials.router)
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
+
+# WebUI-compatible APIs (OpenWebUI replacement)
+app.include_router(webui_chats_router)  # /api/v1/chats endpoints
+app.include_router(webui_config_router)  # /api/config endpoint
+
 # ===================== Static Files & Frontend =====================
 BASE_DIR = Path(__file__).resolve().parent.parent
 frontend_path = BASE_DIR / "dist" / "enterprise-rag-frontend"

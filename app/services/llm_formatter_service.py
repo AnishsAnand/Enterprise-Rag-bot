@@ -94,24 +94,41 @@ class LLMFormatterService:
     ) -> str:
         """Build context-aware formatting prompt."""
         
-        # Truncate data if too large (prompt only)
-        data_str = json.dumps(raw_data, indent=2, default=str)
-        is_prompt_truncated = False
+        # Get actual count BEFORE any truncation
         actual_count = self._get_actual_count(raw_data)
         
-        if len(data_str) > 8000:
-            data_str = data_str[:8000] + "\n... (truncated)"
+        # Smart truncation: limit items in list to avoid cutting JSON mid-object
+        is_prompt_truncated = False
+        display_data = raw_data
+        
+        if isinstance(raw_data, list) and len(raw_data) > 60:
+            # For lists, show first 60 items instead of truncating JSON mid-way
+            display_data = raw_data[:60]
             is_prompt_truncated = True
+            logger.info(f"📋 Limiting display to 60 of {len(raw_data)} items for LLM formatting")
         
-        # Only show truncation notice if the result itself was truncated upstream
-        data_truncated = False
+        data_str = json.dumps(display_data, indent=2, default=str)
+        
+        # Still apply character limit as safety net (higher limit to avoid truncation)
+        if len(data_str) > 50000:
+            data_str = data_str[:50000] + "\n... (truncated)"
+            is_prompt_truncated = True
+            logger.warning(f"⚠️ Data truncated to 50000 chars. Actual count: {actual_count}")
+        
+        # Check if data was truncated upstream OR by us
+        data_truncated = is_prompt_truncated  # Include our own truncation!
         if context and isinstance(context, dict):
-            data_truncated = bool(context.get("data_truncated"))
+            data_truncated = data_truncated or bool(context.get("data_truncated"))
         if not data_truncated and isinstance(raw_data, dict):
-            data_truncated = bool(raw_data.get("truncated"))
+            data_truncated = data_truncated or bool(raw_data.get("truncated"))
         
-        # Count notice
+        # Count notice - CRITICAL: Tell LLM the actual count
         count_notice = ""
+        
+        # ALWAYS tell LLM the actual count to prevent it from filtering/omitting items
+        if actual_count > 0:
+            count_notice = f"\n\n**CRITICAL: The data contains {actual_count} items. You MUST display ALL {actual_count} items in your response. Do NOT filter or omit any items - the data is already filtered by the system.**"
+        
         if data_truncated and actual_count > 0:
             count_notice = (
                 "\n\n**IMPORTANT: The data below is truncated for processing. "
@@ -149,8 +166,10 @@ class LLMFormatterService:
 - Add helpful emojis
 - Be concise - don't overwhelm with details
 - No raw JSON in response
+- SHOW ALL ITEMS in the data - do NOT filter or omit any
+- The data is already filtered by location/endpoint - display everything provided
 
-**CRITICAL: Respect the query_type above. Format accordingly.**"""
+**CRITICAL: Respect the query_type above. Format accordingly. Display ALL items in the data.**"""
     
     def _get_query_type_instructions(
         self,
@@ -283,15 +302,41 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
 **Remember:** Load balancers are critical infrastructure - be clear and actionable!"""
 
         elif resource_type == "firewall":
-            return """**Firewall Fields:**
-- Firewall name, status, location/datacenter
-- Rule count or policy summary if available
-- Associated endpoint/edge gateway if present
+            return """**Firewall Fields (CRITICAL - extract correctly):**
 
-**Formatting Rules (required):**
-- Do NOT add VIP, protocol, or LB-specific columns
+**Name Extraction (in priority order):**
+1. `displayName` - primary firewall name
+2. `department[0].name` - department/tenant name (often the only name available)
+3. Format as: "FirewallName (DepartmentName)" if both exist, otherwise just use what's available
+4. Fallback to ID only if nothing else exists
+
+**Type Extraction:**
+- Check `LOGO` field first: "IZO FW (F)" → "Vayu Firewall(F)", "IZO FW (N)" → "Vayu Firewall(N)", "Fortinet" → "Fortinet"
+- Check `component` field: May contain "Vayu Firewall(F)", etc.
+- Use 🔵 for Vayu Firewall(F), 🟢 for Vayu Firewall(N), 🟧 for Fortinet
+
+**IP Extraction:**
+- Check `ip` or `IP` field
+- If value is 0, "0", "None", or empty, show "N/A"
+
+**Table Format (required for lists):**
+| Name | IP | Type |
+|------|-----|------|
+| **DisplayName (Dept)** | 100.108.0.100 | 🔵 Vayu Firewall(F) |
+
+**Formatting Rules:**
+- Start with: 🔥 Found **X firewall(s)** [in Location if filtered]
+- Group by `_location` field if present
+- Use ### 📍 LocationName for each group
+- Do NOT add VIP, protocol, status columns (API doesn't provide these)
 - Do NOT invent values; if a field is missing, omit it
-- Use 🔥 in the summary line and ✅/⚠️/❌ for status if available"""
+- Add tip at end: 💡 **Tip:** Ask about a specific firewall by name for more details.
+
+**CRITICAL - SHOW ALL ITEMS:**
+- The data provided is ALREADY FILTERED by the system based on user's location/endpoint query
+- You MUST display ALL firewalls in the data, not just ones matching a keyword
+- Do NOT filter by name pattern - if user asked for "blr endpoint", ALL firewalls from that endpoint are in the data
+- Count the items in the JSON and ensure your table has the same number of rows"""
         
         elif resource_type == "k8s_cluster":
             return """**Kubernetes Cluster Fields:**

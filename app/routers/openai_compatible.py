@@ -189,8 +189,8 @@ async def get_rich_content_from_widget(
         
         logger.info(f"[OpenWebUI] Calling widget endpoint for rich content: {query[:50]}")
         
-        # Make async HTTP call to widget
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Make async HTTP call to widget (longer timeout for SSE/streaming operations)
+        async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(widget_url, json=widget_payload)
             
             if response.status_code == 200:
@@ -208,8 +208,11 @@ async def get_rich_content_from_widget(
                 )
                 return None
                 
+    except httpx.TimeoutException as e:
+        logger.warning(f"[OpenWebUI] Widget call timeout after 120s: {type(e).__name__}")
+        return None
     except Exception as e:
-        logger.warning(f"[OpenWebUI] Widget call exception: {e}")
+        logger.warning(f"[OpenWebUI] Widget call exception: {type(e).__name__}: {e}")
         return None
 
 

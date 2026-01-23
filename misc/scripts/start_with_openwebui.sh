@@ -60,14 +60,14 @@ else
 fi
 
 # Check Backend
-if curl -s http://localhost:8001/health > /dev/null; then
-    echo -e "${GREEN}✅ Backend API is running (http://localhost:8001)${NC}"
+if curl -s http://localhost:8000/health > /dev/null; then
+    echo -e "${GREEN}✅ Backend API is running (http://localhost:8000)${NC}"
 else
     echo -e "${RED}❌ Backend API is not responding${NC}"
 fi
 
 # Check OpenAI endpoints
-if curl -s http://localhost:8001/api/v1/models > /dev/null; then
+if curl -s http://localhost:8000/api/v1/models > /dev/null; then
     echo -e "${GREEN}✅ OpenAI-compatible endpoints working${NC}"
 else
     echo -e "${YELLOW}⚠️  OpenAI endpoints may not be ready yet${NC}"
@@ -84,8 +84,8 @@ echo "======================================================================="
 echo ""
 echo "Access your services:"
 echo "  🌐 Open WebUI:        http://localhost:3000"
-echo "  🔧 Backend API:       http://localhost:8001"
-echo "  📚 API Docs:          http://localhost:8001/docs"
+echo "  🔧 Backend API:       http://localhost:8000"
+echo "  📚 API Docs:          http://localhost:8000/docs"
 echo "  💾 MinIO Console:     http://localhost:9001"
 echo ""
 echo "Next steps:"
@@ -101,3 +101,4 @@ echo "Stop services:"
 echo "  docker-compose -f docker-compose.openwebui.yml down"
 echo ""
 echo "======================================================================="
+
