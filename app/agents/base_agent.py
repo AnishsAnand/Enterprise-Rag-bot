@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Fallback models to try when primary model fails
 FALLBACK_MODELS = [
-    "meta/Llama-3.1-8B-Instruct",  # Most reliable fallback
     "meta/llama-3.1-70b-instruct",
+    "openai/gpt-oss-120b",
+    "openai/gpt-4o-mini",
 ]
 
 class BaseAgent(ABC):
@@ -44,7 +45,7 @@ class BaseAgent(ABC):
         # Get model configuration from environment
         self.grok_base_url = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
         self.grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
-        self.model_name = model_name or os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+        self.model_name = model_name or os.getenv("CHAT_MODEL", "meta/Llama-3.1-8B-Instruct")
         
         # Track failed models to avoid retrying
         self.failed_models: set = set()

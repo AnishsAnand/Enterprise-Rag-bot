@@ -15,14 +15,14 @@ import uvicorn
 
 from app.core.config import settings
 from app.api.routes import (
-    scraper,
-    rag,
-    admin,
-    support,
     rag_widget,
     agent_chat,
     health,
     chat_persistence,
+    orchestrator,
+    openwebui_auth,
+    tata_auth,
+    user_credentials,
 )
 from app.api.routes.user_chat import router as user_chat_router
 from app.routers import openai_compatible
@@ -170,15 +170,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # ===================== API Routes =====================
 app.include_router(health.router)  # Add health check routes
-app.include_router(scraper.router, prefix="/api/scraper", tags=["scraper"])
-app.include_router(rag.router, prefix="/api/rag", tags=["rag"])
 app.include_router(rag_widget.router, prefix="/api", tags=["rag-widget"])
 app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widget"], include_in_schema=False)
-app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
-app.include_router(support.router, prefix="/api/support", tags=["support"])
 app.include_router(agent_chat.router, tags=["agent-chat"])
 app.include_router(chat_persistence.router)
 app.include_router(user_chat_router)
+app.include_router(orchestrator.router)
+app.include_router(openwebui_auth.router)
+app.include_router(tata_auth.router)
+app.include_router(user_credentials.router)
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
 # ===================== Static Files & Frontend =====================

@@ -4,6 +4,7 @@ PRODUCTION: Load balancer functionality moved to LoadBalancerAgent.
 """
 
 from typing import Any, Dict, List, Optional
+import json
 import logging
 
 from app.agents.resource_agents.base_resource_agent import BaseResourceAgent
@@ -19,7 +20,7 @@ class NetworkAgent(BaseResourceAgent):
         super().__init__(
             agent_name="NetworkAgent",
             agent_description="Specialized agent for firewall operations",
-            resource_type="network",
+            resource_type="firewall",
             temperature=0.2
         )
     
@@ -87,7 +88,10 @@ class NetworkAgent(BaseResourceAgent):
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             logger.info(f"🔍 Listing firewalls for endpoints: {endpoint_ids}")
             # Call API executor service
-            result = await api_executor_service.list_firewalls(endpoint_ids=endpoint_ids,ipc_engagement_id=ipc_engagement_id,user_id=user_id)
+            result = await api_executor_service.list_firewalls(
+                endpoint_ids=endpoint_ids,
+                ipc_engagement_id=ipc_engagement_id
+            )
             if not result.get("success"):
                 return {
                     "success": False,
@@ -95,15 +99,12 @@ class NetworkAgent(BaseResourceAgent):
                     "response": f"Failed to list firewalls: {result.get('error')}"}
             firewalls = result.get("data", [])
             logger.info(f"✅ Found {len(firewalls)} firewalls")
-            # Format with LLM
-            formatted_response = await self.format_response_with_llm(
-                operation="list",
-                raw_data=firewalls,
-                user_query=user_query,
-                context={
-                    "endpoint_names": params.get("endpoint_names", []),
-                    "ipc_engagement_id": ipc_engagement_id,
-                    "resource_type": "firewall"})
+            # Prefer deterministic formatting to avoid LB-style fields
+            formatted_response = self._format_firewall_dynamic_table(
+                firewalls,
+                params.get("endpoint_names", []),
+                endpoint_ids
+            )
             return {
                 "success": True,
                 "data": firewalls,
@@ -114,3 +115,54 @@ class NetworkAgent(BaseResourceAgent):
         except Exception as e:
             logger.error(f"❌ Error listing firewalls: {str(e)}", exc_info=True)
             raise
+
+    def _format_firewall_dynamic_table(
+        self,
+        firewalls: List[Dict[str, Any]],
+        endpoint_names: List[str],
+        endpoint_ids: Optional[List[int]] = None
+    ) -> str:
+        """Render firewall list using raw API fields."""
+        if not firewalls:
+            return "🔥 No firewalls found for the selected datacenter(s)."
+
+        endpoint_map = {}
+        if endpoint_ids and endpoint_names and len(endpoint_ids) == len(endpoint_names):
+            endpoint_map = {eid: name for eid, name in zip(endpoint_ids, endpoint_names)}
+
+        # Build a stable set of columns from the raw payload keys
+        columns = []
+        for fw in firewalls:
+            if isinstance(fw, dict):
+                for key in fw.keys():
+                    if key not in columns and key not in ["_queried_endpoint_id"]:
+                        columns.append(key)
+            if len(columns) >= 8:
+                break
+
+        if not columns:
+            return "🔥 No firewall fields available from the API response."
+
+        summary = f"🔥 Found **{len(firewalls)} firewalls** across **{len(endpoint_names) or 1} datacenter(s)**"
+        if len(endpoint_names) == 1:
+            summary += f"\n\n**Location:** {endpoint_names[0]}"
+
+        lines = [summary, ""]
+        header = " | ".join(columns + (["endpoint"] if endpoint_map else []))
+        separator = " | ".join(["---"] * (len(columns) + (1 if endpoint_map else 0)))
+        lines.append(f"| {header} |")
+        lines.append(f"| {separator} |")
+
+        for fw in firewalls:
+            row_values = []
+            for col in columns:
+                val = fw.get(col, "")
+                if isinstance(val, (dict, list)):
+                    val = json.dumps(val)[:120]
+                row_values.append(str(val))
+            if endpoint_map:
+                endpoint_id = fw.get("_queried_endpoint_id")
+                row_values.append(endpoint_map.get(endpoint_id, ""))
+            lines.append("| " + " | ".join(row_values) + " |")
+
+        return "\n".join(lines)

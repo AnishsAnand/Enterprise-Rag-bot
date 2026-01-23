@@ -94,18 +94,25 @@ class LLMFormatterService:
     ) -> str:
         """Build context-aware formatting prompt."""
         
-        # Truncate data if too large
+        # Truncate data if too large (prompt only)
         data_str = json.dumps(raw_data, indent=2, default=str)
-        is_truncated = False
+        is_prompt_truncated = False
         actual_count = self._get_actual_count(raw_data)
         
         if len(data_str) > 8000:
             data_str = data_str[:8000] + "\n... (truncated)"
-            is_truncated = True
+            is_prompt_truncated = True
+        
+        # Only show truncation notice if the result itself was truncated upstream
+        data_truncated = False
+        if context and isinstance(context, dict):
+            data_truncated = bool(context.get("data_truncated"))
+        if not data_truncated and isinstance(raw_data, dict):
+            data_truncated = bool(raw_data.get("truncated"))
         
         # Count notice
         count_notice = ""
-        if is_truncated and actual_count > 0:
+        if data_truncated and actual_count > 0:
             count_notice = (
                 "\n\n**IMPORTANT: The data below is truncated for processing. "
                 f"The ACTUAL total count is {actual_count} items. "
@@ -274,13 +281,40 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
 - Round Robin, Least Connections, IP Hash, etc.
 
 **Remember:** Load balancers are critical infrastructure - be clear and actionable!"""
+
+        elif resource_type == "firewall":
+            return """**Firewall Fields:**
+- Firewall name, status, location/datacenter
+- Rule count or policy summary if available
+- Associated endpoint/edge gateway if present
+
+**Formatting Rules (required):**
+- Do NOT add VIP, protocol, or LB-specific columns
+- Do NOT invent values; if a field is missing, omit it
+- Use 🔥 in the summary line and ✅/⚠️/❌ for status if available"""
         
         elif resource_type == "k8s_cluster":
             return """**Kubernetes Cluster Fields:**
 - Cluster name, status, K8s version
 - Node count and health
 - Control plane type
-- Location/datacenter"""
+- Location/datacenter
+
+**Emoji Guidance (required):**
+- Prefix status with emoji: ✅ Running, ⚠️ Deleting, ⏳ Creating, ❌ Failed/Stopped
+- Use 📍 for location and 🚢 for the summary line
+- If using a table, include the emoji in the Status column"""
+        
+        elif resource_type == "vm":
+            return """**Virtual Machine Fields:**
+- VM name, status, storage
+- Health and location/datacenter
+- Include tags only if user asked
+
+**Emoji Guidance (required):**
+- Prefix status with emoji: ✅ Running, ⚠️ Deleting, ⏳ Creating, ❌ Stopped/Failed
+- Use 📍 for location and 🖥️ for the summary line
+- If using a table, include the emoji in the Status column"""
         
         else:
             return f"""**{resource_type.title()} Fields:**

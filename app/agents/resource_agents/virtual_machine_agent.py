@@ -60,6 +60,15 @@ class VirtualMachineAgent(BaseResourceAgent):
                 if mapped_name:
                     endpoint_filter = mapped_name
                     logger.info(f"✅ Mapped abbreviation to full name: {endpoint_filter}")
+            # Fallback: infer endpoint filter from user query if still missing
+            user_query = context.get("user_query", "") if context else ""
+            if not endpoint_filter and user_query:
+                inferred = self._extract_endpoint_filter(user_query)
+                if inferred:
+                    endpoint_filter = inferred
+                    logger.info(f"✅ Inferred endpoint from query: {endpoint_filter}")
+            if endpoint_filter and endpoint_filter not in endpoint_names:
+                endpoint_names = endpoint_names + [endpoint_filter]
             logger.info(f"🔍 Listing VMs with filters: endpoint={endpoint_filter}, zone={zone_filter}, dept={department_filter}")
             result = await api_executor_service.list_vms(
                 endpoint_filter=endpoint_filter,
@@ -74,8 +83,13 @@ class VirtualMachineAgent(BaseResourceAgent):
             logger.info(f"✅ Found {len(vms)} VMs")
             # Simplify VM data for better LLM processing
             simplified_vms = self._simplify_vm_data(vms)
+            if endpoint_filter:
+                simplified_vms = [
+                    vm for vm in simplified_vms
+                    if endpoint_filter.lower() in (vm.get("endpoint") or "").lower()
+                ]
             # Use common LLM formatter
-            user_query = context.get("user_query", "")
+            user_query = context.get("user_query", "") if context else ""
             formatted_response = await self.format_response_with_llm(
                 operation="list",
                 raw_data=simplified_vms,
@@ -106,3 +120,29 @@ class VirtualMachineAgent(BaseResourceAgent):
                 "isBudgetingEnabled": vm.get("isBudgetingEnabled", "no"),
                 "tags": vm.get("tags", [])})
         return simplified_vms
+
+    def _extract_endpoint_filter(self, user_query: str) -> str:
+        """Infer endpoint filter from the user query (e.g., 'vms in blr')."""
+        query_lower = user_query.lower()
+        abbrev_map = {
+            "blr": "Bengaluru",
+            "del": "Delhi",
+            "mum": "Mumbai-BKC",
+            "bkc": "Mumbai-BKC",
+            "chennai": "Chennai-AMB",
+            "singapore": "Singapore East",
+            "sg": "Singapore East"
+        }
+        # Direct abbreviation match
+        for abbr, full in abbrev_map.items():
+            if f" {abbr} " in f" {query_lower} ":
+                return full
+        # Direct full-name match
+        known_locations = [
+            "bengaluru", "delhi", "mumbai-bkc", "chennai-amb",
+            "singapore east", "mumbai"
+        ]
+        for loc in known_locations:
+            if loc in query_lower:
+                return loc.title() if loc != "mumbai-bkc" else "Mumbai-BKC"
+        return ""

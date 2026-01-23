@@ -30,13 +30,12 @@ MAX_CHUNKS_RETURN = int(os.getenv("MAX_CHUNKS_RETURN", "12"))
 
 REQUIRED_EMBEDDING_DIM = 4096
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
-PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "openai/gpt-4o-mini")
-# Fallback models disabled - they all return 500 errors
-# Only use PRIMARY_CHAT_MODEL (openai/gpt-oss-120b) which is fast (0.2-0.3s) and reliable
+PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "meta/Llama-3.1-8B-Instruct")
+# Fallback order: larger llama, then gpt-oss, then gpt-4o-mini
 FALLBACK_CHAT_MODELS = [
-    "meta/llama-3.1-70b-instruct", 
-    "meta/Llama-3.1-8B-Instruct",
-    "openai/gpt-oss-120b",  # Moved to end as it's failing
+    "meta/llama-3.1-70b-instruct",
+    "openai/gpt-oss-120b",
+    "openai/gpt-4o-mini",
 ]
 # Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
 

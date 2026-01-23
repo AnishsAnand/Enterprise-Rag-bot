@@ -18,6 +18,7 @@ import os
 import time
 import uuid
 import json
+import re
 import logging
 from datetime import datetime
 import hashlib
@@ -546,7 +547,13 @@ async def chat_completions(
             confidence = 0.0
         
         # =====================================================================
-        # STEP 4: Log query (background task)
+        # STEP 4: Trim follow-up suggestions if requested
+        # =====================================================================
+        if _is_followup_request(query):
+            formatted_answer = _trim_followup_suggestions(formatted_answer)
+
+        # =====================================================================
+        # STEP 5: Log query (background task)
         # =====================================================================
         execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
         
@@ -565,7 +572,7 @@ async def chat_completions(
         )
         
         # =====================================================================
-        # STEP 5: Return response (streaming or non-streaming)
+        # STEP 6: Return response (streaming or non-streaming)
         # =====================================================================
         prompt_tokens = estimate_tokens(query)
         completion_tokens = estimate_tokens(formatted_answer)
@@ -642,6 +649,32 @@ async def chat_completions(
 # ============================================================================
 # Streaming Response Handler
 # ============================================================================
+
+def _is_followup_request(query: str) -> bool:
+    if not query:
+        return False
+    q = query.lower()
+    return "follow-up" in q or "follow up" in q
+
+
+def _trim_followup_suggestions(text: str) -> str:
+    """
+    Limit follow-up suggestions to 3-6 items.
+    """
+    if not text:
+        return text
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    suggestions = []
+    for line in lines:
+        cleaned = re.sub(r"^[-*•\d\.\)\s]+", "", line).strip()
+        if not cleaned:
+            continue
+        if "?" in cleaned or len(cleaned.split()) >= 3:
+            suggestions.append(cleaned)
+    if not suggestions:
+        return text
+    trimmed = suggestions[:6]
+    return "\n".join(f"- {s}" for s in trimmed)
 
 async def _stream_response(
     completion_id: str,

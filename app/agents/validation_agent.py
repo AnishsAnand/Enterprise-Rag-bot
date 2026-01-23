@@ -475,9 +475,17 @@ If NO location is mentioned in user's response:
         """
         user_lower = user_text.lower().strip()
         
-        # Check for "all" - be more flexible
-        all_keywords = ["all", "all of them", "all datacenters", "all endpoints", "all dc", "all locations", "everywhere"]
-        if any(keyword in user_lower for keyword in all_keywords):
+        # Check for "all" (word-boundary match to avoid "firewall")
+        all_phrases = [
+            r"\ball\b",
+            r"\ball of them\b",
+            r"\ball datacenters\b",
+            r"\ball endpoints\b",
+            r"\ball dc\b",
+            r"\ball locations\b",
+            r"\beverywhere\b",
+        ]
+        if any(re.search(pattern, user_lower) for pattern in all_phrases):
             matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
             matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
             logger.info(f"✅ Pattern matched 'all' keywords to {len(matched_ids)} endpoints")

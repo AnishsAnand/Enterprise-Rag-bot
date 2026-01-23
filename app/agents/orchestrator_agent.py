@@ -638,6 +638,8 @@ Respond with ONLY ONE of these:
                 "error": str(e),
                 "response": f"Error executing routing: {str(e)}",
                 "routing": route
+            }
+
     async def _handle_filter_selection(
         self,
         user_input: str,
