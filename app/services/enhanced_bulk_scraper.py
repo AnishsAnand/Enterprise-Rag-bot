@@ -1,6 +1,7 @@
 """
-PRODUCTION: Enhanced Bulk Scraping with Intelligent URL Discovery
+PRODUCTION: Enhanced Bulk Scraping with Intelligent 4-Strategy URL Discovery
 Maximizes document extraction while maintaining quality and performance.
+UPDATED: Multi-strategy URL discovery (sitemap, robots.txt, patterns, intelligent crawl)
 """
 
 import asyncio
@@ -12,6 +13,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 import xml.etree.ElementTree as ET
+import heapq
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -24,7 +26,11 @@ class ProductionBulkScraperService:
     Production-grade bulk scraper with maximum data extraction.
     
     Features:
-    - Sitemap.xml parsing (discovers 100-1000 URLs instantly)
+    - 4-STRATEGY URL DISCOVERY:
+      1. Sitemap.xml parsing (discovers 100-1000 URLs instantly)
+      2. Robots.txt mining (extracts sitemap directives)
+      3. Pattern-based discovery (tests common doc paths)
+      4. Intelligent crawling (priority queue with heap)
     - Robots.txt compliance
     - Priority-based URL queue (documentation first)
     - Parallel scraping (15 concurrent requests)
@@ -55,6 +61,8 @@ class ProductionBulkScraperService:
             "total_documents": 0,
             "total_images": 0,
             "from_sitemap": 0,
+            "from_robots": 0,
+            "from_patterns": 0,
             "from_crawl": 0,
             "start_time": None,
             "end_time": None,
@@ -63,7 +71,7 @@ class ProductionBulkScraperService:
         self.robots_cache: Dict[str, bool] = {}
     
     # ========================================================================
-    # SITEMAP.XML PARSING - FASTEST URL DISCOVERY
+    # STRATEGY 1: SITEMAP.XML PARSING - FASTEST URL DISCOVERY
     # ========================================================================
     
     async def parse_sitemap(self, base_url: str) -> List[str]:
@@ -130,81 +138,201 @@ class ProductionBulkScraperService:
                 continue
         
         self.stats["from_sitemap"] = len(sitemap_urls)
-        logger.info(f"📍 Sitemap discovery: {len(sitemap_urls)} URLs")
+        logger.info(f"📍 Strategy 1 (Sitemap): {len(sitemap_urls)} URLs")
         
         return sitemap_urls
     
     # ========================================================================
-    # INTELLIGENT URL DISCOVERY WITH PRIORITIZATION
+    # STRATEGY 2: ROBOTS.TXT MINING - EXTRACT SITEMAP DIRECTIVES
     # ========================================================================
     
-    async def discover_urls_intelligent(
+    async def _parse_robots_txt(self, base_url: str) -> List[str]:
+        """
+        Parse robots.txt to extract sitemap URLs.
+        
+        Example robots.txt:
+            User-agent: *
+            Sitemap: https://example.com/sitemap.xml
+            Sitemap: https://example.com/sitemap-news.xml
+        
+        Returns:
+            List of sitemap URLs found in robots.txt
+        """
+        sitemap_urls = []
+        robots_url = urljoin(base_url, "/robots.txt")
+        
+        try:
+            async with self.semaphore:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        robots_url,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        if response.status != 200:
+                            logger.debug(f"robots.txt not found: {robots_url}")
+                            return []
+                        
+                        content = await response.text()
+                        
+                        # Extract sitemap directives
+                        for line in content.split('\n'):
+                            line = line.strip()
+                            if line.lower().startswith('sitemap:'):
+                                sitemap_url = line.split(':', 1)[1].strip()
+                                sitemap_urls.append(sitemap_url)
+                                logger.info(f"Found sitemap in robots.txt: {sitemap_url}")
+        
+        except Exception as e:
+            logger.debug(f"Failed to parse robots.txt: {e}")
+        
+        self.stats["from_robots"] = len(sitemap_urls)
+        logger.info(f"📍 Strategy 2 (Robots.txt): {len(sitemap_urls)} sitemap URLs")
+        
+        return sitemap_urls
+    
+    # ========================================================================
+    # STRATEGY 3: PATTERN-BASED DISCOVERY - TEST COMMON DOC PATHS
+    # ========================================================================
+    
+    async def _discover_pattern_urls(self, base_url: str) -> List[str]:
+        """
+        Discover URLs by testing common documentation patterns.
+        
+        Common documentation paths:
+        - /docs, /documentation, /api, /guide, /tutorial
+        - /reference, /sdk, /getting-started, /quickstart
+        - /help, /support, /knowledge-base, /kb
+        
+        Returns:
+            List of valid URLs matching common patterns
+        """
+        base_domain = urlparse(base_url).netloc
+        pattern_urls = []
+        
+        # Common documentation paths (prioritized by likelihood)
+        common_patterns = [
+            "/docs", "/documentation", "/api", "/guide", "/tutorial",
+            "/reference", "/sdk", "/getting-started", "/quickstart",
+            "/help", "/support", "/knowledge-base", "/kb",
+            "/learn", "/resources", "/developer", "/api-reference",
+            "/user-guide", "/manual", "/handbook", "/wiki",
+        ]
+        
+        logger.info(f"🔍 Testing {len(common_patterns)} common documentation patterns...")
+        
+        # Test patterns in parallel batches
+        batch_size = 10
+        for i in range(0, len(common_patterns), batch_size):
+            batch = common_patterns[i:i + batch_size]
+            
+            # Create test URLs
+            test_urls = [urljoin(base_url, pattern) for pattern in batch]
+            
+            # Test in parallel
+            tasks = [self._test_url_exists(url) for url in test_urls]
+            results = await asyncio.gather(*tasks)
+            
+            # Collect valid URLs
+            for url, exists in zip(test_urls, results):
+                if exists:
+                    pattern_urls.append(url)
+                    logger.info(f"✅ Found pattern URL: {url}")
+        
+        self.stats["from_patterns"] = len(pattern_urls)
+        logger.info(f"📍 Strategy 3 (Patterns): {len(pattern_urls)} URLs")
+        
+        return pattern_urls
+    
+    async def _test_url_exists(self, url: str) -> bool:
+        """
+        Fast HEAD request to check if URL exists.
+        
+        Returns:
+            True if URL returns 200 status, False otherwise
+        """
+        try:
+            async with self.semaphore:
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                        allow_redirects=True
+                    ) as response:
+                        return response.status == 200
+        
+        except Exception:
+            return False
+    
+    # ========================================================================
+    # STRATEGY 4: INTELLIGENT CRAWLING - PRIORITY QUEUE WITH HEAP
+    # ========================================================================
+    
+    async def _intelligent_crawl(
         self,
         base_url: str,
-        max_depth: int = 20,  # INCREASED from 8
-        max_urls: int = 2000,  # INCREASED from 500
+        initial_urls: List[str],
+        max_depth: int,
+        max_urls: int
     ) -> List[str]:
         """
-        Intelligent URL discovery with priority-based crawling.
+        Intelligent crawling with priority queue using heap.
+        Only crawls if other strategies didn't find enough URLs.
         
-        Priority levels:
-        - 90-100: Documentation, API references, guides
-        - 70-89: Product pages, features, tutorials
-        - 50-69: Blog posts, news, articles
-        - 30-49: General content
-        - 0-29: Low-value pages (tags, categories)
+        Uses min-heap for efficient priority queue management.
+        
+        Args:
+            base_url: Base URL to crawl
+            initial_urls: Seed URLs from other strategies
+            max_depth: Maximum crawl depth
+            max_urls: Maximum URLs to discover
+        
+        Returns:
+            List of additional URLs discovered via crawling
         """
-        self.stats["start_time"] = datetime.now()
         base_domain = urlparse(base_url).netloc
+        crawl_urls = []
+        
+        # Initialize priority heap: (negative_priority, depth, url)
+        # Using negative priority for max-heap behavior
+        priority_heap = []
+        
+        # Add initial URLs to heap
+        for url in initial_urls:
+            priority = self._calculate_url_priority(url, "", 0)
+            heapq.heappush(priority_heap, (-priority, 0, url))
+        
+        # Add base URL if not in initial
+        if base_url not in initial_urls:
+            heapq.heappush(priority_heap, (-100, 0, base_url))
+        
+        visited_crawl = set(initial_urls)
         
         logger.info(
-            f"🔍 Starting intelligent discovery\n"
-            f"   Base: {base_url}\n"
-            f"   Max Depth: {max_depth}\n"
-            f"   Max URLs: {max_urls}"
+            f"🕷️ Starting intelligent crawl "
+            f"(heap size: {len(priority_heap)}, max: {max_urls})"
         )
         
-        # Step 1: Parse sitemap.xml (instant discovery)
-        sitemap_urls = await self.parse_sitemap(base_url)
-        
-        if sitemap_urls:
-            logger.info(f"✅ Sitemap provided {len(sitemap_urls)} URLs")
+        while priority_heap and len(crawl_urls) < max_urls:
+            # Pop highest priority URL
+            neg_priority, depth, current_url = heapq.heappop(priority_heap)
+            priority = -neg_priority
             
-            # Add to queue with priority
-            for url in sitemap_urls[:max_urls]:
-                priority = self._calculate_url_priority(url, "", 0)
-                self.url_queue.append((priority, 0, url))
-                self.discovered_urls.add(url)
-        
-        # Step 2: Add base URL if not in sitemap
-        if base_url not in self.discovered_urls:
-            self.url_queue.append((100, 0, base_url))
-            self.discovered_urls.add(base_url)
-        
-        # Step 3: Crawl for additional URLs
-        while self.url_queue and len(self.discovered_urls) < max_urls:
-            # Sort queue by priority (highest first)
-            self.url_queue = deque(
-                sorted(self.url_queue, key=lambda x: x[0], reverse=True)
-            )
-            
-            priority, depth, current_url = self.url_queue.popleft()
-            
-            if current_url in self.visited_urls or depth > max_depth:
+            if current_url in visited_crawl or depth > max_depth:
                 continue
+            
+            visited_crawl.add(current_url)
             
             # Check robots.txt
             if not await self._check_robots_allowed(current_url):
                 logger.debug(f"🚫 Blocked by robots.txt: {current_url[:60]}")
                 continue
             
-            self.visited_urls.add(current_url)
-            
             # Fetch page
             html = await self._fetch_page_safe(current_url)
             if not html:
-                self.failed_urls.add(current_url)
                 continue
+            
+            crawl_urls.append(current_url)
             
             # Extract links
             soup = BeautifulSoup(html, "html.parser")
@@ -213,39 +341,147 @@ class ProductionBulkScraperService:
             for link_url, link_text in links:
                 parsed = urlparse(link_url)
                 
-                # Same domain only (strict)
+                # Same domain only
                 if parsed.netloc != base_domain:
                     continue
                 
-                # Skip if already discovered
-                if link_url in self.discovered_urls:
+                # Skip if already visited
+                if link_url in visited_crawl:
                     continue
                 
                 # Calculate priority
                 score = self._calculate_url_priority(link_url, link_text, depth + 1)
                 
-                # Add to queue
-                self.url_queue.append((score, depth + 1, link_url))
-                self.discovered_urls.add(link_url)
+                # Add to heap
+                heapq.heappush(priority_heap, (-score, depth + 1, link_url))
             
             # Progress logging
-            if len(self.discovered_urls) % 100 == 0:
+            if len(crawl_urls) % 50 == 0:
                 logger.info(
-                    f"📊 Progress: {len(self.discovered_urls)} discovered, "
-                    f"{len(self.visited_urls)} visited, "
-                    f"queue: {len(self.url_queue)}"
+                    f"🕷️ Crawl progress: {len(crawl_urls)} URLs, "
+                    f"heap: {len(priority_heap)}"
                 )
             
             # Rate limiting
             await asyncio.sleep(0.15)
         
-        self.stats["total_discovered"] = len(self.discovered_urls)
-        self.stats["from_crawl"] = len(self.discovered_urls) - self.stats["from_sitemap"]
+        self.stats["from_crawl"] = len(crawl_urls)
+        logger.info(f"📍 Strategy 4 (Intelligent Crawl): {len(crawl_urls)} URLs")
+        
+        return crawl_urls
+    
+    # ========================================================================
+    # INTELLIGENT URL DISCOVERY WITH 4-STRATEGY APPROACH
+    # ========================================================================
+    
+    async def discover_urls_intelligent(
+        self,
+        base_url: str,
+        max_depth: int = 20,
+        max_urls: int = 2000,
+    ) -> List[str]:
+        """
+        4-STRATEGY Intelligent URL Discovery:
+        
+        1. SITEMAP.XML (fastest) → Parses sitemap.xml, sitemap_index.xml
+        2. ROBOTS.TXT (fast) → Extracts sitemap directives from robots.txt
+        3. PATTERNS (medium) → Tests common doc paths (/docs, /api, etc)
+        4. INTELLIGENT CRAWL (slow) → Priority queue crawling (only if needed)
+        
+        Args:
+            base_url: Base URL to start discovery
+            max_depth: Maximum crawl depth (for strategy 4)
+            max_urls: Maximum total URLs to discover
+        
+        Returns:
+            Comprehensive list of discovered URLs
+        """
+        self.stats["start_time"] = datetime.now()
+        base_domain = urlparse(base_url).netloc
         
         logger.info(
-            f"✅ Discovery complete: {len(self.discovered_urls)} URLs\n"
-            f"   From sitemap: {self.stats['from_sitemap']}\n"
-            f"   From crawling: {self.stats['from_crawl']}"
+            f"🔍 Starting 4-STRATEGY URL Discovery\n"
+            f"   Base: {base_url}\n"
+            f"   Max Depth: {max_depth}\n"
+            f"   Max URLs: {max_urls}"
+        )
+        
+        all_discovered_urls = set()
+        
+        # ====================================================================
+        # STRATEGY 1: Parse sitemap.xml (FASTEST - instant discovery)
+        # ====================================================================
+        logger.info("📍 STRATEGY 1: Parsing sitemap.xml...")
+        sitemap_urls = await self.parse_sitemap(base_url)
+        all_discovered_urls.update(sitemap_urls)
+        
+        # ====================================================================
+        # STRATEGY 2: Parse robots.txt for additional sitemaps
+        # ====================================================================
+        logger.info("📍 STRATEGY 2: Mining robots.txt...")
+        robots_sitemaps = await self._parse_robots_txt(base_url)
+        
+        # Parse sitemaps found in robots.txt
+        for sitemap_url in robots_sitemaps:
+            if sitemap_url not in sitemap_urls:
+                additional_urls = await self.parse_sitemap(sitemap_url)
+                all_discovered_urls.update(additional_urls)
+                logger.info(
+                    f"✅ Robots.txt sitemap yielded {len(additional_urls)} URLs"
+                )
+        
+        # ====================================================================
+        # STRATEGY 3: Pattern-based discovery (common doc paths)
+        # ====================================================================
+        logger.info("📍 STRATEGY 3: Testing documentation patterns...")
+        pattern_urls = await self._discover_pattern_urls(base_url)
+        all_discovered_urls.update(pattern_urls)
+        
+        # ====================================================================
+        # STRATEGY 4: Intelligent crawling (only if needed)
+        # ====================================================================
+        current_count = len(all_discovered_urls)
+        
+        if current_count < max_urls * 0.5:  # Less than 50% of target
+            logger.info(
+                f"📍 STRATEGY 4: Intelligent crawling "
+                f"(current: {current_count}, target: {max_urls})..."
+            )
+            
+            crawl_urls = await self._intelligent_crawl(
+                base_url=base_url,
+                initial_urls=list(all_discovered_urls),
+                max_depth=max_depth,
+                max_urls=max_urls - current_count
+            )
+            all_discovered_urls.update(crawl_urls)
+        else:
+            logger.info(
+                f"✅ Skipping Strategy 4 (crawl) - "
+                f"sufficient URLs from strategies 1-3 ({current_count})"
+            )
+        
+        # ====================================================================
+        # Add to queue with priority
+        # ====================================================================
+        for url in list(all_discovered_urls)[:max_urls]:
+            priority = self._calculate_url_priority(url, "", 0)
+            self.url_queue.append((priority, 0, url))
+            self.discovered_urls.add(url)
+        
+        # Final statistics
+        self.stats["total_discovered"] = len(self.discovered_urls)
+        
+        logger.info(
+            f"\n{'='*70}\n"
+            f"✅ 4-STRATEGY DISCOVERY COMPLETE\n"
+            f"{'='*70}\n"
+            f"📊 Total URLs: {len(self.discovered_urls)}\n"
+            f"   Strategy 1 (Sitemap): {self.stats['from_sitemap']}\n"
+            f"   Strategy 2 (Robots.txt): {self.stats['from_robots']}\n"
+            f"   Strategy 3 (Patterns): {self.stats['from_patterns']}\n"
+            f"   Strategy 4 (Crawl): {self.stats['from_crawl']}\n"
+            f"{'='*70}"
         )
         
         return list(self.discovered_urls)
@@ -715,7 +951,7 @@ async def enhanced_bulk_scrape_task(
     extract_images: bool = True
 ):
     """
-    Enhanced bulk scrape task with intelligent discovery and chunking.
+    Enhanced bulk scrape task with 4-strategy URL discovery.
     Drop-in replacement for existing bulk scrape.
     """
     from app.services.scraper_service import scraper_service
