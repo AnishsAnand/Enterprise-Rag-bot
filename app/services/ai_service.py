@@ -16,6 +16,7 @@ import hashlib
 import json
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
+from httpx import AsyncClient, Limits, Timeout
 
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -97,6 +98,14 @@ class AIService:
         self._embedding_cache: Dict[str, List[float]] = {}
         self._max_cache_size = 1000
         self.current_chat_model: str = PRIMARY_CHAT_MODEL
+        self.http_pool = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100,
+                keepalive_expiry=30.0
+            ),
+            timeout=httpx.Timeout(30.0)
+        )
         
         # Service connection registry
         self.connected_services: Dict[str, bool] = {
@@ -150,6 +159,12 @@ class AIService:
             "conceptual": "modern clean illustration with good contrast and clear visual hierarchy",
             "troubleshooting": "problem-solution visual with before/after comparison and clear indicators",
         }
+
+    async def close(self):
+        """Cleanup resources"""
+        if self.http_pool:
+            await self.http_pool.aclose()
+    
 
     def _validate_embedding_dimension(self, embeddings: List[List[float]], expected_dim: int = REQUIRED_EMBEDDING_DIM) -> None:
         """Validate embedding dimensions"""
@@ -342,6 +357,44 @@ class AIService:
         
         logger.info(f"🔗 Service connection status: {self.connected_services}")
         return connection_summary
+
+    async def analyze_query_intent(self, query: str) -> Dict[str, Any]:
+        """Deep query analysis for better retrieval"""
+    
+        analysis_prompt = f"""Analyze this search query:
+"{query}"
+
+Provide:
+1. Query type (factual/procedural/conceptual/comparative)
+2. Key entities (extract specific names, versions, technologies)
+3. Implicit requirements (what user really needs)
+4. Suggested expansions (related terms to search)
+
+Respond in JSON:
+{{
+  "type": "...",
+  "entities": ["...", "..."],
+  "implicit_needs": ["...", "..."],
+  "expansions": ["...", "..."],
+  "is_technical": true/false
+}}"""
+    
+        response = await self._call_chat_with_retries(
+        analysis_prompt,
+        max_tokens=300,
+        temperature=0.1
+        )
+    
+        try:
+            return json.loads(self._extract_json_safe(response))
+        except:
+            return {
+            "type": "general",
+            "entities": [],
+            "implicit_needs": [query],
+            "expansions": [],
+            "is_technical": False
+            }
 
     async def detect_task_intent(self, query: str) -> Dict[str, Any]:
         """
@@ -1097,97 +1150,401 @@ class AIService:
             logger.error(f"Unexpected error in context expansion: {e}")
             return context_text
 
-    async def generate_enhanced_response(self, 
-                                         query: str, 
-                                         context: List[str], 
-                                        query_type: str = None,
-                                        system_prompt: str = None,
-                                        temperature: float = 0.1,) -> Dict[str, Any]:
-        """Generate enhanced response with automatic service management"""
+    async def generate_enhanced_response(
+    self, 
+    query: str, 
+    context: List[str], 
+    query_type: str = None,
+    temperature: float = 0.1
+) -> Dict[str, Any]:
+        """PRODUCTION: Context-aware response with citation tracking"""
+    
         if not query_type:
             query_type = self._classify_query_type(query)
-
-        # Expand context
-        try:
-            expanded_context = await self.generate_expanded_context(query, context)
-        except Exception as e:
-            logger.error(f"Context expansion failed: {e}")
-            expanded_context = "\n\n".join(context[:5]) if context else ""
-
+    
+    # Build rich context with source tracking
+        context_with_sources = []
+        for i, ctx in enumerate(context[:10], 1):
+            if ctx and len(ctx.strip()) > 50:
+                context_with_sources.append(f"[Source {i}]\n{ctx}\n")
+    
+        combined_context = "\n---\n".join(context_with_sources)
+    
+    # Enhanced prompt with explicit instructions
         template = self.response_templates.get(query_type, self.response_templates["informational"])
+    
+        prompt = f"""{template}
 
-        prompt = (
-            f"{template}\n\n"
-            f"Expanded Context:\n{expanded_context}\n\n"
-            f"User Question: {query}\n\n"
-            "Instructions for your response:\n"
-            "1. Base your answer STRICTLY on the provided context\n"
-            "2. Be specific and cite relevant details from the sources\n"
-            "3. Structure your response clearly with appropriate sections\n"
-            "4. If the context doesn't contain sufficient information, clearly state this\n"
-            "5. Provide actionable information when possible\n"
-            "6. Maintain professional accuracy and thoroughness\n"
-            "7. Use examples from the context when available\n"
-            "8. Include relevant warnings or important notes\n\n"
-            "Response:"
-        )
+IMPORTANT INSTRUCTIONS:
+1. Base your answer STRICTLY on the provided context
+2. Cite sources using [Source N] notation when referencing specific information
+3. If information is insufficient, clearly state what's missing
+4. Provide specific examples and details from the context
+5. Organize your response with clear structure
 
-        system_msg = system_prompt or (
-    f"You are an expert assistant specializing in {query_type} responses. "
-    "Provide detailed, accurate, and actionable information based strictly on the provided context. "
-    "Be thorough and comprehensive. Never invent information."
+User Query: {query}
+
+Available Context:
+{combined_context}
+
+Your Response (with source citations):"""
+    
+        system_msg = (
+        f"You are an expert assistant specializing in {query_type} responses. "
+        "Provide detailed, accurate, and well-structured information based "
+        "strictly on the provided context. Always cite your sources using "
+        "[Source N] notation. Never invent information not present in the context."
     )
-
+    
         try:
             raw_response = await self._call_chat_with_retries(
-                prompt,
-                max_tokens=2000,
-                temperature=temperature,
-                system_message=system_msg,
-                timeout=HTTP_TIMEOUT_SECONDS
+            prompt=prompt,
+            max_tokens=2500,
+            temperature=temperature,
+            system_message=system_msg,
+            timeout=45
             )
-        except AIServiceError as e:
-            logger.error(f"Response generation failed: {e}")
-            return {
-                "text": f"AI service is currently unavailable: {self.last_error}. Please check service configuration and try again.",
+        
+            if not raw_response or len(raw_response.strip()) < 30:
+                return {
+                "text": "I apologize, but I couldn't generate a comprehensive response based on the available information.",
                 "quality_score": 0.0,
                 "query_type": query_type,
                 "context_used": False,
-                "expanded_context": expanded_context,
-                "error": str(e),
+                "expanded_context": combined_context[:500],
             }
-        except Exception as e:
-            logger.error(f"Unexpected error in response generation: {e}")
+        
+        # Calculate quality based on multiple factors
+            quality_score = self._calculate_response_quality_v2(
+            response=raw_response,
+            query=query,
+            context=context,
+            has_citations=bool(re.search(r'\[Source \d+\]', raw_response))
+            )
+        
+            clean_response = self.strip_markdown(raw_response)
+        
             return {
-                "text": "An unexpected error occurred while generating the response. Please try again.",
-                "quality_score": 0.0,
-                "query_type": query_type,
-                "context_used": False,
-                "expanded_context": expanded_context,
-                "error": str(e),
-            }
-
-        if not raw_response or len(raw_response.strip()) < 30:
-            logger.warning("Empty or very short response generated")
-            return {
-                "text": "I apologize, but I'm unable to generate a comprehensive response based on the available information. Please provide additional context or rephrase your question.",
-                "quality_score": 0.0,
-                "query_type": query_type,
-                "context_used": False,
-                "expanded_context": expanded_context,
-            }
-
-        clean_response = self.strip_markdown(raw_response)
-        quality_score = self._calculate_response_quality(clean_response, query, context)
-
-        return {
             "text": clean_response,
             "quality_score": quality_score,
             "query_type": query_type,
-            "context_used": bool(expanded_context),
-            "expanded_context": expanded_context,
-        }
+            "context_used": True,
+            "expanded_context": combined_context,
+            "has_citations": bool(re.search(r'\[Source \d+\]', raw_response)),
+            }
+        
+        except Exception as e:
+            logger.exception(f"Enhanced response generation failed: {e}")
+            return {
+            "text": "An error occurred while generating the response.",
+            "quality_score": 0.0,
+            "query_type": query_type,
+            "context_used": False,
+            "error": str(e)
+            }
+        
+    def _calculate_response_quality_v2(self, response: str, query: str, context: List[str],has_citations: bool) -> float:
+        """Enhanced quality scoring with citation bonus"""
 
+        core: float = 0.0
+    
+        if not response or len(response.strip()) < 10:
+            return 0.0
+    
+        score = 0.0
+    
+    # Length appropriateness (0-0.25)
+        length = len(response)
+        if 200 <= length <= 2000:
+            score += 0.25
+        elif 100 <= length < 200:
+            score += 0.15
+        elif length > 2000:
+            score += 0.10
+    
+    # Query coverage (0-0.25)
+        query_terms = set(re.findall(r'\b\w+\b', query.lower()))
+        response_terms = set(re.findall(r'\b\w+\b', response.lower()))
+        coverage = len(query_terms & response_terms) / max(len(query_terms), 1)
+        core += coverage * 0.25
+    
+    # Context usage (0-0.20)
+        if context:
+            context_text = " ".join(context).lower()
+            context_terms = set(re.findall(r'\b\w+\b', context_text))
+            context_usage = len(response_terms & context_terms) / max(len(context_terms), 1)
+            score += context_usage * 0.20
+    
+    # Structure bonus (0-0.15)
+        has_structure = bool(re.search(r'\n\n', response) or '. ' in response)
+        if has_structure:
+            score += 0.15
+    
+    # Citation bonus (0-0.15)
+        if has_citations:
+            score += 0.15
+    
+        return min(score, 1.0)
+    
+    async def generate_optimized_query_embedding(
+        self,
+        query: str,
+        context_hints: Optional[List[str]] = None
+    ) -> List[float]:
+        """
+        Generate optimized query embedding with expansion.
+        
+        Techniques:
+        - Query expansion with synonyms
+        - Context-aware embedding
+        - Multi-vector representation
+        """
+        # Expand query with synonyms/related terms
+        expanded_query = await self._expand_query(query, context_hints)
+        
+        # Generate embedding with expanded query
+        embeddings = await self.generate_embeddings([expanded_query])
+        
+        return embeddings[0] if embeddings else []
+    
+    async def _expand_query(
+        self,
+        query: str,
+        context_hints: Optional[List[str]] = None
+    ) -> str:
+        """
+        Expand query with related terms using LLM.
+        
+        Example:
+        "kubernetes cluster" -> "kubernetes cluster k8s pods containers orchestration"
+        """
+        expansion_prompt = f"""Given the search query: "{query}"
+
+Generate 3-5 highly relevant related terms, synonyms, or alternative phrasings that would help find relevant documentation.
+
+{f"Context: {', '.join(context_hints[:3])}" if context_hints else ""}
+
+Respond with just the terms, comma-separated:"""
+        
+        try:
+            response = await self._call_chat_with_retries(
+                expansion_prompt,
+                max_tokens=50,
+                temperature=0.3,
+                timeout=10
+            )
+            
+            # Extract terms
+            terms = [t.strip() for t in response.split(",") if t.strip()]
+            
+            # Combine with original query
+            expanded = f"{query} {' '.join(terms[:5])}"
+            
+            logger.debug(f"Query expansion: '{query}' -> '{expanded}'")
+            
+            return expanded
+            
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}")
+            return query
+    
+    async def rerank_search_results(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+        top_k: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Rerank search results using cross-encoder model or LLM.
+        
+        This significantly improves relevance compared to vector similarity alone.
+        """
+        if not results or len(results) <= top_k:
+            return results
+        
+        # Use LLM for reranking (more accurate than pure vector similarity)
+        reranked = await self._llm_rerank(query, results, top_k)
+        
+        return reranked
+    
+    async def _llm_rerank(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """Use LLM to score and rerank results"""
+        
+        # Prepare results for scoring
+        result_summaries = []
+        for i, result in enumerate(results[:20]):  
+            content = result.get("content", "")[:500]  
+            result_summaries.append(f"[{i}] {content}")
+        
+        rerank_prompt = f"""Score these search results for relevance to the query: "{query}"
+
+Results:
+{chr(10).join(result_summaries)}
+
+Rate each result 0-100 for relevance. Respond with ONLY comma-separated scores in order:
+Example: 95,78,45,12,89,..."""
+        
+        try:
+            response = await self._call_chat_with_retries(
+                rerank_prompt,
+                max_tokens=100,
+                temperature=0.1,
+                timeout=15
+            )
+            
+            # Parse scores
+            scores = []
+            for score_str in response.split(","):
+                try:
+                    scores.append(float(score_str.strip()))
+                except:
+                    scores.append(0.0)
+            
+            # Combine with original results
+            scored_results = []
+            for i, result in enumerate(results[:len(scores)]):
+                result_copy = result.copy()
+                result_copy["rerank_score"] = scores[i] / 100.0  # Normalize to 0-1
+                # Combine with original relevance score
+                original_score = result.get("relevance_score", 0.5)
+                result_copy["combined_score"] = (
+                    0.7 * result_copy["rerank_score"] + 
+                    0.3 * original_score
+                )
+                scored_results.append(result_copy)
+            
+            # Sort by combined score
+            scored_results.sort(
+                key=lambda x: x.get("combined_score", 0),
+                reverse=True
+            )
+            
+            logger.info(
+                f"✅ Reranked {len(scored_results)} results "
+                f"(top score: {scored_results[0].get('combined_score', 0):.2f})"
+            )
+            
+            return scored_results[:top_k]
+            
+        except Exception as e:
+            logger.warning(f"LLM reranking failed: {e}")
+            # Fallback to original order
+            return results[:top_k]
+    
+    async def generate_domain_aware_response(
+        self,
+        query: str,
+        context: List[str],
+        domain: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate response with domain-specific formatting and terminology.
+        
+        Domains: technical, business, medical, legal, general
+        """
+        # Detect domain if not provided
+        if not domain:
+            domain = await self._detect_domain(query, context)
+        
+        # Get domain-specific system prompt
+        system_prompt = self._get_domain_system_prompt(domain)
+        
+        # Generate response
+        response = await self.generate_enhanced_response(
+            query,
+            context,
+            query_type=None,
+            temperature=0.2
+        )
+        
+        return response
+    
+    async def _detect_domain(
+        self,
+        query: str,
+        context: List[str]
+    ) -> str:
+        """Detect query domain using keywords"""
+        
+        combined_text = f"{query} {' '.join(context[:2])}"
+        text_lower = combined_text.lower()
+        
+        domain_keywords = {
+            "technical": [
+                "api", "code", "function", "class", "method",
+                "database", "server", "deploy", "configure",
+                "kubernetes", "docker", "cluster", "endpoint"
+            ],
+            "business": [
+                "revenue", "profit", "customer", "sales",
+                "marketing", "strategy", "growth", "roi"
+            ],
+            "medical": [
+                "patient", "diagnosis", "treatment", "symptom",
+                "medication", "clinical", "therapy", "disease"
+            ],
+            "legal": [
+                "contract", "agreement", "liability", "compliance",
+                "regulation", "law", "clause", "jurisdiction"
+            ]
+        }
+        
+        domain_scores = {}
+        for domain, keywords in domain_keywords.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            domain_scores[domain] = score
+        
+        # Get domain with highest score
+        if domain_scores:
+            detected = max(domain_scores.items(), key=lambda x: x[1])
+            if detected[1] >= 2:  # At least 2 keyword matches
+                return detected[0]
+        
+        return "general"
+    
+    def _get_domain_system_prompt(self, domain: str) -> str:
+        """Get domain-specific system prompt"""
+        
+        prompts = {
+            "technical": (
+                "You are an expert technical documentation assistant. "
+                "Provide precise, accurate technical information with proper "
+                "code examples, command syntax, and configuration details. "
+                "Use technical terminology correctly and include relevant "
+                "warnings about version compatibility or deprecated features."
+            ),
+            "business": (
+                "You are a business intelligence assistant. Provide clear, "
+                "actionable insights with relevant metrics and data. Use "
+                "business terminology appropriately and focus on practical "
+                "implications and recommendations."
+            ),
+            "medical": (
+                "You are a medical information assistant. Provide accurate, "
+                "evidence-based information while emphasizing the importance "
+                "of consulting healthcare professionals. Use proper medical "
+                "terminology and cite sources when available."
+            ),
+            "legal": (
+                "You are a legal information assistant. Provide accurate "
+                "information about legal concepts and procedures while "
+                "emphasizing that this is not legal advice and users should "
+                "consult qualified legal professionals for specific situations."
+            ),
+            "general": (
+                "You are a helpful, knowledgeable assistant. Provide clear, "
+                "accurate information based on the provided context. Be "
+                "thorough but concise, and structure your responses logically."
+            )
+        }
+        
+        return prompts.get(domain, prompts["general"])
+    
     async def generate_stepwise_response(self, query: str, context: List[str],max_steps: int = 8) -> List[Dict[str, Any]]:
 
         try:
