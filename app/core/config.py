@@ -190,54 +190,11 @@ class Settings(BaseSettings):
         description="Top K results to rerank"
     )
     
-    # =========================
-<<<<<<< HEAD
-    # Storage Configuration
-=======
-    # REDIS CONFIGURATION
-    # =========================
-    
-    @computed_field
-    @property
-    def redis_host_adaptive(self) -> str:
-        """Adaptive Redis host based on environment."""
-        explicit = os.getenv("REDIS_HOST")
-        if explicit:
-            return explicit
-        elif self.is_kubernetes or self.is_docker:
-            return "redis"  # Service name in containers
-        else:
-            return "localhost"  # Bare metal default
-    
-    REDIS_HOST: Optional[str] = Field(
-        default=None,
-        description="Redis host (auto-detected if not set)"
-    )
-    REDIS_PORT: int = Field(
-        default_factory=lambda: int(os.getenv("REDIS_PORT", "6379")),
-        description="Redis port"
-    )
-    REDIS_DB: int = Field(
-        default_factory=lambda: int(os.getenv("REDIS_DB", "0")),
-        description="Redis database number"
-    )
-    REDIS_PASSWORD: Optional[str] = Field(
-        default_factory=lambda: os.getenv("REDIS_PASSWORD"),
-        description="Redis password (optional)"
-    )
-    REDIS_URL: Optional[str] = Field(
-        default=None,
-        description="Redis connection URL (auto-generated)"
-    )
     
     # =========================
     # STORAGE CONFIGURATION
->>>>>>> f861d172c4f76def4655980406c89e76eb8288a1
     # =========================
-    CHROMA_PERSIST_DIRECTORY: str = Field(
-        default_factory=lambda: os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
-        description="ChromaDB persistence directory"
-    )
+    
     UPLOAD_DIRECTORY: str = Field(
         default_factory=lambda: os.getenv("UPLOAD_DIRECTORY", "./uploads"),
         description="File upload directory"
@@ -268,7 +225,7 @@ class Settings(BaseSettings):
     )
     
     # =========================
-    # SCRAPER CONFIGURATION (Adaptive)
+    # SCRAPER CONFIGURATION 
     # =========================
     
     @computed_field
@@ -329,7 +286,7 @@ class Settings(BaseSettings):
     )
     
     # =========================
-    # RAG CONFIGURATION (Enhanced)
+    # RAG CONFIGURATION 
     # =========================
     MIN_RELEVANCE_THRESHOLD: float = Field(
         default=0.08,
