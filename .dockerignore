@@ -1,82 +1,134 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.env
-.venv
-venv/
+# =============================================================================
+# Enterprise RAG Bot - Docker Ignore
+# =============================================================================
+# Exclude files from Docker build context for faster, smaller builds
+# =============================================================================
 
-# Node
-node_modules/
-npm-debug.log
-yarn-error.log
-
-# Angular / Frontend builds
-**/dist/
-**/.angular/
-
-# Git
-.git/
+# -----------------------------------------------------------------------------
+# Version Control
+# -----------------------------------------------------------------------------
+.git
 .gitignore
+.gitattributes
 
-# OS
-.DS_Store
-Thumbs.db
+# -----------------------------------------------------------------------------
+# Python Virtual Environments
+# -----------------------------------------------------------------------------
+venv/
+.venv/
+env/
+.env
+*.env
+!.env.example
 
-# Docker
-Dockerfile
-docker-compose*.yml
-
-# Logs
-*.log
-# Exclude data directories from Docker build context
-milvus_data/
-etcd_data/
-minio_data/
-uploads/
-outputs/
-backups/
-logs/
-
-# Exclude backup directories
-backup_*/
-
-# Python
+# -----------------------------------------------------------------------------
+# Python Cache & Build Artifacts
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-*.egg-info/
-dist/
 build/
-
-# Node
-node_modules/
+develop-eggs/
 dist/
-.angular/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# IDE
-.vscode/
+# -----------------------------------------------------------------------------
+# IDE & Editor Files
+# -----------------------------------------------------------------------------
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
 
-# Git
-.git/
-.gitignore
+# -----------------------------------------------------------------------------
+# Testing & Coverage
+# -----------------------------------------------------------------------------
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.nox/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+tests/
 
-# Environment
-.env.local
-.env.*.local
+# -----------------------------------------------------------------------------
+# Frontend Build Artifacts (separate container)
+# -----------------------------------------------------------------------------
+angular-frontend/
+user-frontend/
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# OS
+# -----------------------------------------------------------------------------
+# Documentation
+# -----------------------------------------------------------------------------
+*.md
+!README.md
+docs/
+metadata/
+
+# -----------------------------------------------------------------------------
+# Docker Files (avoid recursive copies)
+# -----------------------------------------------------------------------------
+Dockerfile*
+docker-compose*.yml
+!docker-compose.prod2.yml
+
+# -----------------------------------------------------------------------------
+# Data & Logs (runtime only)
+# -----------------------------------------------------------------------------
+*.log
+logs/
+uploads/
+outputs/
+backups/
+chroma_db/
+*.sqlite
+*.db
+milvus_data/
+etcd_data/
+minio_data/
+backup_*/
+
+# -----------------------------------------------------------------------------
+# Misc
+# -----------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
-
-
-
-
-
+*.bak
+*.tmp
+*.temp
+compose
+grafana/
+prometheus.yml
+scripts/
+init-scripts/
+misc/
+hooks/
+All SH/

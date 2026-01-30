@@ -1034,83 +1034,46 @@ async def _get_or_create_session_id(request: WidgetQueryRequest) -> str:
 
 
 async def _should_route_to_agent(query: str, session_id: str) -> bool:
-    """Determine if query should be routed to agent manager."""
+    """
+    Determine if query should be routed to agent manager.
+    
+    Strategy: Route ALL queries to the agent manager (orchestrator).
+    The orchestrator intelligently handles:
+    - Greetings ("hi", "hello")
+    - Capability questions ("what can you do?")
+    - Resource operations ("list clusters")
+    - Documentation queries (routes to RAG internally)
+    
+    This ensures consistent, intelligent handling of all user inputs.
+    """
     from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
     
     query_lower = query.lower().strip()
-    query_words = query_lower.split()
-    existing_state = conversation_state_manager.get_session(session_id)
     
-    # SHORT RESPONSES that are likely answers to agent questions
-    short_answer_patterns = ["all", "yes", "no", "ok", "okay", "sure", "done", "cancel", "stop"]
-    is_short_answer = query_lower in short_answer_patterns or len(query_words) <= 2
+    # Skip empty queries
+    if not query_lower:
+        return False
     
-    # Active conversation statuses that need routing to agent
-    active_statuses = [
-        ConversationStatus.COLLECTING_PARAMS,
-        ConversationStatus.AWAITING_SELECTION,
-        ConversationStatus.AWAITING_FILTER_SELECTION  # New: for BU/Env/Zone filter selection
+    # Skip OpenWebUI metadata generation requests (title, tags, etc.)
+    # These are internal requests that should go to RAG/AI directly
+    metadata_patterns = [
+        "### task:",
+        "generate a concise",
+        "suggest 3-5 relevant follow-up",
+        "generate 1-3 broad tags"
     ]
+    if any(pattern in query_lower for pattern in metadata_patterns):
+        logger.info(f"📋 Metadata request detected - skipping agent routing")
+        return False
     
-    # Check for recent active sessions - for short answers, be more aggressive
-    if not existing_state:
-        recent_state = conversation_state_manager.get_most_recent_active_session()
-        if recent_state:
-            # For short answers, route to agent if there's ANY recent active session
-            if is_short_answer and recent_state.status in active_statuses:
-                logger.info(f"✅ Short answer '{query}' with recent active session -> routing to agent")
-                return True
-            if recent_state.status == ConversationStatus.COLLECTING_PARAMS:
-                logger.info(f"✅ Found recent active session {recent_state.session_id} in COLLECTING_PARAMS")
-                return True
-    
-    if existing_state:
-        if existing_state.status in active_statuses:
-            logger.info(f"🔄 Continuing existing conversation (status: {existing_state.status.value})")
-            return True
-        if is_short_answer and existing_state.status in [ConversationStatus.COMPLETED, ConversationStatus.EXECUTING]:
-            # Check if this might be a follow-up filter request
-            logger.info(f"🔄 Short answer with recent completed conversation -> routing to agent")
-            return True
-    
-    # Check for resource/cluster operation keywords
-    action_keywords = ["create", "make", "build", "deploy", "provision", "delete",
-                      "remove", "update", "modify", "list", "show", "get", "view", "display",
-                      "filter", "only", "just", "available", "bring up"]
-    resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule",
-                        "load balancer", "database", "storage", "volume", "endpoint",
-                        "endpoints", "datacenter", "datacenters", "jenkins", "kafka",
-                        "gitlab", "registry", "postgres", "documentdb", "vm", "vms",
-                        "virtual machine", "version", "k8s version", "report", "reports"]
-    
-    has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
-    has_resource = any(keyword in query_lower for keyword in resource_keywords)
-
-    if has_action and has_resource:
-        logger.info(f"✅ Action + Resource keywords detected")
-        return True
-
-    filter_keywords = ["only", "just", "filter", "show me", "28", "1.28", "version", "active", "running"]
-    is_filter_query = any(kw in query_lower for kw in filter_keywords)
-    if is_filter_query and existing_state:
-        logger.info(f"🔍 Filter query detected with existing state -> routing to agent")
-        return True
-    
-    if not (has_action and has_resource):
-        llm_result = await _llm_intent_classification(query)
-        if llm_result:
-            return True
-
-    if not (has_action and has_resource) and existing_state:
-        if _check_conversation_context(existing_state, query_lower):
-            return True
-    
-    location_indicators = ["in ", " at ", " from ", "dc", "datacenter", "data center", "location", "where"]
-    mentions_location = any(indicator in query_lower for indicator in location_indicators)
-    if has_resource and mentions_location and not has_action:
-        logger.info(f"🎯 Detected implicit list operation (resource + location)")
-        return True
-    return False
+    # Route EVERYTHING else to the agent manager
+    # The orchestrator will intelligently decide:
+    # - Greetings → greeting response
+    # - Capability questions → capability response
+    # - Resource operations → intent agent → execution
+    # - Documentation questions → RAG agent
+    logger.info(f"🎯 Routing to agent manager for intelligent handling: '{query[:50]}...'")
+    return True
 
 
 async def _llm_intent_classification(query: str) -> bool:
@@ -1203,7 +1166,9 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
 
     response_text = agent_result.get("response", "")
     metadata = agent_result.get("metadata", {})
+    follow_ups = agent_result.get("follow_ups", [])  # Get follow-ups from orchestrator
     missing_params = metadata.get("missing_params", [])
+    
     if missing_params or "?" in response_text or "which" in response_text.lower():
         logger.info(f"🔄 Agent asking for clarification, missing: {missing_params}")
         return {
@@ -1221,7 +1186,8 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
             "confidence": 0.95,
             "has_sources": True,
             "images": [],
-            "steps": []
+            "steps": [],
+            "followUps": follow_ups  # Include follow-ups for OpenWebUI
         }
 
     execution_result = agent_result.get("execution_result")
@@ -1230,10 +1196,14 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
         result_data = execution_result.get("data", {})
 
         if isinstance(result_data, dict) and "endpoints" in result_data:
-            return _format_endpoint_response(result_data, query, session_id, metadata)
+            resp = _format_endpoint_response(result_data, query, session_id, metadata)
+            resp["followUps"] = follow_ups
+            return resp
 
         if isinstance(result_data, dict) and "data" in result_data:
-            return _format_cluster_response(result_data, query, session_id, metadata)
+            resp = _format_cluster_response(result_data, query, session_id, metadata)
+            resp["followUps"] = follow_ups
+            return resp
 
     formatted_answer = format_agent_response_for_openwebui(
         response_text=response_text,
@@ -1254,7 +1224,8 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
         "confidence": 0.99,
         "has_sources": True,
         "images": [],
-        "steps": []
+        "steps": [],
+        "followUps": follow_ups  # Include follow-ups for OpenWebUI
     }
 
 def _format_endpoint_response(result_data: dict, query: str, session_id: str, metadata: dict) -> dict:

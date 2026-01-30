@@ -1698,7 +1698,26 @@ class APIExecutorService:
                                 r'("createdTime":)(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d)',
                                 r'\1"\2"',
                                 data_str)
-                            endpoint_info = json.loads(data_str)
+                            parsed_data = json.loads(data_str)
+                            
+                            # Handle both dict format (with endpoint metadata) and list format (direct cluster array)
+                            if isinstance(parsed_data, list):
+                                # API returned a direct list of clusters (no endpoint wrapper)
+                                logger.debug(f"📊 Received direct cluster list: {len(parsed_data)} clusters")
+                                all_clusters.extend(parsed_data)
+                                # Store in endpoint_data with a generic key
+                                if "direct" not in endpoint_data:
+                                    endpoint_data["direct"] = {
+                                        "endpoint_id": "direct",
+                                        "endpoint_name": "Direct Response",
+                                        "clusters": [],
+                                        "error": None
+                                    }
+                                endpoint_data["direct"]["clusters"].extend(parsed_data)
+                                continue
+                            
+                            # Standard dict format with endpoint metadata
+                            endpoint_info = parsed_data
                             endpoint_id = endpoint_info.get("endpointId")
                             endpoint_name = endpoint_info.get("endpointName")
                             clusters = endpoint_info.get("clusters", [])

@@ -112,6 +112,89 @@ services:
   #   extra_hosts:
   #     - "host.docker.internal:host-gateway"
 
+  # ---------------------------------------------------------------------------
+  # Backend API - FastAPI Application
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: enterprise-rag-backend:latest
+    container_name: enterprise-rag-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Database
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-ragbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ragbot_secret_2024}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_rag}
+      POSTGRES_TABLE: ${POSTGRES_TABLE:-enterprise_rag}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ragbot}:${POSTGRES_PASSWORD:-ragbot_secret_2024}@postgres:5432/${POSTGRES_DB:-enterprise_rag}
+
+
+      # AI Services (from .env file)
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_BASE_URL: ${GROK_BASE_URL:-https://models.cloudservices.tatacommunications.com/v1}
+      CHAT_MODEL: ${CHAT_MODEL:-meta/Llama-3.1-8B-Instruct}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-openai}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-4096}
+
+      # Vayu Cloud API Authentication (Required for resource operations)
+      API_AUTH_EMAIL: ${API_AUTH_EMAIL:-}
+      API_AUTH_PASSWORD: ${API_AUTH_PASSWORD:-}
+      API_AUTH_URL: ${API_AUTH_URL:-https://ipcloud.tatacommunications.com/portalservice/api/v1/getAuthToken}
+
+      # Application
+      ENV: production
+      HOST: 0.0.0.0
+      PORT: 8000
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+      UVICORN_LOG_LEVEL: ${UVICORN_LOG_LEVEL:-info}
+      PYTHONPATH: /app
+
+      # Security
+      SECRET_KEY: ${SECRET_KEY:-change-this-in-production}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+
+      # CORS
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:4200,http://localhost:4201,http://localhost:3004}
+      ALLOW_ALL_ORIGINS: ${ALLOW_ALL_ORIGINS:-false}
+
+      # RAG Settings
+      MIN_RELEVANCE_THRESHOLD: ${MIN_RELEVANCE_THRESHOLD:-0.08}
+      MAX_CHUNKS_RETURN: ${MAX_CHUNKS_RETURN:-12}
+      ENABLE_QUERY_EXPANSION: ${ENABLE_QUERY_EXPANSION:-true}
+      ENABLE_SEMANTIC_RERANK: ${ENABLE_SEMANTIC_RERANK:-true}
+
+      # Timezone
+      TZ: ${TIMEZONE:-UTC}
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+      - backend_outputs:/app/outputs
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health/liveness"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    networks:
+      - rag-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 # ---------------------------------------------------------------------------
 # Networks
 # ---------------------------------------------------------------------------
@@ -126,4 +209,7 @@ volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
+  backend_uploads:
+  backend_logs:
+  backend_outputs:
   #openwebui_data:

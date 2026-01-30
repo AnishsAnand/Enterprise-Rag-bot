@@ -10,6 +10,8 @@ Routes:
 - DELETE /api/v1/chats/{id} - Delete chat
 - POST /api/v1/chats/{id}/pin - Toggle pin
 - POST /api/v1/chats/{id}/archive - Toggle archive
+- POST /api/v1/chats/archive/all - Archive all chats
+- POST /api/v1/chats/unarchive/all - Unarchive all chats
 - GET  /api/v1/chats/search - Search chats
 - GET  /api/v1/chats/pinned - Get pinned chats
 - GET  /api/v1/chats/archived - Get archived chats
@@ -237,27 +239,37 @@ async def update_chat_by_id(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Update a chat by ID"""
+    """
+    Update a chat by ID, or create it if it doesn't exist (upsert behavior).
+    This handles OpenWebUI's frontend which creates chat IDs locally before syncing.
+    """
     user_id = get_current_user_id(request)
     
-    # Verify ownership
+    # Check if chat exists
     existing = chat_service.get_chat_by_id_and_user_id(chat_id, user_id, db)
-    if not existing:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Chat not found"
-        )
     
-    # Merge existing chat with new data
-    updated_chat_data = {**existing.chat, **form_data.chat}
-    chat = chat_service.update_chat_by_id(chat_id, updated_chat_data, db)
+    if existing:
+        # Update existing chat - merge data
+        updated_chat_data = {**existing.chat, **form_data.chat}
+        chat = chat_service.update_chat_by_id(chat_id, updated_chat_data, db)
+    else:
+        # Chat doesn't exist - create it with the provided ID (upsert)
+        # This handles OpenWebUI's frontend-generated chat IDs
+        log.info(f"Chat {chat_id} not found, creating new chat (upsert)")
+        chat = chat_service.upsert_chat_with_id(
+            chat_id=chat_id,
+            user_id=user_id,
+            chat_data=form_data.chat,
+            folder_id=form_data.folder_id,
+            db=db
+        )
     
     if chat:
         return ChatResponse(**chat.model_dump())
     
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Failed to update chat"
+        detail="Failed to update/create chat"
     )
 
 
@@ -348,6 +360,16 @@ async def archive_all_chats(
     """Archive all chats for current user"""
     user_id = get_current_user_id(request)
     return chat_service.archive_all_chats_by_user_id(user_id, db)
+
+
+@router.post("/unarchive/all", response_model=bool)
+async def unarchive_all_chats(
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Unarchive all chats for current user"""
+    user_id = get_current_user_id(request)
+    return chat_service.unarchive_all_chats_by_user_id(user_id, db)
 
 
 # ==================== Message Operations ====================

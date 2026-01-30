@@ -119,6 +119,222 @@ Always confirm destructive operations (delete, update) before executing."""
                 )
             )]
     
+    async def _check_greeting_or_capability(self, user_input: str) -> Optional[Dict[str, Any]]:
+        """
+        Use AI to intelligently determine if user is greeting or asking about capabilities.
+        
+        This handles first-time users who don't know what the bot can do.
+        The AI must distinguish between actual greetings and real operational requests.
+        
+        Args:
+            user_input: User's message
+            
+        Returns:
+            Dict with greeting type if detected, None otherwise
+        """
+        from app.services.ai_service import ai_service
+        
+        if not user_input or not user_input.strip():
+            return None
+        
+        try:
+            prompt = f"""You are analyzing user input for a cloud infrastructure management assistant.
+Determine if the user is GREETING you or asking about your CAPABILITIES, versus making an actual operational request.
+
+User input: "{user_input}"
+
+Classification rules:
+- GREETING: Pure social greetings like "Hi", "Hello", "Good morning", "Hey there", etc. with NO operational intent
+- CAPABILITY: Questions about what you can do like "What can you help with?", "What are your features?", "Help me" (without specific task)
+- OPERATION: ANY request that mentions resources, actions, or specific tasks:
+  * Mentioning resources: clusters, VMs, load balancers, firewalls, databases, etc.
+  * Mentioning actions: list, show, view, create, delete, update, deploy, get, check, etc.
+  * Mentioning locations: Delhi, Mumbai, Bengaluru, Chennai, datacenter, etc.
+  * Mentioning any specific operational context
+
+CRITICAL: If the message contains ANY operational intent (like "view clusters", "show VMs", "list resources"), it is OPERATION, not GREETING or CAPABILITY.
+
+Examples:
+- "Hi" → GREETING
+- "Hello there!" → GREETING
+- "Good morning" → GREETING
+- "What can you do?" → CAPABILITY
+- "Help" → CAPABILITY
+- "What are your features?" → CAPABILITY
+- "view existing clusters" → OPERATION (mentions resource)
+- "show me VMs" → OPERATION (mentions action and resource)
+- "list clusters in Delhi" → OPERATION (mentions action, resource, location)
+- "Hi, show me clusters" → OPERATION (has operational intent despite greeting)
+
+Respond with ONLY one word: GREETING, CAPABILITY, or OPERATION"""
+
+            response = await ai_service._call_chat_with_retries(
+                prompt=prompt,
+                temperature=0.0,
+                max_tokens=20
+            )
+            
+            result = response.strip().upper()
+            logger.info(f"🤖 Greeting/capability check for '{user_input[:50]}...': {result}")
+            
+            if result == "GREETING":
+                return {"type": "greeting"}
+            elif result == "CAPABILITY":
+                return {"type": "capability"}
+            else:
+                # OPERATION or anything else - not a greeting
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Greeting check AI call failed: {e}")
+            # On error, don't block - assume it's not a greeting
+            return None
+    
+    def _get_greeting_response(self, greeting_type: str) -> str:
+        """
+        Generate a friendly response for greetings and capability questions.
+        
+        Args:
+            greeting_type: "greeting" or "capability"
+            
+        Returns:
+            Friendly response string
+        """
+        if greeting_type == "greeting":
+            return """👋 Hello! I'm your AI assistant for managing cloud infrastructure.
+
+I can help you with:
+
+**🔧 Resource Management**
+• Create, view, and manage Kubernetes clusters
+• Check load balancers and their configurations  
+• View virtual machines, firewalls, and other resources
+
+**📊 Information & Reports**
+• List clusters across different datacenters
+• Show cluster details and configurations
+• Generate reports and summaries
+
+**❓ Questions & Help**
+• Answer questions about the platform
+• Guide you through complex operations
+• Explain concepts and best practices
+
+What would you like to do today?"""
+        
+        else:  # capability
+            return """I'm your AI assistant for **Vayu Cloud Infrastructure Management**.
+
+**Here's what I can help you with:**
+
+🚀 **Create Resources**
+• Create new Kubernetes clusters with guided setup
+• Configure worker nodes, networking, and more
+
+📋 **View & Manage**
+• List clusters, VMs, load balancers, firewalls
+• View detailed configurations and status
+• Filter by datacenter, business unit, environment
+
+🔍 **Query & Analyze**
+• "What clusters are in Delhi?"
+• "Show me load balancer details"
+• "How many VMs do we have?"
+
+📚 **Learn & Troubleshoot**
+• Ask how to do things
+• Get explanations of concepts
+• Troubleshoot issues
+
+**Try saying:**
+• "Create a cluster"
+• "List clusters in Mumbai"
+• "Show me load balancers"
+• "How do I scale a cluster?"
+
+How can I help you today?"""
+    
+    async def _generate_follow_ups(self, user_input: str, response: str, context: Dict[str, Any] = None) -> List[str]:
+        """
+        Generate intelligent follow-up suggestions based on the conversation context.
+        
+        Args:
+            user_input: Original user query
+            response: The response that was generated
+            context: Additional context (resource type, operation, etc.)
+            
+        Returns:
+            List of 3-5 suggested follow-up questions
+        """
+        from app.services.ai_service import ai_service
+        
+        try:
+            context_info = ""
+            if context:
+                resource_type = context.get("resource_type", "")
+                operation = context.get("operation", "")
+                if resource_type:
+                    context_info = f"\nContext: Working with {resource_type}"
+                    if operation:
+                        context_info += f" ({operation} operation)"
+            
+            # Truncate response for prompt efficiency
+            response_snippet = response[:500] + "..." if len(response) > 500 else response
+            
+            prompt = f"""Based on this conversation, suggest 3-5 relevant follow-up questions the user might want to ask.
+
+User asked: "{user_input}"
+
+Assistant response summary: "{response_snippet}"
+{context_info}
+
+Requirements:
+1. Suggestions should be natural follow-up questions
+2. They should be actionable and relevant to cloud infrastructure management
+3. Mix of: drilling deeper, related operations, and clarifications
+4. Keep each suggestion under 80 characters
+5. Make them specific, not generic
+
+Examples of good follow-ups:
+- "Show me cluster details for <name>"
+- "Filter by production environment only"
+- "What's the resource usage for these clusters?"
+- "How do I add more worker nodes?"
+
+Return ONLY a JSON array of strings, like:
+["question 1", "question 2", "question 3"]"""
+
+            llm_response = await ai_service._call_chat_with_retries(
+                prompt=prompt,
+                temperature=0.7,
+                max_tokens=300
+            )
+            
+            # Parse JSON response
+            import json
+            # Try to extract JSON array from response
+            response_text = llm_response.strip()
+            if response_text.startswith("["):
+                follow_ups = json.loads(response_text)
+            else:
+                # Try to find JSON array in response
+                import re
+                match = re.search(r'\[.*\]', response_text, re.DOTALL)
+                if match:
+                    follow_ups = json.loads(match.group())
+                else:
+                    logger.warning(f"Could not parse follow-ups: {response_text[:100]}")
+                    return []
+            
+            # Validate and clean
+            if isinstance(follow_ups, list):
+                return [str(f).strip() for f in follow_ups[:5] if f and len(str(f).strip()) > 5]
+            return []
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to generate follow-ups: {e}")
+            return []
+    
     def _route_to_intent(self, user_input: str) -> str:
         """Route to intent agent."""
         try:
@@ -216,6 +432,32 @@ Always confirm destructive operations (delete, update) before executing."""
             duration = time.time() - start_time
             metrics.agent_execution_duration.labels(agent_name="OrchestratorAgent", operation="orchestrate").observe(duration)
             metrics.agent_sessions_total.labels(agent_name="OrchestratorAgent", status="success").inc()
+            
+            # Generate follow-up suggestions (async, non-blocking if it fails)
+            try:
+                # Skip follow-ups for metadata requests, workflow prompts, or error responses
+                should_generate_followups = (
+                    not is_metadata_request and
+                    result.get("success", True) and
+                    not result.get("workflow_interrupted") and
+                    routing_decision.get("route") not in ["greeting"]  # Greetings already suggest actions
+                )
+                
+                if should_generate_followups:
+                    response_text = result.get("response", "")
+                    # Only generate if we have a substantial response
+                    if response_text and len(response_text) > 50:
+                        context = {
+                            "resource_type": state.resource_type,
+                            "operation": state.operation
+                        }
+                        follow_ups = await self._generate_follow_ups(user_input, response_text, context)
+                        if follow_ups:
+                            result["follow_ups"] = follow_ups
+                            logger.info(f"💡 Generated {len(follow_ups)} follow-up suggestions")
+            except Exception as e:
+                logger.warning(f"⚠️ Follow-ups generation failed (non-critical): {e}")
+            
             return result
         except Exception as e:
             logger.error(f"❌ Orchestration failed: {str(e)}")
@@ -274,6 +516,16 @@ Always confirm destructive operations (delete, update) before executing."""
             return {
                 "route": "execution",
                 "reason": "All parameters collected, ready to execute"}
+        
+        # Check for greeting/capability questions first
+        greeting_check = await self._check_greeting_or_capability(user_input)
+        if greeting_check:
+            logger.info(f"👋 Detected greeting/capability question: {greeting_check.get('type')}")
+            return {
+                "route": "greeting",
+                "reason": f"User greeting or capability question: {greeting_check.get('type')}",
+                "greeting_type": greeting_check.get("type")
+            }
         
         # PRE-CHECK: Fast rule-based routing for obvious resource operations.This avoids LLM call latency for clear-cut cases
         query_lower = user_input.lower()
@@ -396,6 +648,18 @@ Respond with ONLY ONE of these:
         """
         route = routing_decision["route"]
         try:
+            # Handle greetings and capability questions directly
+            if route == "greeting":
+                greeting_type = routing_decision.get("greeting_type", "greeting")
+                response = self._get_greeting_response(greeting_type)
+                logger.info(f"👋 Handled {greeting_type} directly")
+                return {
+                    "success": True,
+                    "response": response,
+                    "routing": "greeting",
+                    "metadata": {"greeting_type": greeting_type}
+                }
+            
             if route == "intent":
                 # Route to intent agent
                 state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
@@ -432,6 +696,40 @@ Respond with ONLY ONE of these:
                                 validation_result = await self.validation_agent.execute(user_input, {
                                     "session_id": state.session_id,
                                     "conversation_state": state.to_dict()})
+                                
+                                # CHECK: If workflow was aborted to handle a different request
+                                if validation_result.get("workflow_aborted") and validation_result.get("pending_request"):
+                                    pending_request = validation_result.get("pending_request")
+                                    logger.info(f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'")
+                                    return await self.execute(pending_request, {
+                                        "session_id": state.session_id,
+                                        "conversation_state": state.to_dict(),
+                                        "user_roles": user_roles
+                                    })
+                                
+                                # CHECK: If workflow was paused to handle a different request
+                                if validation_result.get("workflow_paused") and validation_result.get("pending_request"):
+                                    pending_request = validation_result.get("pending_request")
+                                    logger.info(f"💾 Workflow paused - handling pending request: '{pending_request}'")
+                                    pending_result = await self.execute(pending_request, {
+                                        "session_id": state.session_id,
+                                        "conversation_state": state.to_dict(),
+                                        "user_roles": user_roles
+                                    })
+                                    combined_response = validation_result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
+                                    pending_result["response"] = combined_response
+                                    return pending_result
+                                
+                                # CHECK: If workflow interruption prompt was shown
+                                if validation_result.get("workflow_interrupted"):
+                                    logger.info("⚠️ Workflow interrupted - waiting for user choice")
+                                    return {
+                                        "success": True,
+                                        "response": validation_result.get("output", ""),
+                                        "routing": "validation",
+                                        "workflow_interrupted": True,
+                                        "metadata": {}}
+                                
                                 # Check if validation made us ready to execute
                                 if validation_result.get("ready_to_execute") and validation_result.get("success"):
                                     logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
@@ -518,6 +816,43 @@ Respond with ONLY ONE of these:
                             "routing": "cancelled",
                             "cancelled": True,
                             "metadata": {} }
+                    
+                    # CHECK: If workflow was aborted to handle a different request
+                    if result.get("workflow_aborted") and result.get("pending_request"):
+                        pending_request = result.get("pending_request")
+                        logger.info(f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'")
+                        # Recursively process the pending request
+                        return await self.execute(pending_request, {
+                            "session_id": state.session_id,
+                            "conversation_state": state.to_dict(),
+                            "user_roles": context.get("user_roles") if context else None
+                        })
+                    
+                    # CHECK: If workflow was paused to handle a different request
+                    if result.get("workflow_paused") and result.get("pending_request"):
+                        pending_request = result.get("pending_request")
+                        logger.info(f"💾 Workflow paused - handling pending request: '{pending_request}'")
+                        # Process the pending request (workflow state is preserved for later resume)
+                        pending_result = await self.execute(pending_request, {
+                            "session_id": state.session_id,
+                            "conversation_state": state.to_dict(),
+                            "user_roles": context.get("user_roles") if context else None
+                        })
+                        # Combine the save message with the result
+                        combined_response = result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
+                        pending_result["response"] = combined_response
+                        return pending_result
+                    
+                    # CHECK: If workflow interruption prompt was shown (waiting for user choice)
+                    if result.get("workflow_interrupted"):
+                        logger.info("⚠️ Workflow interrupted - waiting for user choice")
+                        return {
+                            "success": True,
+                            "response": result.get("output", ""),
+                            "routing": "validation",
+                            "workflow_interrupted": True,
+                            "metadata": {}}
+                    
                     # CHECK: If validation says "ready to execute", route to execution NOW!
                     if result.get("ready_to_execute") and result.get("success"):
                         logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")

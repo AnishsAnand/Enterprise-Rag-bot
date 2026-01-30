@@ -115,6 +115,53 @@ class ChatService:
             db.rollback()
             return None
 
+    def upsert_chat_with_id(
+        self,
+        chat_id: str,
+        user_id: str,
+        chat_data: Dict[str, Any],
+        folder_id: Optional[str] = None,
+        db: Session = None
+    ) -> Optional[ChatModel]:
+        """
+        Create a chat with a specific ID (upsert behavior).
+        Used when OpenWebUI frontend generates its own chat IDs.
+        """
+        try:
+            now = int(time.time())
+            
+            # Get title: explicit > auto-generated from messages > default
+            title = chat_data.get("title", "New Chat")
+            if title == "New Chat":
+                auto_title = _extract_title_from_messages(chat_data)
+                if auto_title:
+                    title = auto_title
+                    chat_data["title"] = title
+            
+            chat = Chat(
+                id=chat_id,  # Use the provided ID instead of generating UUID
+                user_id=user_id,
+                title=title,
+                chat=chat_data,
+                folder_id=folder_id,
+                created_at=now,
+                updated_at=now,
+                meta={},
+                archived=False,
+                pinned=False,
+            )
+            
+            db.add(chat)
+            db.commit()
+            db.refresh(chat)
+            
+            log.info(f"Created chat with custom ID: {chat_id}")
+            return ChatModel.model_validate(chat)
+        except Exception as e:
+            log.exception(f"Error creating chat with ID {chat_id}: {e}")
+            db.rollback()
+            return None
+
     def import_chats(
         self,
         user_id: str,
@@ -563,6 +610,24 @@ class ChatService:
             return True
         except Exception as e:
             log.exception(f"Error archiving chats: {e}")
+            db.rollback()
+            return False
+
+    def unarchive_all_chats_by_user_id(
+        self,
+        user_id: str,
+        db: Session
+    ) -> bool:
+        """Unarchive all chats for a user"""
+        try:
+            db.query(Chat).filter(
+                Chat.user_id == user_id,
+                Chat.archived == True
+            ).update({"archived": False})
+            db.commit()
+            return True
+        except Exception as e:
+            log.exception(f"Error unarchiving chats: {e}")
             db.rollback()
             return False
 

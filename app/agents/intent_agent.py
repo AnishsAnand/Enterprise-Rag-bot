@@ -68,6 +68,17 @@ Always respond with a JSON object containing:
 - ambiguities: array of unclear things
 - clarification_needed: string question if needed, or null
 
+**CRITICAL - Standardized Parameter Names:**
+Always use these EXACT parameter names in extracted_params (never use synonyms):
+- **size**: For number of records/rows/items to return (NOT: limit, count, record_count, num_records, rows, total)
+- **page**: For pagination page number (NOT: page_number, offset)
+- **cluster_name**: For cluster names (NOT: clusterName, name, cluster)
+- **report_type**: For report types (use: common_cluster, cluster_inventory, cluster_compute, storage_inventory)
+- **endpoint**: For datacenter/location (NOT: location, datacenter, dc)
+
+Example: User says "show 30 records" or "limit to 50" or "display 100 rows"
+→ ALWAYS extract as: extracted_params: {{size: 30}} or {{size: 50}} or {{size: 100}}
+
 **Examples:**
 
 User: "Create a new Kubernetes cluster named prod-cluster"
@@ -368,6 +379,10 @@ User: "Show storage inventory report" or "Open the PVC report"
 User: "List reports" or "Show reports table"
 → intent_detected: true, resource_type: reports, operation: list, extracted_params: empty
 
+User: "Show 30 records of cluster report" or "Display 50 rows of common cluster report"
+→ intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_inventory, size: 30}} or {{report_type: common_cluster, size: 50}}
+NOTE: ALWAYS use "size" for record count, never "limit", "count", "record_count", etc.
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -540,8 +555,8 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         """
         text = (text or "").strip()
 
-        # 1) Explicit LB name (contains _LB_)
-        lb_match = self.LB_NAME_PATTERN.search(text)
+        # 1) Explicit LB name (contains _LB_) - use module-level pattern
+        lb_match = LB_NAME_PATTERN.search(text)
         if lb_match:
             return {
                 "intent_detected": True,
@@ -758,15 +773,20 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         }
 
     def _fallback_intent(self, reason: str) -> Dict[str, Any]:
+        """
+        Return a safe fallback when intent detection fails.
+        IMPORTANT: Do NOT default to any specific resource type - this was causing
+        random LB queries for unrelated resources like k8s_cluster.
+        """
         logger.warning("⚠️ Intent fallback used: %s", reason)
         return {
-            "intent_detected": True,
-            "resource_type": "load_balancer",
-            "operation": "list",
+            "intent_detected": False,  # Changed from True - don't auto-execute on failure
+            "resource_type": None,     # Changed from "load_balancer" - don't assume resource
+            "operation": None,         # Changed from "list" - don't assume operation
             "extracted_params": {},
-            "confidence": 0.4,
+            "confidence": 0.0,         # Changed from 0.4 - no confidence on fallback
             "ambiguities": [reason],
-            "clarification_needed": None
+            "clarification_needed": "I couldn't understand your request. Could you please rephrase?"
         }
 
 
@@ -774,52 +794,79 @@ Be precise in detecting intent and operation. Only extract parameters that you c
     def _parse_intent_output(self, output_text: str) -> Dict[str, Any]:
         """
         Parse JSON object from LLM output robustly. Return standard structure if parsing fails.
+        Handles JSON wrapped in markdown code blocks (```json ... ```)
         """
+        default_result = {
+            "intent_detected": False,
+            "resource_type": None,
+            "operation": None,
+            "extracted_params": {},
+            "confidence": 0.0,
+            "ambiguities": [],
+            "clarification_needed": None
+        }
+        
         try:
             if not output_text:
-                return {
-                    "intent_detected": False,
-                    "resource_type": None,
-                    "operation": None,
-                    "extracted_params": {},
-                    "confidence": 0.0,
-                    "ambiguities": [],
-                    "clarification_needed": None
-                }
+                return default_result
 
+            # Method 1: Try to extract JSON from markdown code blocks first
+            # Handles ```json { ... } ``` or ``` { ... } ```
+            code_block_pattern = re.compile(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', re.IGNORECASE)
+            code_match = code_block_pattern.search(output_text)
+            if code_match:
+                try:
+                    parsed = json.loads(code_match.group(1))
+                    if isinstance(parsed, dict):
+                        logger.debug("✅ Parsed JSON from markdown code block")
+                        return parsed
+                except json.JSONDecodeError:
+                    pass  # Continue to other methods
+
+            # Method 2: Find balanced braces - look for complete JSON object
+            # More efficient than iterating backwards character by character
+            brace_depth = 0
+            start_idx = -1
+            for i, char in enumerate(output_text):
+                if char == '{':
+                    if brace_depth == 0:
+                        start_idx = i
+                    brace_depth += 1
+                elif char == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0 and start_idx != -1:
+                        candidate = output_text[start_idx:i+1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                logger.debug("✅ Parsed JSON using brace matching")
+                                return parsed
+                        except json.JSONDecodeError:
+                            # Reset and continue looking for another JSON block
+                            start_idx = -1
+                            continue
+
+            # Method 3: Last resort - try original approach with { to end
             start_idx = output_text.find('{')
             if start_idx != -1:
-                # try progressively larger substrings up to a reasonable size
-                for end_idx in range(len(output_text), start_idx, -1):
-                    candidate = output_text[start_idx:end_idx]
+                # Find the last } and try that substring
+                end_idx = output_text.rfind('}')
+                if end_idx > start_idx:
+                    candidate = output_text[start_idx:end_idx+1]
                     try:
                         parsed = json.loads(candidate)
                         if isinstance(parsed, dict):
+                            logger.debug("✅ Parsed JSON using first-last brace method")
                             return parsed
-                    except Exception:
-                        continue
-            # As a last resort, try to extract any key-value style lines (very heuristic)
-            # Return default if nothing works
+                    except json.JSONDecodeError:
+                        pass
+
             logger.warning("⚠️ Could not locate JSON in LLM output. Returning default structure.")
-            return {
-                "intent_detected": False,
-                "resource_type": None,
-                "operation": None,
-                "extracted_params": {},
-                "confidence": 0.0,
-                "ambiguities": ["Could not parse LLM JSON response"],
-                "clarification_needed": None
-            }
+            default_result["ambiguities"] = ["Could not parse LLM JSON response"]
+            return default_result
 
         except Exception as e:
             logger.warning("⚠️ Exception while parsing intent output: %s", str(e))
-            return {
-                "intent_detected": False,
-                "resource_type": None,
-                "operation": None,
-                "extracted_params": {},
-                "confidence": 0.0,
-                "ambiguities": ["Parsing error"],
-                "clarification_needed": None
-            }
+            default_result["ambiguities"] = ["Parsing error"]
+            return default_result
 

@@ -169,7 +169,10 @@ class ReportsAgent(BaseResourceAgent):
             }
 
         page = self._safe_int(params.get("page", 0), default=0, minimum=0)
-        size = self._safe_int(params.get("size", 5), default=5, minimum=1)
+        # IntentAgent is instructed to always use "size" for record count
+        # Keep "limit" as fallback for backward compatibility
+        size_param = params.get("size") or params.get("limit")
+        size = self._safe_int(size_param, default=5, minimum=1) if size_param else 5
         wants_all = self._wants_all(user_query, params)
 
         filter_request = self._detect_filter_request(user_query, params)

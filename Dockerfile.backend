@@ -1,0 +1,95 @@
+# =============================================================================
+# Enterprise RAG Bot - Backend Dockerfile
+# =============================================================================
+# Production-optimized multi-stage build for the FastAPI backend
+# 
+# Build: docker build -f Dockerfile.backend -t enterprise-rag-backend:latest .
+# Run:   docker run -p 8000:8000 --env-file .env enterprise-rag-backend:latest
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder - Install dependencies in isolated environment
+# -----------------------------------------------------------------------------
+    FROM python:3.11-slim AS builder
+
+    WORKDIR /build
+    
+    # Install build dependencies for Python packages with native extensions
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        gcc \
+        g++ \
+        && rm -rf /var/lib/apt/lists/*
+    
+    # Create virtual environment
+    RUN python -m venv /build/venv
+    ENV PATH="/build/venv/bin:$PATH"
+    
+    # Copy requirements and install dependencies
+    COPY requirements.txt .
+    
+    # Upgrade pip and install dependencies
+    RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+        pip install --no-cache-dir -r requirements.txt
+    
+    # -----------------------------------------------------------------------------
+    # Stage 2: Runtime - Minimal production image
+    # -----------------------------------------------------------------------------
+    FROM python:3.11-slim AS runtime
+    
+    # Labels for image metadata
+    LABEL maintainer="Enterprise RAG Team"
+    LABEL version="2.0.0"
+    LABEL description="Enterprise RAG Bot Backend - Production Image"
+    
+    # Create non-root user for security
+    RUN groupadd --gid 1000 ragbot && \
+        useradd --uid 1000 --gid ragbot --shell /bin/bash --create-home ragbot
+    
+    WORKDIR /app
+    
+    # Install runtime dependencies only (no build tools)
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+        curl \
+        ca-certificates \
+        tzdata \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean
+    
+    # Copy virtual environment from builder stage
+    COPY --from=builder /build/venv /app/venv
+    
+    # Set environment variables
+    ENV PATH="/app/venv/bin:$PATH" \
+        PYTHONUNBUFFERED=1 \
+        PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="/app" \
+        # Default app configuration
+        HOST=0.0.0.0 \
+        PORT=8000 \
+        UVICORN_WORKERS=1 \
+        UVICORN_LOG_LEVEL=info
+    
+    # Copy application code
+    COPY --chown=ragbot:ragbot app /app/app
+    
+    # Create necessary directories with proper permissions
+    RUN mkdir -p /app/uploads /app/logs /app/outputs /app/backups && \
+        chown -R ragbot:ragbot /app
+    
+    # Switch to non-root user
+    USER ragbot
+    
+    # Expose the application port
+    EXPOSE 8000
+    
+    # Health check - verifies the app is responding
+    HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+        CMD curl -sf http://localhost:8000/health/liveness || exit 1
+    
+    # Start command - production-ready with uvicorn
+    CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    
+     

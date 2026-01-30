@@ -87,6 +87,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[ChatCompletionChoice]
     usage: Optional[Usage] = None
+    followUps: Optional[List[str]] = None  # Follow-up suggestions for the UI
 
 
 class ModelInfo(BaseModel):
@@ -288,7 +289,8 @@ async def build_rich_response(
             "metadata": widget_response.get("metadata", {}),
             "has_rich_content": bool(steps or images),
             "steps_count": len(steps),
-            "images_count": len(images)
+            "images_count": len(images),
+            "followUps": widget_response.get("followUps", [])  # Pass through follow-ups
         }
     
     # STEP 2: Widget failed - fall back to direct RAG search
@@ -519,6 +521,7 @@ async def chat_completions(
         formatted_answer = response_data["formatted_answer"]
         confidence = response_data["confidence"]
         metadata = response_data["metadata"]
+        follow_ups = response_data.get("followUps", [])
         
         logger.info(
             f"[OpenWebUI] Response built - "
@@ -582,11 +585,16 @@ async def chat_completions(
         
         if request_data.stream:
             logger.info(f"[OpenWebUI] Streaming response ({len(formatted_answer)} chars)")
+            # For streaming, append follow-ups to the response text if available
+            streaming_content = formatted_answer
+            if follow_ups:
+                follow_up_text = "\n\n---\n\n**💡 Suggested follow-ups:**\n" + "\n".join(f"• {f}" for f in follow_ups[:5])
+                streaming_content += follow_up_text
             return StreamingResponse(
                 _stream_response(
                     completion_id, 
                     request_data.model, 
-                    formatted_answer
+                    streaming_content
                 ),
                 media_type="text/event-stream; charset=utf-8"
             )
@@ -610,7 +618,8 @@ async def chat_completions(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens
-                )
+                ),
+                followUps=follow_ups if follow_ups else None
             )
     
     except HTTPException as e:
