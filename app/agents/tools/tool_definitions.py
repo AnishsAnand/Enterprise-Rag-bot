@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Optional, Callable
 from pydantic import BaseModel, Field
 from enum import Enum
 import logging
-import json
-from datetime import datetime
+
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +98,7 @@ SEARCH_KNOWLEDGE_BASE = ToolDefinition(
     ],
     return_type="List[Dict[str, Any]]",
     timeout_seconds=15,
-    retry_count=2
-)
+    retry_count=2)
 
 SEARCH_WEB = ToolDefinition(
     name="search_web",
@@ -124,8 +122,7 @@ SEARCH_WEB = ToolDefinition(
     return_type="List[Dict[str, str]]",
     timeout_seconds=20,
     retry_count=2,
-    rate_limit_per_minute=30
-)
+    rate_limit_per_minute=30)
 
 # ==================== DATA RETRIEVAL TOOLS ====================
 
@@ -152,8 +149,7 @@ GET_USER_DATA = ToolDefinition(
     return_type="Dict[str, Any]",
     timeout_seconds=10,
     retry_count=2,
-    requires_auth=True
-)
+    requires_auth=True)
 
 GET_DOCUMENT = ToolDefinition(
     name="get_document",
@@ -169,8 +165,7 @@ GET_DOCUMENT = ToolDefinition(
     ],
     return_type="Dict[str, Any]",
     timeout_seconds=10,
-    retry_count=2
-)
+    retry_count=2)
 
 # ==================== API CALL TOOLS ====================
 
@@ -209,8 +204,7 @@ CALL_EXTERNAL_API = ToolDefinition(
     return_type="Dict[str, Any]",
     timeout_seconds=30,
     retry_count=3,
-    requires_auth=True
-)
+    requires_auth=True)
 
 # ==================== ANALYSIS TOOLS ====================
 
@@ -228,8 +222,7 @@ ANALYZE_SENTIMENT = ToolDefinition(
     ],
     return_type="Dict[str, Any]",
     timeout_seconds=10,
-    retry_count=2
-)
+    retry_count=2)
 
 EXTRACT_ENTITIES = ToolDefinition(
     name="extract_entities",
@@ -252,8 +245,7 @@ EXTRACT_ENTITIES = ToolDefinition(
     ],
     return_type="List[Dict[str, Any]]",
     timeout_seconds=10,
-    retry_count=2
-)
+    retry_count=2)
 
 SUMMARIZE_TEXT = ToolDefinition(
     name="summarize_text",
@@ -276,8 +268,7 @@ SUMMARIZE_TEXT = ToolDefinition(
     ],
     return_type="str",
     timeout_seconds=15,
-    retry_count=2
-)
+    retry_count=2)
 
 # ==================== TOOL REGISTRY ====================
 
@@ -339,7 +330,6 @@ class ToolRegistry:
     def to_langchain_format(self) -> List[Dict[str, Any]]:
         """Convert all tools to LangChain format"""
         return [tool.to_langchain_format() for tool in self.tools.values()]
-
-
+    
 # Global registry instance
 tool_registry = ToolRegistry()
