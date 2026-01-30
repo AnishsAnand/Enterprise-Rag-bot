@@ -69,3 +69,6 @@ styles/
 backend/
 angular-frontend/package-lock.json 
 user-frontend/package-lock.json
+
+backup/
+artifacts/

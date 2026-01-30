@@ -1,8 +1,4 @@
 # postgres_service.py - OPTIMIZED FOR PRODUCTION
-# ✅ FIX: Batched embedding generation (100x faster)
-# ✅ FIX: Smart query caching with embedding reuse
-# ✅ FIX: Parallel image scoring
-# ✅ MAINTAINED: All existing class structure and logic
 
 import json
 import os
@@ -29,14 +25,7 @@ logger.setLevel(os.getenv("POSTGRES_LOG_LEVEL", "INFO"))
 
 class PostgresService:
     """
-    ✅ OPTIMIZED: Production-grade PostgreSQL service
-    
-    CRITICAL FIXES:
-    1. Batched embedding generation (25s → 2s for 100 docs)
-    2. Smart embedding cache with LRU eviction
-    3. Parallel image relevance scoring
-    4. Optimized hybrid search query
-    5. Early result filtering to reduce reranking overhead
+     Production-grade PostgreSQL service
     """
 
     def __init__(self):
@@ -49,7 +38,7 @@ class PostgresService:
         # Detect environment
         self._detect_environment()
 
-        # ✅ OPTIMIZED: Enhanced search configuration
+        #  Enhanced search configuration
         self.search_config = {
             "min_relevance_threshold": float(os.getenv("POSTGRES_MIN_RELEVANCE", "0.08")),
             "max_initial_results": int(os.getenv("POSTGRES_MAX_INITIAL_RESULTS", "50")),  # Reduced from 200
@@ -61,7 +50,7 @@ class PostgresService:
             "batch_embedding_size": int(os.getenv("BATCH_EMBEDDING_SIZE", "50")),  # NEW: Batch size
         }
 
-        # ✅ NEW: Embedding cache with LRU
+        # Embedding cache with LRU
         self._embedding_cache: Dict[str, List[float]] = {}
         self._embedding_cache_max_size = int(os.getenv("EMBEDDING_CACHE_SIZE", "1000"))
         
@@ -99,7 +88,7 @@ class PostgresService:
         logger.info(f"   - Rerank limit: {self.search_config['rerank_top_k']}")
 
     # ========================================================================
-    # EXISTING HELPER METHODS (UNCHANGED)
+    # EXISTING HELPER METHODS 
     # ========================================================================
 
     def _validate_table_name(self, name: str) -> str:
@@ -226,7 +215,7 @@ class PostgresService:
             return self._config_dimension
 
     # ========================================================================
-    # INITIALIZATION (UNCHANGED)
+    # INITIALIZATION 
     # ========================================================================
 
     async def initialize(self) -> None:
@@ -331,7 +320,7 @@ class PostgresService:
         return False
 
     async def _ensure_schema(self) -> None:
-        """Enhanced schema management (UNCHANGED)."""
+        """Enhanced schema management."""
         if not self.pool:
             logger.warning("⚠️ Cannot ensure schema - pool not initialized")
             return
@@ -432,12 +421,12 @@ class PostgresService:
             return False
 
     # ========================================================================
-    # ✅ OPTIMIZED: DOCUMENT INGESTION WITH BATCHED EMBEDDINGS
+    #  DOCUMENT INGESTION WITH BATCHED EMBEDDINGS
     # ========================================================================
 
     async def add_documents(self, documents: List[Dict[str, Any]]) -> List[str]:
         """
-        ✅ OPTIMIZED: Batched embedding generation for faster ingestion
+         Batched embedding generation for faster ingestion
         
         BEFORE: Sequential embedding calls → 25s for 100 docs
         AFTER: Batched embedding generation → 2-3s for 100 docs
@@ -495,7 +484,7 @@ class PostgresService:
                     "key_terms": self._extract_key_terms(content),
                 })
 
-            # ✅ CRITICAL FIX: Batched embedding generation
+            #  Batched embedding generation
             logger.info(f"🔄 Generating embeddings in batches...")
             embeddings = await self._generate_embeddings_batched(texts)
 
@@ -558,12 +547,7 @@ class PostgresService:
 
     async def _generate_embeddings_batched(self, texts: List[str]) -> List[List[float]]:
         """
-        ✅ NEW: Generate embeddings in optimized batches with caching
-        
-        PERFORMANCE:
-        - Batch size: 50 texts per API call
-        - Cache hit rate: ~40% for similar queries
-        - Speed improvement: 10-100x faster than sequential
+        Generate embeddings in optimized batches with caching
         """
         if not texts:
             return []
@@ -642,7 +626,7 @@ class PostgresService:
         self._embedding_cache[key] = embedding
 
     # ========================================================================
-    # IMAGE HANDLING (UNCHANGED)
+    # IMAGE HANDLING 
     # ========================================================================
 
     def _normalize_images_for_storage(self, images_raw: Any) -> List[Dict[str, Any]]:
@@ -720,7 +704,7 @@ class PostgresService:
         return [word for word, count in word_freq.most_common(20)]
 
     # ========================================================================
-    # ✅ OPTIMIZED: SEARCH WITH EARLY FILTERING
+    #  SEARCH WITH EARLY FILTERING
     # ========================================================================
 
     async def search_documents(
@@ -1013,7 +997,7 @@ class PostgresService:
         limit: int
     ) -> List[Dict[str, Any]]:
         """
-        ✅ OPTIMIZED: Faster hybrid search with reduced candidates
+         Faster hybrid search with reduced candidates
         """
         results: List[Dict[str, Any]] = []
     
@@ -1022,7 +1006,7 @@ class PostgresService:
                 if key_terms:
                     fts_query = " ".join(key_terms[:10])
 
-                    # ✅ OPTIMIZED: Reduced LIMIT multiplier (2x instead of original)
+                    #  Reduced LIMIT multiplier (2x instead of original)
                     hybrid_sql = f"""
                 WITH vector_results AS (
                     SELECT 
@@ -1173,7 +1157,7 @@ class PostgresService:
         results: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        ✅ OPTIMIZED: Batched semantic reranking
+         Batched semantic reranking
         
         BEFORE: Sequential embedding generation for each result
         AFTER: Single batched embedding call for all results
@@ -1182,7 +1166,7 @@ class PostgresService:
             return []
         
         try:
-            # ✅ CRITICAL: Batch generate embeddings for all results at once
+            #  Batch generate embeddings for all results at once
             contents = [r["content"][:2000] for r in results]
             
             # Generate query embedding (check cache first)
@@ -1197,7 +1181,7 @@ class PostgresService:
                 query_embedding = np.array(query_embeddings[0])
                 self._update_embedding_cache(query_cache_key, query_embedding)
             
-            # ✅ CRITICAL: Batch generate content embeddings
+            #  Batch generate content embeddings
             content_embeddings = await self._generate_embeddings_batched(contents)
             
             if not content_embeddings or len(content_embeddings) != len(results):
@@ -1236,7 +1220,7 @@ class PostgresService:
             return results
 
     # ========================================================================
-    # HELPER METHODS (UNCHANGED)
+    # HELPER METHODS 
     # ========================================================================
 
     def _coerce_images_from_db(self, images_field: Any) -> List[Dict[str, Any]]:
@@ -1345,7 +1329,7 @@ class PostgresService:
         self._query_cache[cache_key] = (results, datetime.now().timestamp())
 
     # ========================================================================
-    # STATS & MANAGEMENT (UNCHANGED)
+    # STATS & MANAGEMENT 
     # ========================================================================
 
     async def get_collection_stats(self) -> Dict[str, Any]:

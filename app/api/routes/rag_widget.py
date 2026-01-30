@@ -25,7 +25,6 @@ from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.agents import get_agent_manager  
-from app.services.enhanced_bulk_scraper import ProductionBulkScraperService
 import numpy as np
 
 
@@ -417,7 +416,7 @@ class ProductionBulkScraperService:
             "end_time": None,
         }
 
-    async def discover_urls_intelligent(
+    async def discover_url(
         self,
         base_url: str,
         max_depth: int = 15,
@@ -1522,32 +1521,21 @@ class OrchestrationService:
         
         return result
     
-    async def _handle_search_task(
-        self,
-        params: List[str],
-        services: Dict[str, Dict[str, Any]],
-        original_query: str
-    ) -> Dict[str, Any]:
+    async def _handle_search_task(self,params: List[str],services: Dict[str, Dict[str, Any]],original_query: str) -> Dict[str, Any]:
         """Handle search/retrieval task."""
         if not services["postgres"]["available"]:
             return {
                 "error": "Vector database unavailable",
                 "fallback": "Using AI-only response",
-                "result": await self._ai_only_fallback(original_query, services)
-            }
-        
+                "result": await self._ai_only_fallback(original_query, services)}
         search_query = params[0] if params else original_query
-        
         # Perform vector search
         search_results = await call_maybe_async(
             postgres_service.search_documents,
             search_query,
-            n_results=50
-        )
-        
+            n_results=50)
         if not search_results and services["ai_service"]["available"]:
             return await self._ai_only_fallback(search_query, services)
-        
         # Generate enhanced response
         context = [r.get("content", "") for r in search_results[:5]]
         
@@ -1724,21 +1712,6 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[st
             start = next_start
     return chunks
 
-
-def _enhanced_similarity(query: str, text: str) -> float:
-    """Return [0,1] similarity score"""
-    if not query or not text:
-        return 0.0
-    query_norm = " ".join(query.lower().split())
-    text_norm = " ".join(text.lower().split())
-    seq_ratio = difflib.SequenceMatcher(None, query_norm, text_norm).ratio()
-    query_words, text_words = set(query_norm.split()), set(text_norm.split())
-    overlap = len(query_words & text_words) / len(query_words | text_words) if query_words else 0.0
-    substring_bonus = 0.2 if query_norm in text_norm else 0.0
-    score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
-    return min(1.0, max(0.0, score))
-
-
 def _extract_key_concepts(text: str) -> List[str]:
     """Extract key concepts from text for relevance matching."""
     if not text:
@@ -1790,17 +1763,7 @@ async def call_maybe_async(fn, *args, **kwargs):
 @router.post("/widget/query")
 async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks):
     """
-    ✅ OPTIMIZED: Fast query processing with smart image extraction
-    
-    CRITICAL FIXES:
-    1. Early filtering before expensive operations
-    2. Parallel image extraction
-    3. Optimized search parameters
-    4. Smart caching
-    
-    PERFORMANCE:
-    - BEFORE: 25-30s for complex queries
-    - AFTER: 3-5s for same queries
+    Query processing with image extraction
     """
     try:
         query = request.query.strip()
@@ -1825,13 +1788,13 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
                     background_tasks=background_tasks
                 )
         
-        # ✅ OPTIMIZED: Standard RAG flow with fast search
+        #  Standard RAG flow with fast search
         search_results = await _perform_document_search(query, request)
         
         if not search_results:
             return await _handle_no_results(query, {}, request)
 
-        # ✅ OPTIMIZED: Early filtering
+        #  Early filtering
         filtered_results = _filter_search_results(search_results, request)
         base_context = _extract_base_context(filtered_results)
         
@@ -1846,7 +1809,7 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         # Generate steps
         steps_data = await _generate_steps(query, expanded_context, base_context, answer)
 
-        # ✅ OPTIMIZED: Fast parallel image extraction
+        #  Fast parallel image extraction
         selected_images = _extract_and_score_images(
             query=query,
             answer=answer,
@@ -1878,7 +1841,7 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
             )
 
         # Format response
-        from app.services.openwebui_formatter import format_for_openwebui
+        from app.services.webui_formatter import format_for_openwebui
         
         formatted_answer = format_for_openwebui(
             answer=answer or "I was unable to generate a comprehensive answer.",
@@ -2090,7 +2053,7 @@ def _check_conversation_context(existing_state, query_lower: str) -> bool:
 async def _handle_agent_routing(query: str, session_id: str, request: WidgetQueryRequest, 
                                 background_tasks: BackgroundTasks) -> dict:
     """Handle routing to agent manager and process response."""
-    from app.services.openwebui_formatter import format_agent_response_for_openwebui
+    from app.services.webui_formatter import format_agent_response_for_openwebui
     
     agent_manager = get_agent_manager(
         vector_service=postgres_service,
@@ -2283,7 +2246,7 @@ async def _handle_auto_execution(query: str, intent_analysis: dict, request: Wid
 
 async def _perform_document_search(query: str, request: WidgetQueryRequest) -> list:
     """
-    ✅ OPTIMIZED: Fast document search with reduced candidates
+     Fast document search with reduced candidates
     """
     search_params = {
         "quick": {"max_results": min(request.max_results, 20)},      # Reduced from 30
@@ -2350,7 +2313,7 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
 
 def _filter_search_results(search_results: list, request: WidgetQueryRequest) -> list:
     """
-    ✅ OPTIMIZED: Early filtering with adaptive thresholds
+     Early filtering with adaptive thresholds
     """
     if not search_results:
         return []
@@ -2443,17 +2406,7 @@ def _extract_and_score_images(
     filtered_results: list
 ) -> list:
     """
-    ✅ OPTIMIZED: Parallel image extraction with smart relevance scoring
-    
-    CRITICAL FIXES:
-    1. Early URL validation to skip invalid images
-    2. Parallel processing instead of sequential
-    3. Smart query-image relevance matching
-    4. Quality-based deduplication
-    
-    PERFORMANCE:
-    - BEFORE: Sequential processing → ~500ms for 50 results
-    - AFTER: Parallel processing → ~50ms for 50 results (10x faster)
+     Parallel image extraction with  relevance scoring
     """
     import concurrent.futures
     from collections import defaultdict
@@ -2511,7 +2464,7 @@ def _extract_and_score_images(
             if not img_url or not isinstance(img_url, str):
                 continue
             
-            # ✅ CRITICAL: Early URL validation
+            #  Early URL validation
             if not img_url.startswith(("http://", "https://")):
                 continue
             
@@ -2530,7 +2483,7 @@ def _extract_and_score_images(
             img_type = img.get("type", "content")
             img_text = img.get("text", "")
             
-            # ✅ OPTIMIZED: Smart relevance calculation
+            #   relevance calculation
             img_search_text = " ".join([
                 img_alt, img_caption, img_text, page_title
             ]).lower()
@@ -2553,7 +2506,7 @@ def _extract_and_score_images(
             # Quality score from existing metadata
             quality_score = float(img.get("quality_score", 0.5))
             
-            # ✅ OPTIMIZED: Combined relevance score
+            #  Combined relevance score
             image_score = (
                 (concept_overlap / max(len(all_concepts), 1)) * 0.30 +  # Concept match
                 (keyword_overlap / max(len(query_keywords), 1)) * 0.25 + # Keyword match
@@ -2579,7 +2532,7 @@ def _extract_and_score_images(
         
         return images_from_result
     
-    # ✅ CRITICAL: Process results in parallel
+    #  Process results in parallel
     candidate_images = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -2597,7 +2550,7 @@ def _extract_and_score_images(
             except Exception as e:
                 logger.debug(f"Image processing error: {e}")
     
-    # ✅ OPTIMIZED: Smart deduplication (keep highest scored)
+    #   deduplication (keep highest scored)
     seen_urls = {}
     
     for img in candidate_images:
@@ -2950,14 +2903,14 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 status_code=400, 
                 detail="Scraped content is too short or empty"
             )
-        # ✅ CRITICAL: Extract images from scraped content
+        #  Extract images from scraped content
         scraped_images = content.get("images", []) or []
         logger.info(
             f"✅ Scraped {len(page_text)} chars, "
             f"{len(scraped_images)} images from {request.url}"
         )
 
-        # ✅ CRITICAL: Store in knowledge base with images
+        #  Store in knowledge base with images
         if request.store_in_knowledge:
             documents_to_store = []
             
@@ -3003,7 +2956,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             )
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
-        # ✅ CRITICAL: Include images in response
+        #  Include images in response
         return {
             "status": "success",
             "url": str(request.url),

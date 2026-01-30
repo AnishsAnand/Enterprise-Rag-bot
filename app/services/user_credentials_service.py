@@ -75,7 +75,7 @@ class UserCredentialsService:
             user = db.query(User).filter(User.username == username).first()
             
             if not user:
-                # Try to find by api_auth_email (for OpenWebUI users where email is passed)
+                # Try to find by api_auth_email (for WebUI users where email is passed)
                 user = db.query(User).filter(User.api_auth_email == username).first()
             
             if not user:
@@ -104,7 +104,7 @@ class UserCredentialsService:
     def get_credentials_by_email(email: str) -> Optional[Dict[str, str]]:
         """
         Get API credentials for a user by their email address.
-        This is used when OpenWebUI sends X-User-Email header.
+        This is used when WebUI sends X-User-Email header.
         
         Args:
             email: Email address to look up

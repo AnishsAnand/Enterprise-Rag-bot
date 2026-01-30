@@ -417,8 +417,6 @@ class Settings(BaseSettings):
         description="Python path"
     )
     
-<<<<<<< HEAD
-=======
     # =========================
     # POST-INITIALIZATION
     # =========================
@@ -430,8 +428,7 @@ class Settings(BaseSettings):
             self.POSTGRES_HOST = self.postgres_host_adaptive
         
         # Set adaptive REDIS_HOST if not explicitly set
-        if self.REDIS_HOST is None:
-            self.REDIS_HOST = self.redis_host_adaptive
+        
         
         # Set adaptive SCRAPER_MAX_CONCURRENT if not explicitly set
         if self.SCRAPER_MAX_CONCURRENT is None:
@@ -441,18 +438,7 @@ class Settings(BaseSettings):
         if self.UVICORN_WORKERS is None:
             self.UVICORN_WORKERS = self.uvicorn_workers_adaptive
         
-        # Build REDIS_URL if not set
-        if not self.REDIS_URL:
-            if self.REDIS_PASSWORD:
-                self.REDIS_URL = (
-                    f"redis://:{self.REDIS_PASSWORD}@"
-                    f"{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-                )
-            else:
-                self.REDIS_URL = (
-                    f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
-                )
-        
+       
         # Ensure data directories exist
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -465,7 +451,6 @@ class Settings(BaseSettings):
     # PYDANTIC CONFIGURATION
     # =========================
     
->>>>>>> f861d172c4f76def4655980406c89e76eb8288a1
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -487,6 +472,5 @@ logger.info(f"   - Environment: {settings.environment_type}")
 logger.info(f"   - Platform: {settings.platform_system}")
 logger.info(f"   - Data Dir: {settings.data_dir}")
 logger.info(f"   - Postgres Host: {settings.POSTGRES_HOST}")
-logger.info(f"   - Redis Host: {settings.REDIS_HOST}")
 logger.info(f"   - Scraper Concurrent: {settings.SCRAPER_MAX_CONCURRENT}")
 logger.info(f"   - Uvicorn Workers: {settings.UVICORN_WORKERS}")

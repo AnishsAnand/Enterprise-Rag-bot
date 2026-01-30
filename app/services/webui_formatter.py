@@ -8,9 +8,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-class OpenWebUIFormatter:
+class WebUIFormatter:
     """
-    PRODUCTION-READY: Ensures EVERY step has a displayable image for OpenWebUI.
+    PRODUCTION-READY: Ensures EVERY step has a displayable image for Webui.
     FIXED VERSION: Proper image rendering from scraped URLs and generated placeholders.
     """
 
@@ -36,7 +36,7 @@ class OpenWebUIFormatter:
         metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
-        Format complete response with GUARANTEED displayable images for OpenWebUI.
+        Format complete response with GUARANTEED displayable images for Webui.
         
         CRITICAL: Every step MUST have either:
         1. A real scraped image URL (HTTP/HTTPS)
@@ -823,10 +823,8 @@ class OpenWebUIFormatter:
         
         # Ensure spacing before images
         text = re.sub(r'([^\n])\n!\[', r'\1\n\n![', text)
-        
         # Trim trailing spaces
         text = re.sub(r'[ \t]+\n', '\n', text)
-        
         return text.strip()
 
     def _fallback_minimal(
@@ -847,14 +845,13 @@ class OpenWebUIFormatter:
             )
         
         return "\n\n---\n\n".join(parts)
-
-
+    
 # ============================================================================
 # Module-level convenience functions
 # ============================================================================
-_formatter = OpenWebUIFormatter()
+_formatter = WebUIFormatter()
 
-def format_for_openwebui(
+def format_for_webui(
     answer: str,
     steps: List[Dict[str, Any]] = None,
     images: List[Dict[str, Any]] = None,
@@ -864,7 +861,7 @@ def format_for_openwebui(
     metadata: Optional[Dict[str, Any]] = None,
     show_metadata: bool = False
 ) -> str:
-    """Format response for OpenWebUI with guaranteed displayable images."""
+    """Format response for Webui with guaranteed displayable images."""
     return _formatter.format_response(
         answer=answer or "",
         steps=steps or [],
@@ -875,8 +872,7 @@ def format_for_openwebui(
         metadata=metadata or {}
     )
 
-
-def format_agent_response_for_openwebui(
+def format_agent_response_for_webui(
     response_text: str,
     execution_result: Optional[Dict[str, Any]] = None,
     session_id: Optional[str] = None,
@@ -941,12 +937,12 @@ def format_agent_response_for_openwebui(
     return "".join(sections)
 
 
-def format_error_for_openwebui(
+def format_error_for_webui(
     error_message: str,
     suggestions: Optional[List[str]] = None,
     error_type: str = "general"
 ) -> str:
-    """Format error messages for OpenWebUI."""
+    """Format error messages for Webui."""
     emoji_map = {
         "general": "❌",
         "not_found": "🔍",

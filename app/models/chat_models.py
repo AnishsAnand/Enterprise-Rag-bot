@@ -7,7 +7,6 @@ Database Schema compatible with OpenWebUI-style chat storage
 
 import uuid
 import time
-from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy import (
@@ -20,9 +19,7 @@ from sqlalchemy import (
     Index,
     ForeignKey,
 )
-from sqlalchemy.orm import relationship
-from pydantic import BaseModel, ConfigDict, Field
-
+from pydantic import BaseModel, ConfigDict
 from app.models.database_models import Base
 
 

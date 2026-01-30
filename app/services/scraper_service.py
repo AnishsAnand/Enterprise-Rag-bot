@@ -10,7 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
-
+import subprocess
+import shutil
 import requests
 import trafilatura
 import undetected_chromedriver as uc
@@ -28,12 +29,6 @@ class WebScraperService:
     """
     Production-oriented scraper with multiple strategies (trafilatura, requests, selenium),
     robust URL discovery, and structured extraction (text, links, images, tables).
-
-    PRODUCTION FIXES:
-    - Graceful handling of permission errors with temp file fallback
-    - Proper directory creation with error handling
-    - Better error messages and logging
-    - Compatible with both ChromaDB and Milvus vector databases
     """
 
     def __init__(self, request_timeout: int = 30):
@@ -45,7 +40,6 @@ class WebScraperService:
 
     def _setup_output_directory(self) -> None:
         """
-        PRODUCTION FIX: Setup output directory with proper error handling and fallback.
         Priority: 1. /app/outputs (Docker) 2. ./outputs (Local) 3. /tmp/scraper_outputs (Fallback)
         """
         # Try multiple locations in order of preference
@@ -163,12 +157,12 @@ class WebScraperService:
                             "title": content.get("title") or "",
                             "format": "text/html",
                             "source": "web_scraping",
-                            "timestamp": datetime.now().isoformat(),  # FIXED: Use ISO string for JSON serialization
+                            "timestamp": datetime.now().isoformat(),  
                             "images": content.get("images", []),
                         }
                         content["rag_documents"] = [rag_doc]
 
-                        # PRODUCTION FIX: Save with better error handling
+                        #  Save with better error handling
                         output_format = str(scrape_params.get("output_format", "json")).lower()
                         saved_path = await self._save_to_output_file(url, content, output_format)
                         if saved_path:
@@ -196,8 +190,9 @@ class WebScraperService:
         except Exception as e:
             logger.exception(f"❌ Unexpected error scraping {url}: {e}")
             return {"url": url, "content": None, "status": "error", "error": str(e)}
+        
 
-    async def discover_urls(self, base_url: str, max_depth: int = 2, max_urls: int = 100) -> List[str]:
+    async def discover_url(self, base_url: str, max_depth: int = 2, max_urls: int = 100) -> List[str]:
         """
         BFS discovery within the same domain, skipping non-HTML/static files.
         """
@@ -257,6 +252,51 @@ class WebScraperService:
         soup = BeautifulSoup(resp.content, "html.parser")
         self._clean_html(soup)
         return self._extract_common_content(url, soup, params)
+    
+    def _get_chrome_major_version(self) -> Optional[int]:
+        """
+        Try to detect the installed Chrome/Chromium major version.
+        1) Try common chrome/chromium binary names via shutil.which() and `--version`.
+        2) Fall back to environment variable CHROME_MAJOR_VERSION (useful in containers).
+        Returns the major version as int, or None if detection failed.
+        """
+        # 1) env var override (explicit, useful in CI / containers)
+        env_v = os.getenv("CHROME_MAJOR_VERSION")
+        if env_v:
+            try:
+                return int(env_v)
+            except Exception:
+                logger.debug("CHROME_MAJOR_VERSION env var present but not an int", exc_info=False)
+
+        # 2) try common binary names
+        candidates = [
+            "google-chrome", "chrome", "chromium", "chromium-browser",
+            "/usr/bin/google-chrome", "/usr/bin/chromium-browser",
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+        for cmd in candidates:
+            path = shutil.which(cmd) or (cmd if Path(cmd).exists() else None)
+            if not path:
+                continue
+            try:
+                out = subprocess.check_output([path, "--version"], stderr=subprocess.STDOUT, text=True, timeout=2)
+                m = re.search(r"(\d+)\.", out)
+                if m:
+                    try:
+                        major = int(m.group(1))
+                        logger.debug(f"Detected chrome major version {major} from {path}")
+                        return major
+                    except Exception:
+                        continue
+            except Exception:
+                # ignore and try next candidate
+                continue
+
+        # Could not detect
+        logger.debug("Could not detect Chrome major version; set CHROME_MAJOR_VERSION env var to avoid mismatch.")
+        return None
+
 
     async def _scrape_with_selenium(self, url: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Scrape using Selenium (for JavaScript-heavy sites)"""
@@ -332,8 +372,7 @@ class WebScraperService:
 
     async def _save_to_output_file(self, url: str, content: Dict[str, Any], output_format: str) -> Optional[Path]:
         """
-        PRODUCTION FIX: Serialize extracted 'content' to output directory with proper error handling.
-        
+        Serialize extracted 'content' to output directory with proper error handling.
         Features:
         - Multiple fallback locations
         - Graceful handling of permission errors
@@ -367,7 +406,7 @@ class WebScraperService:
                     return filepath
                     
                 except PermissionError:
-                    # PRODUCTION FIX: Permission denied - try temp fallback
+                    # Permission denied - try temp fallback
                     logger.warning(f"⚠️  Permission denied for {filepath}, using temp file")
                     
                 except OSError as e:
@@ -383,7 +422,7 @@ class WebScraperService:
             return temp_path
             
         except Exception as e:
-            # PRODUCTION FIX: Don't raise - log error and continue
+            # Don't raise - log error and continue
             logger.error(f"❌ Failed saving file: {e}")
             logger.debug(f"Failed to save scraped content for {url}", exc_info=True)
             return None
@@ -594,17 +633,14 @@ class WebScraperService:
     def _process_image_tag_enhanced(self, base_url: str, img: Tag) -> Optional[Dict[str, Any]]:
 
         img_url = None
-    
     # Priority order for finding image URL
         url_attributes = [
-        "src",              # Standard
-        "data-src",         # Lazy loading
-        "data-lazy-src",    # Lazy loading variant
-        "data-original",    # Lazy loading variant
-        "data-srcset",      # Responsive variant
-        "srcset"            # Responsive standard
-        ]
-    
+        "src",              
+        "data-src",         
+        "data-lazy-src",    
+        "data-original",    
+        "data-srcset",      
+        "srcset"]
     # Try each attribute
         for attr in url_attributes:
             value = img.get(attr)
@@ -617,7 +653,7 @@ class WebScraperService:
                         if parts:
                             candidates.append(parts[0])
                     if candidates:
-                        img_url = candidates[-1]  # Get largest
+                        img_url = candidates[-1]  
                         break
                 else:
                     img_url = value
@@ -625,34 +661,28 @@ class WebScraperService:
     
         if not img_url:
             return None
-
     # Extract metadata
         alt_text = (img.get("alt") or "").strip()
         title = (img.get("title") or "").strip()
         img_class = " ".join(img.get("class", [])) if img.get("class") else ""
-    
     # Get dimensions
         width = img.get("width")
         height = img.get("height")
-
     # Classify image type
         img_type = self._classify_image_type(img_class, alt_text, img_url)
-
         return {
-        "url": img_url,  # Will be converted to absolute in _add_image
+        "url": img_url,  
         "alt": alt_text or title or "",
         "type": img_type,
         "class": img_class,
         "width": width,
-        "height": height,
-        }
-
+        "height": height}
     
     def _classify_image_type(self, img_class: str, alt_text: str, url: str) -> str:
+
         lc = img_class.lower()
         la = alt_text.lower() if alt_text else ""
         lu = url.lower()
-    
     # Technical/instructional (highest priority for RAG)
         if any(k in la for k in ("diagram", "chart", "graph", "flow", "architecture", "topology")):
             return "diagram"
@@ -660,29 +690,23 @@ class WebScraperService:
             return "screenshot"
         if any(k in lu for k in ("diagram", "chart", "graph", "screenshot", "tutorial")):
             return "diagram"
-    
     # Visual content
         if any(k in la for k in ("illustration", "infographic", "drawing", "visual")):
             return "illustration"
         if any(k in la for k in ("photo", "image", "picture")):
             return "photo"
-    
     # Branding/decorative (lower priority)
         if any(k in lc for k in ("logo", "icon", "avatar", "brand")):
             return "logo"
         if any(k in lc for k in ("banner", "hero", "header", "promo")):
             return "banner"
-    
         return "content"
-
-    
 
     def _generate_image_description(self, alt: str, img_type: str, rec: Dict[str, Any]) -> str:
 
     # Use alt text if descriptive enough
         if alt and len(alt) > 15:
             return alt
-    
     # Generate based on type
         type_descriptions = {
         "diagram": "Technical diagram or flowchart showing system architecture or process flow",
@@ -691,11 +715,8 @@ class WebScraperService:
         "photo": "Photograph or real-world image",
         "logo": "Logo or branding icon",
         "banner": "Banner or promotional header image",
-        "content": "Content image providing visual context"
-        }
-    
+        "content": "Content image providing visual context"}
         base_desc = type_descriptions.get(img_type, "Visual content image")
-    
     # Enhance with URL hints
         url = rec.get("url", "")
         if "login" in url.lower():
@@ -704,16 +725,12 @@ class WebScraperService:
             return f"{base_desc} - Dashboard or overview screen"
         if "config" in url.lower() or "settings" in url.lower():
             return f"{base_desc} - Configuration or settings interface"
-    
         return base_desc
     
     def _filter_and_rank_images(self, images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-
         scored_images = []
-    
         for img in images:
             score = 0
-        
         # Factor 1: Type (0-40 points)
             type_scores = {
             "diagram": 40,
@@ -722,10 +739,8 @@ class WebScraperService:
             "photo": 20,
             "content": 15,
             "banner": 5,
-            "logo": 0
-        }
+            "logo": 0}
             score += type_scores.get(img.get("type", "content"), 15)
-        
         # Factor 2: Alt text (0-25 points)
             alt = img.get("alt", "")
             if alt:
@@ -736,7 +751,6 @@ class WebScraperService:
                     score += 15
                 elif alt_len > 5:
                     score += 10
-        
         # Factor 3: Context (0-20 points)
             text = img.get("text", "")
             if text:
@@ -747,7 +761,6 @@ class WebScraperService:
                     score += 15
                 elif text_len > 50:
                     score += 10
-        
         # Factor 4: Dimensions (0-10 points)
             try:
                 width = int(img.get("width", 0))
@@ -758,25 +771,19 @@ class WebScraperService:
                     score += 5
             except (ValueError, TypeError):
                 pass
-        
         # Factor 5: URL quality (0-5 points)
             url = img.get("url", "")
             if any(kw in url.lower() for kw in ["screenshot", "diagram", "tutorial", "guide", "doc"]):
                 score += 5
-        
             img["quality_score"] = score
             scored_images.append(img)
-    
     # Sort by score
         scored_images.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-    
     # Log top images for debugging
         if scored_images:
             logger.debug(
                 f"Top image: {scored_images[0].get('url', 'N/A')[:60]} "
-                f"(score: {scored_images[0].get('quality_score', 0)})"
-            )
-    
+                f"(score: {scored_images[0].get('quality_score', 0)})")
         return scored_images
 
     def _enrich_image_with_context(self, rec: Dict[str, Any], tag_node: Tag, soup: BeautifulSoup, base_url: str) -> Dict[str, Any]:
@@ -787,14 +794,12 @@ class WebScraperService:
         url = rec.get("url", "")
         alt = rec.get("alt", "") or ""
         caption = rec.get("caption", "") or ""
-
         # Check for figure/figcaption
         figure = tag_node.find_parent("figure") if isinstance(tag_node, Tag) else None
         if figure:
             fc = figure.find("figcaption")
             if fc:
                 caption = caption or fc.get_text(strip=True)
-
         nearby_texts: List[str] = []
 
         def _gather_nearby(n: Tag, depth: int = 3) -> List[str]:
@@ -817,14 +822,12 @@ class WebScraperService:
                             break
             except Exception:
                 pass
-            
             # Parent elements
             p = n.find_parent(["p", "li", "td", "div"], limit=depth)
             if p and isinstance(p, Tag):
                 tx = p.get_text(separator=" ", strip=True)
                 if tx:
                     texts.append(tx)
-            
             # Ancestor context
             ancestor = n.parent
             steps = 0
@@ -842,7 +845,6 @@ class WebScraperService:
                 nearby_texts.extend(_gather_nearby(tag_node))
         except Exception:
             pass
-
         # Assemble context text
         assembled: List[str] = []
         if caption:
@@ -852,7 +854,6 @@ class WebScraperService:
         for t in nearby_texts:
             if t and t not in assembled:
                 assembled.append(t)
-        
         # Add page snippet as fallback
         try:
             body = soup.body.get_text(separator=" ", strip=True) if soup.body else ""
@@ -862,42 +863,33 @@ class WebScraperService:
                     assembled.append(snippet)
         except Exception:
             pass
-
         # Join and normalize
         joined = " | ".join(x for x in assembled if x).strip()
         joined = re.sub(r"\s+", " ", joined)
-
         rec["caption"] = caption
         rec["alt"] = alt
-        rec["text"] = joined[:800]  # Limit context length for Milvus VARCHAR field
+        rec["text"] = joined[:800]  # Limit context length for VARCHAR field
         rec["url"] = urljoin(base_url, url)
         return rec
 
     def _is_valid_image_url(self, url: str) -> bool:
- 
         if not url or not isinstance(url, str):
             return False
-    
         lower = url.lower()
-    
     # Filter data URIs
         if lower.startswith("data:"):
             return False
-    
     # Filter tracking pixels
         if any(skip in lower for skip in ("1x1", "pixel", "transparent", "spacer", "blank", "empty")):
             return False
-    
     # Filter decorative icons
         if (lower.endswith(".svg") or lower.endswith(".gif")):
             if any(skip in lower for skip in ("icon", "logo", "sprite", "emoji")):
                 return False
-    
     # Must have valid extension
         valid_exts = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg")
         if not any(ext in lower for ext in valid_exts):
             return False
-    
         return True
 
     def _extract_tables(self, soup: BeautifulSoup) -> List[Dict[str, Any]]:
@@ -913,7 +905,6 @@ class WebScraperService:
                 else:
                     tds = header_row.find_all("td")
                     headers = [td.get_text(strip=True) for td in tds]
-
             rows_data: List[Any] = []
             for tr in tbl.find_all("tr"):
                 cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
@@ -926,9 +917,7 @@ class WebScraperService:
 
             if rows_data:
                 tables.append({"headers": headers, "rows": rows_data})
-
         return tables
-
-
+    
 # Global singleton instance
 scraper_service = WebScraperService()

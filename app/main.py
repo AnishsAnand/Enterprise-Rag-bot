@@ -3,27 +3,22 @@ import logging
 from pathlib import Path
 from typing import List
 from contextlib import asynccontextmanager
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-
 import uvicorn
-
 from app.core.config import settings
 from app.api.routes import (
     rag_widget,
     agent_chat,
     health,
     chat_persistence,
-    orchestrator,
-    openwebui_auth,
     tata_auth,
     user_credentials,
-)
+    webui_auth)
 from app.api.routes.user_chat import router as user_chat_router
 from app.api.routes.webui_chats import router as webui_chats_router
 from app.api.routes.webui_config import router as webui_config_router
@@ -31,9 +26,7 @@ from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
 from app.core.database import init_db
-
 load_dotenv()
-
 logger = logging.getLogger("enterprise_rag_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -123,8 +116,8 @@ allowed_origins: List[str] = [
     "http://127.0.0.1:4200",
     "http://localhost:4201",      
     "http://127.0.0.1:4201",      
-    "http://localhost:3000",      # Open WebUI
-    "http://127.0.0.1:3000",      # Open WebUI (alternative)
+    "http://localhost:3000",    
+    "http://127.0.0.1:3000",     
 ]
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
 if extra_origins:
@@ -177,14 +170,12 @@ app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widge
 app.include_router(agent_chat.router, tags=["agent-chat"])
 app.include_router(chat_persistence.router)
 app.include_router(user_chat_router)
-app.include_router(orchestrator.router)
-app.include_router(openwebui_auth.router)
+app.include_router(webui_auth.router)
 app.include_router(tata_auth.router)
 app.include_router(user_credentials.router)
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
-
-# WebUI-compatible APIs (OpenWebUI replacement)
+# WebUI-compatible APIs 
 app.include_router(webui_chats_router)  # /api/v1/chats endpoints
 app.include_router(webui_config_router)  # /api/config endpoint
 
@@ -204,23 +195,18 @@ def serve_embed_script():
     """
     Deliver the embeddable JS widget script.
     Namespaced under /widget to avoid collisions with frontend routes.
-    
     Production-ready with multiple fallback locations for robustness.
     """
     candidate_paths = [
         BASE_DIR / "app" / "static" / "embed.js",
         frontend_path / "embed.js",
-        frontend_path / "assets" / "embed.js",
-    ]
-    
+        frontend_path / "assets" / "embed.js" ]
     for p in candidate_paths:
         if p and p.exists():
             logger.info("✅ Serving embed.js from: %s", p)
             return FileResponse(p, media_type="application/javascript")
-    
     logger.warning("❌ embed.js not found in candidate locations: %s", candidate_paths)
     raise HTTPException(status_code=404, detail="embed.js not found")
-
 # ===================== SPA Fallback =====================
 if embedded_static_mounted:
     @app.get("/{full_path:path}")

@@ -2,17 +2,13 @@
 """
 Integration for Tata Communications PaaS Cluster API
 Provides automated cluster information retrieval and management
-Compatible with action_bot.py and unified_main.py
 """
-
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from enum import Enum
-
-# Import from action_bot for compatibility
 try:
-    from app.api.routes.action_bot import Parameter, ParameterType
+    from backup.action_bot import Parameter, ParameterType
     PARAMS_AVAILABLE = True
 except ImportError:
     PARAMS_AVAILABLE = False
@@ -50,7 +46,6 @@ class LocationEndpoint(Enum):
         self.display_name = display_name
         self.endpoint_id = endpoint_id
 
-    
     class Parameter:
         def __init__(self, name, description, required, param_type, default=None, choices=None, **kwargs):
             self.name = name
@@ -73,9 +68,8 @@ class LocationEndpoint(Enum):
                 'default': self.default,
                 'choices': self.choices,
                 'collected': self.collected,
-                'value': self.value
-            }
-
+                'value': self.value}
+        
 # ======================== Data Models ========================
 class ClusterInfo:
     """Cluster information model"""
@@ -92,8 +86,7 @@ class ClusterInfo:
         kubernetes_version: Optional[str],
         is_backup_enabled: bool,
         created_time: str,
-        ci_master_id: int
-    ):
+        ci_master_id: int):
         self.cluster_id = cluster_id
         self.cluster_name = cluster_name
         self.location = location
@@ -119,9 +112,8 @@ class ClusterInfo:
             'k8s_version': self.kubernetes_version or 'N/A',
             'backup_enabled': self.is_backup_enabled,
             'created': self.created_time,
-            'ci_master_id': self.ci_master_id
-        }
-    
+            'ci_master_id': self.ci_master_id}
+
     def to_summary(self) -> str:
         """Generate human-readable summary"""
         return (
@@ -131,8 +123,7 @@ class ClusterInfo:
             f"  • Nodes: {self.nodes_count}\n"
             f"  • K8s Version: {self.kubernetes_version or 'N/A'}\n"
             f"  • Backup: {'✅ Enabled' if self.is_backup_enabled else '❌ Disabled'}\n"
-            f"  • Cluster ID: {self.cluster_id}"
-        )
+            f"  • Cluster ID: {self.cluster_id}")
 
 # ======================== Parameter Definitions ========================
 def get_cluster_list_parameters() -> List[Parameter]:
@@ -175,9 +166,7 @@ def get_cluster_list_parameters() -> List[Parameter]:
             description='Show detailed cluster information?',
             required=False,
             param_type=ParameterType.BOOLEAN,
-            default=False
-        )
-    ]
+            default=False)]
 
 # ======================== Cluster API Handler ========================
 class ClusterAPIHandler:
@@ -189,20 +178,13 @@ class ClusterAPIHandler:
         self.base_url = f"{CLUSTER_API_BASE_URL}/{project_id}"
         logger.info(f"🔗 Cluster API Handler initialized: {self.base_url}")
     
-    async def get_clusters(
-        self,
-        endpoint_ids: Optional[List[int]] = None,
-        filter_status: Optional[str] = None,
-        filter_type: Optional[str] = None
-    ) -> Dict[str, Any]:
+    async def get_clusters(self,endpoint_ids: Optional[List[int]] = None,filter_status: Optional[str] = None,filter_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Fetch cluster list from API
-        
         Args:
             endpoint_ids: List of endpoint IDs to query
             filter_status: Filter by status (healthy, draft, unhealthy)
             filter_type: Filter by type (MGMT, APP)
-        
         Returns:
             Dictionary with status, clusters, and metadata
         """
@@ -210,68 +192,41 @@ class ClusterAPIHandler:
             # Default to all endpoints if none specified
             if not endpoint_ids:
                 endpoint_ids = [11, 12, 14, 162, 204]
-            
             url = f"{self.base_url}{CLUSTER_LIST_ENDPOINT}"
             payload = {"endpoints": endpoint_ids}
-            
             logger.info(f"🔍 Fetching clusters for endpoints: {endpoint_ids}")
-            
-            response = await self.http_client.post(
-                url,
-                json=payload,
-                timeout=30.0
-            )
+            response = await self.http_client.post(url,json=payload,timeout=30.0)
             response.raise_for_status()
-            
             result = response.json()
-            
             if result.get('status') != 'success':
-                return {
-                    'success': False,
-                    'message': f"API returned status: {result.get('status')}",
-                    'error': result.get('message')
-                }
-            
+                return {'success': False,'message': f"API returned status: {result.get('status')}",'error': result.get('message')}
             # Parse and filter clusters
             clusters = self._parse_clusters(result.get('data', []))
-            
             if filter_status and filter_status != 'all':
                 clusters = self._filter_by_status(clusters, filter_status)
-            
             if filter_type and filter_type != 'all':
                 clusters = self._filter_by_type(clusters, filter_type)
-            
             # Generate statistics
             stats = self._generate_statistics(clusters)
-            
             logger.info(f"✅ Retrieved {len(clusters)} clusters")
-            
             return {
                 'success': True,
                 'clusters': [c.to_dict() for c in clusters],
                 'total_count': len(clusters),
                 'statistics': stats,
                 'endpoint_ids': endpoint_ids,
-                'timestamp': datetime.now().isoformat()
-            }
-            
+                'timestamp': datetime.now().isoformat()}    
         except Exception as e:
             logger.exception(f"❌ Error fetching clusters: {e}")
-            return {
-                'success': False,
-                'message': f"Failed to fetch clusters: {str(e)}",
-                'error': str(e)
-            }
+            return {'success': False,'message': f"Failed to fetch clusters: {str(e)}",'error': str(e)}
     
     def _parse_clusters(self, data: List[Dict[str, Any]]) -> List[ClusterInfo]:
         """Parse raw cluster data into ClusterInfo objects"""
         clusters = []
-        
         for item in data:
             try:
                 # Parse backup enabled
                 is_backup = str(item.get('isIksBackupEnabled', 'false')).lower() == 'true'
-                
                 cluster = ClusterInfo(
                     cluster_id=int(item.get('clusterId', 0)),
                     cluster_name=item.get('clusterName', 'Unknown'),
@@ -283,28 +238,22 @@ class ClusterAPIHandler:
                     kubernetes_version=item.get('kubernetesVersion'),
                     is_backup_enabled=is_backup,
                     created_time=item.get('createdTime', ''),
-                    ci_master_id=int(item.get('ciMasterId', 0))
-                )
-                
+                    ci_master_id=int(item.get('ciMasterId', 0)))
                 clusters.append(cluster)
-                
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse cluster: {e}")
                 continue
-        
         return clusters
     
     def _filter_by_status(self, clusters: List[ClusterInfo], status: str) -> List[ClusterInfo]:
         """Filter clusters by status"""
         status_lower = status.lower()
-        
         if status_lower == 'healthy':
             return [c for c in clusters if c.status == ClusterStatus.HEALTHY.value]
         elif status_lower == 'draft':
             return [c for c in clusters if c.status == ClusterStatus.DRAFT.value]
         elif status_lower == 'unhealthy':
             return [c for c in clusters if c.status == ClusterStatus.UNHEALTHY.value]
-        
         return clusters
     
     def _filter_by_type(self, clusters: List[ClusterInfo], cluster_type: str) -> List[ClusterInfo]:
@@ -316,7 +265,6 @@ class ClusterAPIHandler:
         """Generate cluster statistics"""
         if not clusters:
             return {}
-        
         stats = {
             'total': len(clusters),
             'by_status': {},
@@ -324,47 +272,33 @@ class ClusterAPIHandler:
             'by_location': {},
             'total_nodes': 0,
             'backup_enabled_count': 0,
-            'kubernetes_versions': {}
-        }
-        
+            'kubernetes_versions': {}}
         for cluster in clusters:
             # Count by status
             status_key = cluster.status
             stats['by_status'][status_key] = stats['by_status'].get(status_key, 0) + 1
-            
             # Count by type
             type_key = cluster.cluster_type
             stats['by_type'][type_key] = stats['by_type'].get(type_key, 0) + 1
-            
             # Count by location
             location_key = cluster.display_name_endpoint
             stats['by_location'][location_key] = stats['by_location'].get(location_key, 0) + 1
-            
             # Total nodes
             stats['total_nodes'] += cluster.nodes_count
-            
             # Backup enabled count
             if cluster.is_backup_enabled:
                 stats['backup_enabled_count'] += 1
-            
             # Kubernetes versions
             if cluster.kubernetes_version:
                 version_key = cluster.kubernetes_version
                 stats['kubernetes_versions'][version_key] = stats['kubernetes_versions'].get(version_key, 0) + 1
-        
         return stats
     
-    def format_clusters_output(
-        self,
-        clusters: List[ClusterInfo],
-        show_details: bool = False
-    ) -> str:
+    def format_clusters_output(self,clusters: List[ClusterInfo],show_details: bool = False) -> str:
         """Format clusters for display"""
         if not clusters:
             return "ℹ️ No clusters found matching your criteria."
-        
         output = [f"📊 **Found {len(clusters)} Clusters**\n"]
-        
         if show_details:
             # Detailed view
             for i, cluster in enumerate(clusters, 1):
@@ -377,7 +311,6 @@ class ClusterAPIHandler:
                 if location not in by_location:
                     by_location[location] = []
                 by_location[location].append(cluster)
-            
             for location, loc_clusters in sorted(by_location.items()):
                 output.append(f"\n### 📍 {location} ({len(loc_clusters)} clusters)")
                 for cluster in loc_clusters:
@@ -386,19 +319,17 @@ class ClusterAPIHandler:
                         f"  {status_icon} **{cluster.cluster_name}** "
                         f"({cluster.cluster_type}) - "
                         f"{cluster.nodes_count} nodes - "
-                        f"{cluster.kubernetes_version or 'N/A'}"
-                    )
-        
+                        f"{cluster.kubernetes_version or 'N/A'}")
         return "\n".join(output)
 
 # ======================== Helper Functions ========================
+
 def parse_endpoint_selection(endpoint_param: str) -> Optional[List[int]]:
     """
     Parse endpoint selection parameter into list of endpoint IDs
     
     Args:
         endpoint_param: String like 'all', 'mumbai', 'delhi', or 'custom'
-    
     Returns:
         List of endpoint IDs or None
     """
@@ -408,15 +339,12 @@ def parse_endpoint_selection(endpoint_param: str) -> Optional[List[int]]:
         'delhi': [12],
         'bengaluru': [14],
         'chennai': [162],
-        'cressex': [204]
-    }
-    
+        'cressex': [204]}
     return endpoint_map.get(endpoint_param.lower())
 
 def parse_custom_endpoint_ids(custom_ids: str) -> List[int]:
     """
     Parse custom endpoint IDs from comma-separated string
-    
     Args:
         custom_ids: String like "11,12,14"
     
@@ -431,18 +359,7 @@ def parse_custom_endpoint_ids(custom_ids: str) -> List[int]:
 
 # ======================== Integration Helper ========================
 def create_cluster_handler(http_client, project_id: str = "1923") -> ClusterAPIHandler:
-    """
-    Factory function to create cluster API handler
-    
-    Args:
-        http_client: HTTP client instance (httpx.AsyncClient)
-        project_id: Project ID for cluster API
-    
-    Returns:
-        ClusterAPIHandler instance
-    """
     return ClusterAPIHandler(http_client, project_id)
-
 # ======================== Export Public API ========================
 __all__ = [
     'ClusterAPIHandler',

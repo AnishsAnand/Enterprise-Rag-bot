@@ -8,7 +8,7 @@ from fastapi import Header, HTTPException, status
 from jose import JWTError, jwt
 from pydantic import BaseModel, EmailStr
 
-from app.api.routes.openwebui_auth import ALGORITHM, SECRET_KEY
+from app.api.routes.webui_auth import ALGORITHM, SECRET_KEY
 
 
 class User(BaseModel):

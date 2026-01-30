@@ -19,15 +19,13 @@ logger = logging.getLogger(__name__)
 FALLBACK_MODELS = [
     "meta/llama-3.1-70b-instruct",
     "openai/gpt-oss-120b",
-    "openai/gpt-4o-mini",
-]
+    "openai/gpt-4o-mini"]
 
 class BaseAgent(ABC):
     """
     Abstract base class for all agents in the system.
     Provides common functionality for agent communication, state management, and execution.
     """
-    
     def __init__(self,agent_name: str,agent_description: str,model_name: str = None,temperature: float = 0.2,max_tokens: int = 2000,):
         """
         Initialize base agent with LangChain components.
@@ -46,7 +44,6 @@ class BaseAgent(ABC):
         self.grok_base_url = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
         self.grok_api_key = os.getenv("GROK_API_KEY") or os.getenv("OPENAI_API_KEY", "dummy-key")
         self.model_name = model_name or os.getenv("CHAT_MODEL", "meta/Llama-3.1-8B-Instruct")
-        
         # Track failed models to avoid retrying
         self.failed_models: set = set()
         self.current_model = self.model_name
@@ -57,8 +54,7 @@ class BaseAgent(ABC):
             max_tokens=self.max_tokens,
             openai_api_base=self.grok_base_url,
             openai_api_key=self.grok_api_key,
-            model_kwargs={"top_p": 0.9}
-        )
+            model_kwargs={"top_p": 0.9})
         # Agent state
         self.state: Dict[str, Any] = {
             "agent_name": agent_name,
@@ -118,11 +114,8 @@ class BaseAgent(ABC):
                 verbose=True,
                 max_iterations=5,
                 handle_parsing_errors=True,
-                return_intermediate_steps=True
-            )
-            
-            logger.info(f"✅ Agent {self.agent_name} setup complete with {len(self.tools)} tools")
-            
+                return_intermediate_steps=True)
+            logger.info(f"✅ Agent {self.agent_name} setup complete with {len(self.tools)} tools") 
         except Exception as e:
             logger.error(f"❌ Failed to setup agent {self.agent_name}: {str(e)}")
             self.state["errors"].append({
@@ -135,7 +128,6 @@ class BaseAgent(ABC):
         """
         Execute the agent with given input and context.
         Automatically retries with fallback models if primary model fails.
-        
         Args:
             input_text: User input or task description
             context: Additional context for the agent
@@ -160,9 +152,7 @@ class BaseAgent(ABC):
         for fallback in FALLBACK_MODELS:
             if fallback != self.current_model and fallback not in self.failed_models:
                 models_to_try.append(fallback)
-        
         last_error = None
-        
         for model in models_to_try:
             try:
                 # Switch to this model if different from current
@@ -176,7 +166,6 @@ class BaseAgent(ABC):
                 else:
                     # Fallback to direct LLM call if no executor
                     result = {"output": await self._direct_llm_call(full_input)}
-                
                 # Success! Format response
                 response = {
                     "agent_name": self.agent_name,
@@ -185,25 +174,19 @@ class BaseAgent(ABC):
                     "intermediate_steps": result.get("intermediate_steps", []),
                     "timestamp": datetime.utcnow().isoformat(),
                     "execution_count": self.state["execution_count"],
-                    "model_used": self.current_model
-                }
-                
+                    "model_used": self.current_model}
                 logger.info(f"✅ {self.agent_name} completed execution with model {self.current_model}")
                 return response
-                
             except Exception as e:
                 error_str = str(e)
                 last_error = e
-                
                 # Check if this is a model failure (500, connection error)
                 is_model_failure = (
                     "500" in error_str or 
                     "502" in error_str or
                     "503" in error_str or
                     "Connection error" in error_str or
-                    "InternalServerError" in error_str
-                )
-                
+                    "InternalServerError" in error_str)
                 if is_model_failure:
                     logger.warning(f"⚠️ {self.agent_name} model {model} failed: {error_str[:200]}")
                     self.failed_models.add(model)
@@ -212,29 +195,24 @@ class BaseAgent(ABC):
                     # Non-model error (e.g., parsing error) - don't try other models
                     logger.error(f"❌ {self.agent_name} execution failed (non-model error): {error_str}")
                     break
-        
         # All models failed
         logger.error(f"❌ {self.agent_name} all models failed. Last error: {str(last_error)}")
         self.state["errors"].append({
             "timestamp": datetime.utcnow().isoformat(),
             "error": str(last_error),
             "input": input_text[:200],
-            "models_tried": models_to_try
-        })
-        
+            "models_tried": models_to_try})
         return {
             "agent_name": self.agent_name,
             "success": False,
             "error": str(last_error),
             "output": f"Agent {self.agent_name} encountered an error: {str(last_error)}",
             "timestamp": datetime.utcnow().isoformat(),
-            "models_tried": models_to_try
-        }
-    
+            "models_tried": models_to_try}
+
     def _switch_model(self, model_name: str) -> None:
         """
         Switch to a different LLM model.
-        
         Args:
             model_name: Name of the model to switch to
         """
@@ -245,9 +223,7 @@ class BaseAgent(ABC):
             max_tokens=self.max_tokens,
             openai_api_base=self.grok_base_url,
             openai_api_key=self.grok_api_key,
-            model_kwargs={"top_p": 0.9}
-        )
-        
+            model_kwargs={"top_p": 0.9})
         # Re-setup agent executor with new LLM if we have tools
         if self.tools:
             try:
@@ -255,15 +231,9 @@ class BaseAgent(ABC):
                     ("system", self.get_system_prompt()),
                     MessagesPlaceholder(variable_name="chat_history", optional=True),
                     ("user", "{input}"),
-                    MessagesPlaceholder(variable_name="agent_scratchpad"),
-                ])
+                    MessagesPlaceholder(variable_name="agent_scratchpad")])
                 
-                agent = create_openai_functions_agent(
-                    llm=self.llm,
-                    tools=self.tools,
-                    prompt=prompt
-                )
-                
+                agent = create_openai_functions_agent(llm=self.llm,tools=self.tools, prompt=prompt)
                 self.agent_executor = AgentExecutor(
                     agent=agent,
                     tools=self.tools,
@@ -271,8 +241,7 @@ class BaseAgent(ABC):
                     verbose=True,
                     max_iterations=5,
                     handle_parsing_errors=True,
-                    return_intermediate_steps=True
-                )
+                    return_intermediate_steps=True)
                 logger.info(f"✅ {self.agent_name} re-initialized with model {model_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to reinitialize agent with model {model_name}: {str(e)}")

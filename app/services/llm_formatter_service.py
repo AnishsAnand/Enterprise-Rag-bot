@@ -7,26 +7,22 @@ import json
 import logging
 import os
 from typing import Any, Dict, Optional
-
 from app.services.ai_service import ai_service
 
 logger = logging.getLogger(__name__)
 
-
 class LLMFormatterService:
     """
     Centralized LLM-based response formatting service.
-    
     Provides consistent formatting across all resource types with:
     - Common base formatting logic
     - Resource-specific prompt customization
     - Graceful fallback on LLM failure
     """
-    
     def __init__(self):
         self.temperature = 0.3
         self.max_tokens = 2000
-        self.timeout = float(os.getenv("HTTP_TIMEOUT_SECONDS", "30"))  # Use env var, default 30s
+        self.timeout = float(os.getenv("HTTP_TIMEOUT_SECONDS", "30"))  
         logger.info(f"✅ LLMFormatterService initialized (timeout={self.timeout}s)")
     
     async def format_response(
@@ -39,23 +35,18 @@ class LLMFormatterService:
     ) -> str:
         """
         Format API response using LLM with context awareness.
-        
         Args:
             resource_type: Type of resource
             operation: Operation performed
             raw_data: Raw API response data
             user_query: Original user query
             context: CRITICAL - Must include query_type (specific/general/detailed)
-            
         Returns:
             Context-aware formatted response
         """
         try:
-            # Get query type from context
             query_type = context.get("query_type", "general") if context else "general"
-            
             logger.info(f"📝 Formatting {resource_type} response (query_type: {query_type})")
-            
             # Build context-aware prompt
             prompt = self._build_prompt(
                 resource_type,
@@ -65,7 +56,6 @@ class LLMFormatterService:
                 context,
                 query_type
             )
-            
             # Call LLM
             response = await ai_service._call_chat_with_retries(
                 prompt=prompt,
@@ -73,62 +63,44 @@ class LLMFormatterService:
                 temperature=self.temperature,
                 timeout=self.timeout
             )
-            
             if response:
                 return response
             else:
-                return self._fallback_format(resource_type, operation, raw_data, query_type)
-                
+                return self._fallback_format(resource_type, operation, raw_data, query_type)  
         except Exception as e:
             logger.error(f"Error formatting response: {str(e)}")
             return self._fallback_format(resource_type, operation, raw_data, query_type)
     
-    def _build_prompt(
-        self,
-        resource_type: str,
-        operation: str,
-        raw_data: Any,
-        user_query: str,
-        context: Optional[Dict[str, Any]],
-        query_type: str
-    ) -> str:
+    def _build_prompt(self,resource_type: str,operation: str,raw_data: Any,user_query: str,context: Optional[Dict[str, Any]],query_type: str) -> str:
         """Build context-aware formatting prompt."""
-        
+
         # Get actual count BEFORE any truncation
         actual_count = self._get_actual_count(raw_data)
-        
         # Smart truncation: limit items in list to avoid cutting JSON mid-object
         is_prompt_truncated = False
         display_data = raw_data
-        
         if isinstance(raw_data, list) and len(raw_data) > 60:
             # For lists, show first 60 items instead of truncating JSON mid-way
             display_data = raw_data[:60]
             is_prompt_truncated = True
             logger.info(f"📋 Limiting display to 60 of {len(raw_data)} items for LLM formatting")
-        
         data_str = json.dumps(display_data, indent=2, default=str)
-        
         # Still apply character limit as safety net (higher limit to avoid truncation)
         if len(data_str) > 50000:
             data_str = data_str[:50000] + "\n... (truncated)"
             is_prompt_truncated = True
             logger.warning(f"⚠️ Data truncated to 50000 chars. Actual count: {actual_count}")
-        
         # Check if data was truncated upstream OR by us
         data_truncated = is_prompt_truncated  # Include our own truncation!
         if context and isinstance(context, dict):
             data_truncated = data_truncated or bool(context.get("data_truncated"))
         if not data_truncated and isinstance(raw_data, dict):
             data_truncated = data_truncated or bool(raw_data.get("truncated"))
-        
         # Count notice - CRITICAL: Tell LLM the actual count
         count_notice = ""
-        
         # ALWAYS tell LLM the actual count to prevent it from filtering/omitting items
         if actual_count > 0:
             count_notice = f"\n\n**CRITICAL: The data contains {actual_count} items. You MUST display ALL {actual_count} items in your response. Do NOT filter or omit any items - the data is already filtered by the system.**"
-        
         if data_truncated and actual_count > 0:
             count_notice = (
                 "\n\n**IMPORTANT: The data below is truncated for processing. "
@@ -136,27 +108,23 @@ class LLMFormatterService:
                 "Always report this exact count in your summary. Also, at the END of your response, add a note: "
                 "'📌 _Some results were truncated. Let me know if you'd like to see the complete list or filter by specific criteria._'**"
             )
-        
         # Get query-type-specific instructions
         query_instructions = self._get_query_type_instructions(query_type, context)
-        
         # Get resource-specific instructions
         resource_instructions = self._get_resource_instructions(resource_type, context)
-        
         return f"""You are a cloud infrastructure assistant. Format the following API response data for the user in a clear, helpful way.
 
-**User's Query:** {user_query or f"{operation} {resource_type}"}
+    **User's Query:** {user_query or f"{operation} {resource_type}"}
 
-**Operation:** {operation}
-**Resource Type:** {resource_type}
-**Query Type:** {query_type}
-{count_notice}
+    **Operation:** {operation}
+    **Resource Type:** {resource_type}
+    **Query Type:** {query_type}
+    {count_notice}
 
-**Raw Data:**
-```json
+    **Raw Data:**
+    ```json
 {data_str}
 ```
-
 {query_instructions}
 
 {resource_instructions}
@@ -171,13 +139,8 @@ class LLMFormatterService:
 
 **CRITICAL: Respect the query_type above. Format accordingly. Display ALL items in the data.**"""
     
-    def _get_query_type_instructions(
-        self,
-        query_type: str,
-        context: Optional[Dict[str, Any]]
-    ) -> str:
+    def _get_query_type_instructions(self,query_type: str,context: Optional[Dict[str, Any]]) -> str:
         """Get instructions based on query type."""
-        
         instructions = {
             "specific": """**QUERY TYPE: SPECIFIC (Single Resource)**
 
@@ -266,21 +229,13 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
 3. Include backend pool for each
 4. Note SSL status
 5. Use table if 3+ services
-""",
-        }
-        
+"""}
         return instructions.get(query_type, instructions["general"])
     
-    def _get_resource_instructions(
-        self,
-        resource_type: str,
-        context: Optional[Dict[str, Any]]
-    ) -> str:
+    def _get_resource_instructions(self,resource_type: str,context: Optional[Dict[str, Any]]) -> str:
         """Get resource-specific formatting instructions."""
-        
         if resource_type == "load_balancer":
             return """**Load Balancer Specific Fields:**
-
 **CRITICAL Fields to Show:**
 - Name (primary identifier)
 - Status with emoji (✅ Active | ⚠️ Degraded | ❌ Inactive)
@@ -377,20 +332,13 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
                     return len(raw_data[key])
         return 0
     
-    def _fallback_format(
-        self,
-        resource_type: str,
-        operation: str,
-        raw_data: Any
-    ) -> str:
+    def _fallback_format(self,resource_type: str,operation: str,raw_data: Any) -> str:
         """
         Fallback formatting if LLM fails.
-        
         Args:
             resource_type: Resource type
             operation: Operation performed
-            raw_data: Raw data
-            
+            raw_data: Raw data  
         Returns:
             Simple formatted string
         """
@@ -403,10 +351,8 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
                 "kafka": "📦",
                 "gitlab": "📦",
                 "firewall": "🔥",
-                "endpoint": "📍"
-            }
+                "endpoint": "📍"}
             emoji = emoji_map.get(resource_type, "✅")
-            
             if isinstance(raw_data, list):
                 count = len(raw_data)
                 return f"{emoji} Found **{count} {resource_type}(s)**"
@@ -422,15 +368,11 @@ User wants to see virtual services (VIPs/listeners) for a load balancer.
                     if isinstance(items, list):
                         count = len(items)
                         return f"{emoji} Found **{count} {resource_type}(s)**"
-                        
                 return f"{emoji} Successfully retrieved {resource_type} data"
             else:
-                return f"{emoji} Operation '{operation}' completed successfully"
-                
+                return f"{emoji} Operation '{operation}' completed successfully"  
         except Exception as e:
             return f"✅ Operation completed. (Formatting note: {str(e)})"
-
-
+        
 # Global instance
 llm_formatter = LLMFormatterService()
-
