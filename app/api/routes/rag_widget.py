@@ -32,7 +32,7 @@ MAX_CHUNKS_RETURN = int(os.getenv("MAX_CHUNKS_RETURN", "12"))
 # ===================== Request Models =====================
 
 class WidgetQueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=500, description="The search query")
+    query: str = Field(..., min_length=1, max_length=5000, description="The search query")
     max_results: int = Field(default=50, ge=1, le=100, description="Maximum number of results")
     include_sources: bool = Field(default=True, description="Include source information")
     enable_advanced_search: bool = Field(default=True, description="Enable advanced search features")
@@ -769,12 +769,18 @@ async def _should_route_to_agent(query: str, session_id: str) -> bool:
     # Check for resource/cluster operation keywords
     action_keywords = ["create", "make", "build", "deploy", "provision", "delete",
                       "remove", "update", "modify", "list", "show", "get", "view", "display",
-                      "filter", "only", "just", "available", "bring up"]
+                      "filter", "only", "just", "available", "bring up", "tell me", "what",
+                      "who has", "access", "exist", "exists"]
     resource_keywords = ["cluster", "clusters", "k8s", "kubernetes", "firewall", "rule",
                         "load balancer", "database", "storage", "volume", "endpoint",
                         "endpoints", "datacenter", "datacenters", "jenkins", "kafka",
                         "gitlab", "registry", "postgres", "documentdb", "vm", "vms",
-                        "virtual machine", "version", "k8s version", "report", "reports"]
+                        "virtual machine", "version", "k8s version", "report", "reports",
+                        # RBAC keywords
+                        "rbac", "role binding", "role bindings", "user access", "permissions",
+                        "business unit", "business units", "bu", "bus", "environment", 
+                        "environments", "env", "envs", "user", "users", "admin", "admins",
+                        "available in"]
     
     has_action = any(keyword in query_lower for keyword in action_keywords) or "all" in query_words
     has_resource = any(keyword in query_lower for keyword in resource_keywords)
@@ -825,6 +831,15 @@ User query: "{query}"
 Analyze if this query is about:
 1. Managing cloud resources (clusters, endpoints, datacenters, firewalls, databases, etc.)
 2. Resource operations (create, list, show, get, delete, update, etc.)
+3. RBAC operations (role bindings, user access, permissions, business units, environments)
+
+RBAC Examples that ARE resource operations:
+- "What business units exist?" → is_resource_operation: true (listing business units)
+- "List role bindings" → is_resource_operation: true
+- "Show role bindings in ENV_NAME" → is_resource_operation: true
+- "What access does user X have?" → is_resource_operation: true
+- "Tell me the role bindings for env X" → is_resource_operation: true
+- "Who has admin access?" → is_resource_operation: true
 
 Even if the user has typos (e.g., "lis" instead of "list"), understand the intent.
 
@@ -833,7 +848,7 @@ Respond ONLY with a JSON object:
   "is_resource_operation": true/false,
   "corrected_query": "the query with typos fixed",
   "action": "create/list/show/delete/update/etc or null",
-  "resource": "cluster/endpoint/firewall/etc or null",
+  "resource": "cluster/endpoint/firewall/rbac/business_unit/etc or null",
   "confidence": 0.0-1.0
 }}"""
         

@@ -25,6 +25,7 @@ from app.agents.resource_agents.virtual_machine_agent import VirtualMachineAgent
 from app.agents.resource_agents.network_agent import NetworkAgent
 from app.agents.resource_agents.generic_resource_agent import GenericResourceAgent
 from app.agents.resource_agents.reports_agent import ReportsAgent
+from app.agents.resource_agents.rbac_agent import RBACAgent
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class ExecutionAgent(BaseAgent):
         self.network_agent = NetworkAgent()
         self.generic_agent = GenericResourceAgent()
         self.reports_agent = ReportsAgent()
+        self.rbac_agent = RBACAgent()
         
         # Resource type to agent mapping - ALL resources go through agents
         self.resource_agent_map = {
@@ -83,6 +85,14 @@ class ExecutionAgent(BaseAgent):
             "report": self.reports_agent,
             "common_cluster_report": self.reports_agent,
             
+            # RBAC (Role-Based Access Control)
+            "rbac": self.rbac_agent,
+            "role_binding": self.rbac_agent,
+            "role_bindings": self.rbac_agent,
+            "access_control": self.rbac_agent,
+            "user_access": self.rbac_agent,
+            "permissions": self.rbac_agent,
+            
             # Generic (fallback for other resources)
             "endpoint": self.generic_agent,
             "business_unit": self.generic_agent,
@@ -110,6 +120,7 @@ class ExecutionAgent(BaseAgent):
 - Virtual machines (VirtualMachineAgent)
 - Network: Firewalls, Load Balancers (NetworkAgent)
 - Reports: Common Cluster Report (ReportsAgent)
+- RBAC: Role Bindings, User Access, Permissions (RBACAgent)
 - Generic: Endpoints, Business Units, Environments, Zones (GenericResourceAgent)
 
 All operations are routed through specialized resource agents for proper handling."""
@@ -364,10 +375,13 @@ All operations are routed through specialized resource agents for proper handlin
                 # Persist state
                 conversation_state_manager.update_session(state)
                 
+                # Get response text - resource agents may use "output" or "response"
+                filter_response = execution_result.get("output") or execution_result.get("response", "")
+                
                 return {
                     "agent_name": self.agent_name,
                     "success": True,
-                    "output": execution_result.get("response", ""),
+                    "output": filter_response,
                     "execution_result": execution_result,
                     "metadata": execution_result.get("metadata", {})
                 }
@@ -384,9 +398,10 @@ All operations are routed through specialized resource agents for proper handlin
                 logger.error(f"❌ Execution failed: {execution_result.get('error')}")
             
             # Get formatted response from resource agent
-            response = execution_result.get("response", "")
+            # Resource agents may use "output" or "response" key
+            response = execution_result.get("response") or execution_result.get("output", "")
             if not response:
-                # Fallback formatting
+                # Fallback formatting only if no response from resource agent
                 if execution_result.get("success"):
                     response = self._format_success_message(state, execution_result)
                 else:

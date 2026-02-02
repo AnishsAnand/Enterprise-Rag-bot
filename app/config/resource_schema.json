@@ -1348,6 +1348,149 @@
         "permissions": {
           "list": ["admin", "developer", "viewer"]
         }
+      },
+      "rbac": {
+        "operations": ["list", "read", "list_clusters", "list_bu", "list_env", "show_env", "show_bu"],
+        "aliases": ["rbac", "role binding", "role bindings", "access control", "user access", "permissions", "cluster roles", "user roles", "who has access", "business units", "environments", "bu", "env"],
+        "api_endpoints": {
+          "list": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getIksClusterRoleBindingInEnv/{env_id}",
+            "description": "List all user role bindings in an environment. Returns users with their cluster:role mappings.",
+            "payload": {
+              "user": " "
+            }
+          },
+          "read": {
+            "method": "POST",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getIksClusterRoleBindingInEnv/{env_id}",
+            "description": "Get specific user's access permissions in an environment.",
+            "payload": {
+              "user": "{username}"
+            }
+          },
+          "list_clusters": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/getIksClustersInBU/{bu_id}",
+            "description": "List all clusters in a Business Unit for RBAC context."
+          },
+          "list_bu": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{engagement_id}",
+            "description": "List all Business Units available to the user."
+          },
+          "list_env": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{engagement_id}",
+            "description": "List all Environments, optionally filtered by Business Unit."
+          },
+          "show_env": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{engagement_id}",
+            "description": "Show details of a specific Environment including its zones."
+          },
+          "show_bu": {
+            "method": "GET",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{engagement_id}",
+            "description": "Show details of a specific Business Unit including its environments and zones."
+          }
+        },
+        "parameters": {
+          "list": {
+            "required": [],
+            "optional": ["env_id", "username", "cluster_name", "role"],
+            "description": "List role bindings. If env_id not provided, will prompt for environment selection. Can filter by username, cluster name, or role type (admin, exceptdelete, customer-namespace-access)"
+          },
+          "read": {
+            "required": ["username"],
+            "optional": ["env_id"],
+            "description": "Get specific user's access details. If env_id not provided, will prompt for environment selection."
+          },
+          "list_clusters": {
+            "required": [],
+            "optional": ["bu_id", "bu_name"],
+            "description": "List clusters in a Business Unit. If bu_id not provided, will prompt for BU selection."
+          },
+          "list_bu": {
+            "required": [],
+            "optional": ["refresh"],
+            "description": "List all Business Units available to the user."
+          },
+          "list_env": {
+            "required": [],
+            "optional": ["bu_id", "bu_name"],
+            "description": "List all Environments. Can filter by Business Unit name or ID."
+          },
+          "show_env": {
+            "required": [],
+            "optional": ["env_id", "env_name"],
+            "description": "Show details of a specific Environment by ID or name."
+          },
+          "show_bu": {
+            "required": [],
+            "optional": ["bu_id", "bu_name"],
+            "description": "Show details of a specific Business Unit including its environments."
+          }
+        },
+        "response_mapping": {
+          "role_bindings": "data.data",
+          "username": "data.data[*].username",
+          "cluster_roles": "data.data[*].clusterRoles",
+          "last_sync_time": "data.data[*].lastSyncTime",
+          "assigned_by": "data.data[*].assignedBy"
+        },
+        "permissions": {
+          "list": ["admin", "developer", "viewer"],
+          "read": ["admin", "developer", "viewer"],
+          "list_clusters": ["admin", "developer", "viewer"],
+          "list_bu": ["admin", "developer", "viewer"],
+          "list_env": ["admin", "developer", "viewer"],
+          "show_env": ["admin", "developer", "viewer"],
+          "show_bu": ["admin", "developer", "viewer"]
+        },
+        "role_types": {
+          "admin": {
+            "description": "Full administrative access including create, update, and delete operations"
+          },
+          "exceptdelete": {
+            "description": "Can perform all operations except delete"
+          },
+          "customer-namespace-access": {
+            "description": "Access to customer namespaces only"
+          }
+        },
+        "workflow": {
+          "list_role_bindings": {
+            "description": "List user role bindings in an environment",
+            "steps": [
+              {
+                "step": 1,
+                "action": "get_paas_engagement",
+                "resource": "engagement",
+                "operation": "get",
+                "cache": true,
+                "cache_duration": 3600
+              },
+              {
+                "step": 2,
+                "action": "select_environment",
+                "resource": "environment",
+                "operation": "list",
+                "user_selection": true,
+                "selection_prompt": "Which environment would you like to view role bindings for?"
+              },
+              {
+                "step": 3,
+                "action": "list_role_bindings",
+                "resource": "rbac",
+                "operation": "list",
+                "depends_on": ["env_id"],
+                "display_result": true,
+                "display_format": "table"
+              }
+            ]
+          }
+        }
       }
     }
   }

@@ -328,11 +328,41 @@ Always confirm destructive operations (delete, update) before executing."""
         
         # Check if we're awaiting filter selection (BU/Environment/Zone)
         if state.status == ConversationStatus.AWAITING_FILTER_SELECTION:
-            logger.info(f"🔄 Session in AWAITING_FILTER_SELECTION status, routing to filter_selection handler")
-            return {
-                "route": "filter_selection",
-                "reason": "Processing user filter selection (BU/Environment/Zone)"
-            }
+            # Check if user is asking a NEW question instead of selecting from list
+            # New questions typically contain action words and look like full sentences
+            query_lower = user_input.lower().strip()
+            
+            # Patterns that indicate a NEW query, not a selection
+            new_query_patterns = [
+                "list all", "show all", "what access", "who has", "tell me",
+                "what are", "show me", "list users", "list role", "show role",
+                "get", "find", "search", "display", "view all", "list env",
+                "show env", "list business", "show business", "what clusters",
+                "which users", "which env"
+            ]
+            
+            is_new_query = any(pattern in query_lower for pattern in new_query_patterns)
+            
+            # Also check: if input is very long (>50 chars) or has multiple words with verbs, it's likely a new query
+            words = query_lower.split()
+            has_verb = any(w in ["list", "show", "get", "tell", "what", "who", "which", "display", "find"] for w in words)
+            is_sentence = len(words) > 5 and has_verb
+            
+            if is_new_query or is_sentence:
+                logger.info(f"🔄 Detected NEW query while in AWAITING_FILTER_SELECTION: '{user_input}'")
+                logger.info(f"   Resetting session state and routing to intent")
+                # Reset the filter selection state and process as new query
+                state.status = ConversationStatus.INITIATED
+                state.pending_filter_options = None
+                state.pending_filter_type = None
+                state.user_query = user_input
+                # Continue to normal routing below
+            else:
+                logger.info(f"🔄 Session in AWAITING_FILTER_SELECTION status, routing to filter_selection handler")
+                return {
+                    "route": "filter_selection",
+                    "reason": "Processing user filter selection (BU/Environment/Zone)"
+                }
         
         # Check if ready to execute
         if state.status == ConversationStatus.READY_TO_EXECUTE:
@@ -344,14 +374,24 @@ Always confirm destructive operations (delete, update) before executing."""
         # PRE-CHECK: Fast rule-based routing for obvious resource operations
         # This avoids LLM call latency for clear-cut cases
         query_lower = user_input.lower()
-        resource_action_keywords = ["create", "delete", "remove", "update", "modify", "list", "show", "get", "deploy", "provision"]
-        resource_type_keywords = ["cluster", "clusters", "firewall", "database", "vm", "volume", "endpoint", "jenkins", "kafka", "gitlab", "registry", "postgres"]
+        resource_action_keywords = ["create", "delete", "remove", "update", "modify", "list", "show", "get", "deploy", "provision",
+                                    "who has", "exist", "exists", "available"]
+        resource_type_keywords = ["cluster", "clusters", "firewall", "database", "vm", "volume", "endpoint", "jenkins", "kafka", 
+                                  "gitlab", "registry", "postgres",
+                                  # RBAC keywords
+                                  "business unit", "business units", "environment", "environments", 
+                                  "role binding", "role bindings", "user access", "permissions", "rbac"]
+        
+        # Special RBAC patterns that should always route to intent
+        rbac_patterns = ["what business unit", "what bu", "what env", "what environment", 
+                        "access does user", "role binding", "who has access", "who has admin"]
+        has_rbac_pattern = any(pattern in query_lower for pattern in rbac_patterns)
         
         has_action = any(kw in query_lower for kw in resource_action_keywords)
         has_resource = any(kw in query_lower for kw in resource_type_keywords)
         
-        # If it's clearly a resource operation, skip LLM routing
-        if has_action and has_resource:
+        # If it's clearly a resource operation OR matches RBAC patterns, skip LLM routing
+        if (has_action and has_resource) or has_rbac_pattern:
             logger.info(f"⚡ Fast-path routing: detected resource operation '{user_input}' → intent")
             return {
                 "route": "intent",
@@ -363,8 +403,10 @@ Always confirm destructive operations (delete, update) before executing."""
         
         routing_prompt = f"""You are a routing specialist for a cloud resource management chatbot. Determine if the user's query is about:
 
-A) **RESOURCE OPERATIONS**: Managing/viewing cloud resources (clusters, firewalls, databases, load balancers, storage, etc.)
-   - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall", "count clusters in bengaluru"
+A) **RESOURCE OPERATIONS**: Managing/viewing cloud resources (clusters, firewalls, databases, load balancers, storage, RBAC, etc.)
+   - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall"
+   - RBAC Examples: "list business units", "what business units exist?", "show environments", "list role bindings", "what access does user X have?", "who has admin role?"
+   - Environment Examples: "show environments in BU", "what envs are available?", "list environments in IKS_PAAS"
    
 B) **DOCUMENTATION**: Questions about how to use the platform, concepts, procedures, troubleshooting, or explanations
    - Examples: "how do I create a cluster?", "what is kubernetes?", "explain load balancing", "why did my deployment fail?", "what are the requirements?"
@@ -376,8 +418,10 @@ Instructions:
 2. If the query is asking HOW TO do something, WHY something works, or WHAT a concept means → return "DOCUMENTATION"
 3. "What are the clusters?" = RESOURCE_OPERATIONS (listing actual clusters)
 4. "What is a cluster?" = DOCUMENTATION (explaining the concept)
-5. "How many clusters in delhi?" = RESOURCE_OPERATIONS (counting actual clusters)
-6. "How do I create a cluster?" = DOCUMENTATION (explaining the process)
+5. "What business units exist?" = RESOURCE_OPERATIONS (listing actual BUs)
+6. "What is a business unit?" = DOCUMENTATION (explaining the concept)
+7. "Show role bindings" = RESOURCE_OPERATIONS (listing actual role bindings)
+8. "What access does user X have?" = RESOURCE_OPERATIONS (checking actual user access)
 
 Respond with ONLY ONE of these:
 - ROUTE: RESOURCE_OPERATIONS
@@ -401,13 +445,20 @@ Respond with ONLY ONE of these:
                 query_lower = user_input.lower()
                 
                 # RESOURCE OPERATION keywords - these should ALWAYS go to intent
-                resource_action_keywords = ["create", "delete", "remove", "update", "modify", "list", "show", "get"]
-                resource_type_keywords = ["cluster", "firewall", "database", "vm", "volume", "endpoint", "jenkins", "kafka"]
+                resource_action_keywords = ["create", "delete", "remove", "update", "modify", "list", "show", "get",
+                                            "who has", "exist", "exists", "available"]
+                resource_type_keywords = ["cluster", "firewall", "database", "vm", "volume", "endpoint", "jenkins", "kafka",
+                                          "business unit", "business units", "environment", "environments",
+                                          "role binding", "role bindings", "user access", "permissions", "rbac"]
+                
+                # Special RBAC patterns
+                rbac_patterns = ["what business unit", "what bu", "what env", "access does user", "role binding"]
+                has_rbac_pattern = any(pattern in query_lower for pattern in rbac_patterns)
                 
                 has_action = any(kw in query_lower for kw in resource_action_keywords)
                 has_resource = any(kw in query_lower for kw in resource_type_keywords)
                 
-                if has_action and has_resource:
+                if (has_action and has_resource) or has_rbac_pattern:
                     logger.info(f"🎯 Rule-based fallback: detected resource operation in '{user_input}'")
                     return {
                         "route": "intent",
@@ -814,6 +865,11 @@ Respond with ONLY ONE of these:
             options = state.pending_filter_options
             filter_type = state.pending_filter_type
             
+            # DEBUG: Log what options we have
+            logger.info(f"🔍 DEBUG - Filter type: {filter_type}, Options count: {len(options) if options else 0}")
+            if options:
+                logger.info(f"🔍 DEBUG - First 3 options: {options[:3]}")
+            
             if not options or not filter_type:
                 logger.error("❌ No pending filter options found in state")
                 # Clear the state and start fresh
@@ -827,7 +883,8 @@ Respond with ONLY ONE of these:
                     "routing": "filter_selection"
                 }
             
-            if filter_type and filter_type.startswith("report_"):
+            # Use generic selection parsing for report_ and rbac_ filter types
+            if filter_type and (filter_type.startswith("report_") or filter_type.startswith("rbac_")):
                 selection_result = self._parse_generic_selection(user_input, options)
             else:
                 # Use K8sClusterAgent to parse the selection
@@ -903,6 +960,37 @@ Respond with ONLY ONE of these:
                         }
                     state.add_parameter("startDate", dates["startDate"], is_valid=True)
                     state.add_parameter("endDate", dates["endDate"], is_valid=True)
+            elif filter_type and filter_type.startswith("rbac_"):
+                # Handle RBAC-specific filter selections (environment, business unit)
+                selected_names = selection_result.get("selected_names", [])
+                selected_options = selection_result.get("selected_options", [])
+                
+                logger.info(f"✅ RBAC filter selection: {selected_names} ({filter_type})")
+                
+                # Clear filter selection state
+                state.pending_filter_options = None
+                state.pending_filter_type = None
+                
+                # Apply selected filter to RBAC params
+                # Handle both "rbac_env" and "rbac_environment" naming conventions
+                if filter_type in ("rbac_env", "rbac_environment") and selected_options:
+                    selected_option = selected_options[0]
+                    env_id = selected_option.get("id")
+                    env_name = selected_option.get("name")
+                    if env_id:
+                        state.add_parameter("env_id", env_id, is_valid=True)
+                        state.add_parameter("environment_id", env_id, is_valid=True)
+                        state.add_parameter("environment_name", env_name, is_valid=True)
+                        logger.info(f"✅ RBAC environment selected: {env_name} (ID: {env_id})")
+                elif filter_type in ("rbac_bu", "rbac_business_unit") and selected_options:
+                    selected_option = selected_options[0]
+                    bu_id = selected_option.get("id")
+                    bu_name = selected_option.get("name")
+                    if bu_id:
+                        state.add_parameter("bu_id", bu_id, is_valid=True)
+                        state.add_parameter("business_unit_id", bu_id, is_valid=True)
+                        state.add_parameter("business_unit_name", bu_name, is_valid=True)
+                        logger.info(f"✅ RBAC business unit selected: {bu_name} (ID: {bu_id})")
             else:
                 filter_ids = selection_result["filter_ids"]
                 endpoint_ids = selection_result["endpoint_ids"]
@@ -980,26 +1068,90 @@ Respond with ONLY ONE of these:
         if not options:
             return {"matched": False}
         user_input = (user_input or "").strip()
-        selected = []
+        
         import re
+        # Strip markdown formatting (bold, italic, code) that Open WebUI might add
+        user_input = re.sub(r'\*\*([^*]+)\*\*', r'\1', user_input)  # **bold** -> bold
+        user_input = re.sub(r'\*([^*]+)\*', r'\1', user_input)      # *italic* -> italic
+        user_input = re.sub(r'`([^`]+)`', r'\1', user_input)        # `code` -> code
+        user_input = re.sub(r'__([^_]+)__', r'\1', user_input)      # __bold__ -> bold
+        user_input = re.sub(r'_([^_]+)_', r'\1', user_input)        # _italic_ -> italic
+        user_input = user_input.strip()
+        
+        logger.info(f"🔍 Parsing selection (cleaned): '{user_input}' with {len(options)} options")
+        
+        selected = []
         parts = re.split(r'[,;]|\band\b', user_input)
         parts = [p.strip() for p in parts if p.strip()]
         for part in parts:
+            matched_this_part = False
+            
+            # Try 1: Parse as list index (1-based, must be within range)
             try:
                 idx = int(part) - 1
                 if 0 <= idx < len(options):
                     selected.append(options[idx])
-                    continue
+                    logger.info(f"✅ Matched number {part} to option index {idx}: {options[idx].get('name')}")
+                    matched_this_part = True
             except ValueError:
                 pass
-            part_lower = part.lower()
+            
+            if matched_this_part:
+                continue
+            
+            # Try 2: Match by ID (user might type the actual ID number)
             for opt in options:
-                opt_name = (opt.get("name") or "").lower()
-                if part_lower in opt_name or opt_name in part_lower:
+                opt_id = str(opt.get("id", ""))
+                if part == opt_id:
                     if opt not in selected:
                         selected.append(opt)
+                        logger.info(f"✅ Matched ID '{part}' to option: {opt.get('name')}")
+                        matched_this_part = True
                     break
+            
+            if matched_this_part:
+                continue
+            
+            # Try 3: Match by exact name (case-insensitive)
+            part_lower = part.lower().strip()
+            # Normalize: replace underscores with spaces/hyphens for comparison
+            part_normalized = part_lower.replace('_', ' ').replace('-', ' ')
+            
+            for opt in options:
+                opt_name = (opt.get("name") or "").strip()
+                opt_name_lower = opt_name.lower()
+                opt_name_normalized = opt_name_lower.replace('_', ' ').replace('-', ' ')
+                
+                # Check exact match first (highest priority)
+                if part_lower == opt_name_lower:
+                    if opt not in selected:
+                        selected.append(opt)
+                        logger.info(f"✅ EXACT match '{part}' to option: {opt.get('name')}")
+                        matched_this_part = True
+                    break
+                
+                # Check normalized exact match
+                if part_normalized == opt_name_normalized:
+                    if opt not in selected:
+                        selected.append(opt)
+                        logger.info(f"✅ Normalized match '{part}' to option: {opt.get('name')}")
+                        matched_this_part = True
+                    break
+                
+                # Check substring matching (one contains the other)
+                if (part_lower in opt_name_lower or opt_name_lower in part_lower or
+                    part_normalized in opt_name_normalized or opt_name_normalized in part_normalized):
+                    if opt not in selected:
+                        selected.append(opt)
+                        logger.info(f"✅ Substring match '{part}' to option: {opt.get('name')}")
+                        matched_this_part = True
+                    break
+            
+            if not matched_this_part:
+                logger.warning(f"⚠️ Could not match part '{part}' to any option")
+        
         if not selected:
+            logger.warning(f"❌ No matches found for '{user_input}'")
             return {"matched": False}
         return {
             "matched": True,

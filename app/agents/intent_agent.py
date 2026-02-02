@@ -246,6 +246,80 @@ User: "Show storage inventory report" or "Open the PVC report"
 User: "List reports" or "Show reports table"
 → intent_detected: true, resource_type: reports, operation: list, extracted_params: empty
 
+**RBAC (Role-Based Access Control) Examples:**
+
+User: "List role bindings" or "Show user access" or "Who has access?"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: empty
+
+User: "Show access for user aramalin" or "What access does aramalin have?"
+→ intent_detected: true, resource_type: rbac, operation: read, extracted_params: {{username: aramalin}}
+
+User: "Who has admin access to blr-paas cluster?" or "List admins for cluster demo-caas"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{cluster_name: blr-paas, role: admin}}
+
+User: "Show all admins" or "List users with admin role"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{role: admin}}
+
+User: "What clusters can user cishan access?" or "Show cishan's permissions"
+→ intent_detected: true, resource_type: rbac, operation: read, extracted_params: {{username: cishan}}
+
+**CRITICAL: Role Bindings vs Environments - READ CAREFULLY:**
+- "role bindings" = operation: list (NOT list_env!) - shows user access/permissions
+- "environments" = operation: list_env - shows available environments
+
+User: "List users in environment 5273" or "Show role bindings in env 5345"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{env_id: 5273}}
+
+User: "Tell me the role bindings for env TCL-IKS-PAAS-UAT-PROD-ENV-DND"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{env_name: TCL-IKS-PAAS-UAT-PROD-ENV-DND}}
+
+User: "Show role bindings in IKS_PAAS_BLR_DEMO_ENV"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{env_name: IKS_PAAS_BLR_DEMO_ENV}}
+
+User: "List role bindings" or "Show user access" or "Who has access?"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: empty
+
+User: "Who has exceptdelete role?" or "List users with except delete access"
+→ intent_detected: true, resource_type: rbac, operation: list, extracted_params: {{role: exceptdelete}}
+
+User: "What access does user aramalin have?" or "Show access for user bharatm"
+→ intent_detected: true, resource_type: rbac, operation: read, extracted_params: {{username: aramalin}}
+
+**Environment Listing (NOT role bindings):**
+
+User: "Show environments in IKS_PAAS_BLR_BU" or "List environments in BU"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: IKS_PAAS_BLR_BU}}
+
+User: "What environments are available in TCL-IKS-PAAS-BU?"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: TCL-IKS-PAAS-BU}}
+
+User: "What are the environments available in business unit NSX AutoScale BU - DND?"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: NSX AutoScale BU - DND}}
+
+User: "What are the envs available in bu NSX AutoScale BU - DND?"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: NSX AutoScale BU - DND}}
+
+User: "List envs in business unit TATA COMMUNICATIONS"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: TATA COMMUNICATIONS}}
+
+User: "Show me environments in VCD-DELHI-BU"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: VCD-DELHI-BU}}
+
+User: "What envs are in BU AI Cloud BU?"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: {{bu_name: AI Cloud BU}}
+
+User: "Show all environments" or "List environments"
+→ intent_detected: true, resource_type: rbac, operation: list_env, extracted_params: empty
+
+User: "List business units" or "Show BUs" or "What BUs are available?"
+→ intent_detected: true, resource_type: rbac, operation: list_bu, extracted_params: empty
+
+User: "What business units exist?" or "Show me all business units"
+→ intent_detected: true, resource_type: rbac, operation: list_bu, extracted_params: empty
+
+User: "List all BUs" or "Show available business units"
+→ intent_detected: true, resource_type: rbac, operation: list_bu, extracted_params: empty
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -270,7 +344,15 @@ User: "List all available data centers" or "Show available locations"
 - For "list" operation on k8s_cluster, kafka, gitlab, container_registry, jenkins, postgres, documentdb, firewall: "endpoints" parameter is required (data center selection)
 - For "list" operation on vm: NO parameters required (lists all VMs), but can optionally extract endpoint, zone, or department for filtering
 - For "list" operation on endpoint (or aliases: datacenter, dc, data center, location), just fetch all available endpoints
-- k8s_cluster list supports FILTERING by BU/Environment/Zone - if user asks to "filter by BU", "filter by environment", or "filter by zone", still detect as k8s_cluster list operation. The K8sClusterAgent will handle the filtering intelligently by matching names to IDs.
+- k8s_cluster list supports FILTERING by BU/Environment/Zone - if user asks to "filter clusters by BU", "filter clusters by environment", or "filter clusters by zone", detect as k8s_cluster list operation
+- IMPORTANT: "Show environments in BU" or "List environments" is NOT k8s_cluster list! This is rbac.list_env operation
+- "Show environments" = rbac.list_env (listing environments)
+- "Show clusters" or "Filter clusters" = k8s_cluster.list (listing/filtering clusters)
+- CRITICAL RBAC DISTINCTION:
+  * "role bindings" or "user access" = rbac.list (shows who has access)
+  * "environments" = rbac.list_env (shows available environments)
+  * "Show role bindings in ENV_NAME" = rbac.list with env_name param (NOT list_env!)
+  * "Show environments in BU_NAME" = rbac.list_env with bu_name param
 - Do NOT extract location names (like "Mumbai", "Delhi") for cluster/service/firewall operations - the ValidationAgent will handle matching locations to endpoint IDs
 - Do NOT extract BU/Environment/Zone names for filtering - the K8sClusterAgent will extract and match them from the user query
 - For VM operations, you CAN extract location/zone/department names as they are used as filters, not required parameters
@@ -288,6 +370,7 @@ User: "List all available data centers" or "Show available locations"
 - VM aliases: vm, vms, virtual machine, virtual machines, instance, instances, server, servers
 - Firewall aliases: firewall, firewalls, fw, vayu firewall, network firewall
 - Reports aliases: report, reports, common cluster report, common cluster, cluster inventory report, cluster report, cluster inventory, cluster compute report, compute report, cluster compute, storage inventory report, storage report, pvc report
+- RBAC aliases: rbac, role binding, role bindings, access control, user access, permissions, cluster roles, user roles, who has access, access for user
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
         
@@ -487,13 +570,49 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             Parsed intent data dict
         """
         try:
-            # Try to find JSON in the output
-            json_match = re.search(r'\{[\s\S]*\}', output_text)
-            if json_match:
-                intent_data = json.loads(json_match.group(0))
+            # Try to find JSON objects in the output (non-greedy approach)
+            # Find all potential JSON objects
+            json_objects = []
+            depth = 0
+            start_idx = None
+            
+            for i, char in enumerate(output_text):
+                if char == '{':
+                    if depth == 0:
+                        start_idx = i
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0 and start_idx is not None:
+                        json_str = output_text[start_idx:i+1]
+                        try:
+                            obj = json.loads(json_str)
+                            # Look for the main intent JSON (has intent_detected field)
+                            if isinstance(obj, dict) and 'intent_detected' in obj:
+                                logger.info(f"✅ Found valid intent JSON with intent_detected={obj.get('intent_detected')}")
+                                return obj
+                            json_objects.append(obj)
+                        except json.JSONDecodeError:
+                            pass
+                        start_idx = None
+            
+            # If we found any JSON with resource_type and operation, use it
+            for obj in json_objects:
+                if isinstance(obj, dict) and obj.get('resource_type') and obj.get('operation'):
+                    # Set intent_detected to True if we have resource_type and operation
+                    obj['intent_detected'] = True
+                    logger.info(f"✅ Found JSON with resource_type={obj.get('resource_type')}, operation={obj.get('operation')}")
+                    return obj
+            
+            # Fallback: Try to parse text format (e.g., "Intent Detected: true\nResource Type: rbac\n...")
+            logger.info("📝 No valid intent JSON found, trying text format parsing")
+            intent_data = self._parse_text_format(output_text)
+            if intent_data.get("intent_detected") or (intent_data.get("resource_type") and intent_data.get("operation")):
+                intent_data["intent_detected"] = True  # Ensure it's set
+                logger.info(f"✅ Parsed text format: resource={intent_data.get('resource_type')}, op={intent_data.get('operation')}")
                 return intent_data
             
-            # Fallback: return default structure
+            # Final fallback: return default structure
             return {
                 "intent_detected": False,
                 "resource_type": None,
@@ -504,14 +623,101 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "clarification_needed": None
             }
             
-        except json.JSONDecodeError as e:
-            logger.warning(f"⚠️ Failed to parse intent JSON: {str(e)}")
-            return {
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to parse intent output: {str(e)}, trying text format")
+            return self._parse_text_format(output_text)
+    
+    def _parse_text_format(self, output_text: str) -> Dict[str, Any]:
+        """
+        Parse intent data from text format output.
+        Handles formats like:
+        - "Intent Detected: true"
+        - "**Intent Detected:** true" (markdown)
+        - "- **intent_detected:** true" (bullet points)
+        - "Resource Type: rbac"
+        - "Operation: list"
+        """
+        result = {
                 "intent_detected": False,
                 "resource_type": None,
                 "operation": None,
                 "extracted_params": {},
                 "confidence": 0.0,
-                "ambiguities": ["Failed to parse intent"],
+            "ambiguities": [],
                 "clarification_needed": None
             }
+        
+        # Strip markdown formatting first
+        text_clean = re.sub(r'\*\*([^*]+)\*\*', r'\1', output_text)  # **bold** -> bold
+        text_clean = re.sub(r'\*([^*]+)\*', r'\1', text_clean)       # *italic* -> italic
+        text_clean = re.sub(r'^[-•]\s*', '', text_clean, flags=re.MULTILINE)  # Remove bullet points
+        text_clean = re.sub(r'_([^_]+)_', r'\1', text_clean)         # _underline_ -> underline
+        text_lower = text_clean.lower()
+        
+        logger.debug(f"🔍 Parsing text format (cleaned): {text_lower[:200]}...")
+        
+        # Check for intent detected - multiple patterns
+        intent_patterns = [
+            r'intent[_\s]*detected[:\s]*(\w+)',
+            r'detected[:\s]*(\w+)',
+        ]
+        for pattern in intent_patterns:
+            intent_match = re.search(pattern, text_lower)
+            if intent_match and intent_match.group(1) in ('true', 'yes', '1'):
+                result["intent_detected"] = True
+                logger.info(f"✅ Text format: intent_detected=True")
+                break
+        
+        # Extract resource type - multiple patterns
+        resource_patterns = [
+            r'resource[_\s]*type[:\s]*(\w+)',
+            r'resource[:\s]*(\w+)',
+        ]
+        for pattern in resource_patterns:
+            resource_match = re.search(pattern, text_lower)
+            if resource_match:
+                resource = resource_match.group(1)
+                # Filter out common false positives
+                if resource not in ['type', 'the', 'is', 'a', 'an']:
+                    result["resource_type"] = resource
+                    logger.info(f"✅ Text format: resource_type={result['resource_type']}")
+                    break
+        
+        # Extract operation
+        operation_match = re.search(r'operation[:\s]*(\w+)', text_lower)
+        if operation_match:
+            result["operation"] = operation_match.group(1)
+            logger.info(f"✅ Text format: operation={result['operation']}")
+        
+        # Extract extracted_params - look for {key: value} patterns
+        params_patterns = [
+            r'extracted[_\s]*params[:\s]*\{([^}]+)\}',
+            r'params[:\s]*\{([^}]+)\}',
+        ]
+        for pattern in params_patterns:
+            params_match = re.search(pattern, text_lower)
+            if params_match:
+                params_str = params_match.group(1)
+                # Parse simple key: value pairs
+                for pair in params_str.split(','):
+                    if ':' in pair:
+                        key, value = pair.split(':', 1)
+                        key = key.strip().strip('"\'')
+                        value = value.strip().strip('"\'')
+                        if key and value:
+                            result["extracted_params"][key] = value
+                if result["extracted_params"]:
+                    logger.info(f"✅ Text format: extracted_params={result['extracted_params']}")
+                break
+        
+        # Extract confidence
+        confidence_match = re.search(r'confidence[:\s]*([\d.]+)', text_lower)
+        if confidence_match:
+            try:
+                result["confidence"] = float(confidence_match.group(1))
+            except ValueError:
+                result["confidence"] = 1.0 if result["intent_detected"] else 0.0
+        elif result["intent_detected"]:
+            result["confidence"] = 1.0
+        
+        return result

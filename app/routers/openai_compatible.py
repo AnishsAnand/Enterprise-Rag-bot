@@ -475,6 +475,9 @@ async def chat_completions(
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
+        # Skip metadata/tagging requests from Open WebUI - these start with "### Task:"
+        is_metadata_request = query.startswith("### Task:") or query.startswith("###Task:")
+        
         user_id = request_data.user or "openwebui_user"
         
         # Create stable session ID for conversation continuity
@@ -504,14 +507,28 @@ async def chat_completions(
         
         # =====================================================================
         # STEP 2: Build rich response with steps and images
+        # Skip widget for metadata requests (tag generation, follow-up suggestions)
         # =====================================================================
-        response_data = await build_rich_response(
-            query=query,
-            user_id=user_id,
-            session_id=session_id,
-            temperature=request_data.temperature or 0.7
-        )
+        if is_metadata_request:
+            logger.info(f"[OpenWebUI] Skipping widget for metadata request")
+            # Return a simple response for metadata requests
+            response_data = {
+                "formatted_answer": '{"tags": ["General"]}',
+                "confidence": 0.5,
+                "metadata": {},
+                "has_rich_content": False,
+                "steps_count": 0,
+                "images_count": 0
+            }
+        else:
+            response_data = await build_rich_response(
+                query=query,
+                user_id=user_id,
+                session_id=session_id,
+                temperature=request_data.temperature or 0.7
+            )
         
+        # Extract values from response_data (works for both metadata and normal requests)
         formatted_answer = response_data["formatted_answer"]
         confidence = response_data["confidence"]
         metadata = response_data["metadata"]
