@@ -61,21 +61,34 @@ class NetworkAgent(BaseResourceAgent):
     async def _list_firewalls(self,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
         """List firewalls with intelligent formatting."""
         try:
-            endpoint_ids = params.get("endpoints", [])
+            # Extract auth info from context - MUST be done FIRST
             user_id = context.get("user_id")
+            auth_token = context.get("auth_token")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
             user_roles = context.get("user_roles", [])
             user_query = context.get("user_query", "")
+            endpoint_ids = params.get("endpoints", [])
+            
+            logger.info(f"🔐 Firewall listing with auth_token: {'✓' if auth_token else '✗'}, engagement: {selected_engagement_id}")
+            
             # Get IPC engagement ID if not provided
             ipc_engagement_id = params.get("ipc_engagement_id")
             if not ipc_engagement_id:
-                engagement_id = await self.get_engagement_id(user_roles=user_roles)
+                engagement_id = selected_engagement_id or await self.get_engagement_id(
+                    user_roles=user_roles, 
+                    auth_token=auth_token, 
+                    user_id=user_id, 
+                    user_type=user_type,
+                    selected_engagement_id=selected_engagement_id
+                )
                 if not engagement_id:
                     return {
                         "success": False,
                         "error": "Failed to get engagement ID",
-                        "response": "Unable to retrieve engagement information."}
+                        "response": "Unable to retrieve engagement information. Please select an engagement first."}
                 
-                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(engagement_id=engagement_id,user_id=user_id)
+                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(engagement_id=engagement_id, user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -83,13 +96,15 @@ class NetworkAgent(BaseResourceAgent):
                         "response": "Unable to retrieve IPC engagement information."}
             # Get endpoints if not provided
             if not endpoint_ids:
-                datacenters = await self.get_datacenters()
+                datacenters = await self.get_datacenters(auth_token=auth_token, user_id=user_id, user_type=user_type)
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             logger.info(f"🔍 Listing firewalls for endpoints: {endpoint_ids}")
             # Call API executor service
             result = await api_executor_service.list_firewalls(
                 endpoint_ids=endpoint_ids,
-                ipc_engagement_id=ipc_engagement_id
+                ipc_engagement_id=ipc_engagement_id,
+                auth_token=auth_token,
+                user_id=user_id
             )
             if not result.get("success"):
                 return {
@@ -105,9 +120,9 @@ class NetworkAgent(BaseResourceAgent):
                 firewalls, endpoint_ids, endpoint_names
             )
             
-            # Use LLM formatter for intelligent, user-friendly formatting
-            # (consistent with all other agents: VM, K8s, LoadBalancer, etc.)
-            formatted_response = await self.format_response_with_llm(
+            # Use agentic formatter with chunked validation for all datasets
+            # This maintains agentic behavior (adapts to API changes) while preventing hallucination
+            formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=enriched_firewalls,
                 user_query=user_query,
@@ -116,7 +131,8 @@ class NetworkAgent(BaseResourceAgent):
                     "total_count": len(enriched_firewalls),
                     "location_filter": params.get("location_filter"),
                     "endpoint_names": endpoint_names
-                }
+                },
+                chunk_size=15  # Process 15 items per chunk
             )
             
             return {
@@ -197,3 +213,57 @@ class NetworkAgent(BaseResourceAgent):
                 return location
         
         return None
+    
+    def _format_firewalls_programmatically(
+        self,
+        firewalls: List[Dict[str, Any]],
+        endpoint_names: Optional[List[str]] = None
+    ) -> str:
+        """
+        Format firewall data programmatically (no LLM) to avoid hallucination.
+        Groups firewalls by datacenter and creates markdown tables.
+        """
+        if not firewalls:
+            return "No firewalls found."
+        
+        # Group firewalls by location/datacenter
+        by_location: Dict[str, List[Dict[str, Any]]] = {}
+        for fw in firewalls:
+            location = fw.get("_location") or fw.get("endpointName") or "Unknown"
+            if location not in by_location:
+                by_location[location] = []
+            by_location[location].append(fw)
+        
+        # Build response
+        total = len(firewalls)
+        dc_count = len(by_location)
+        
+        lines = [f"🔥 **Found {total} firewalls across {dc_count} datacenter(s)**\n"]
+        
+        for location, fw_list in sorted(by_location.items()):
+            lines.append(f"\n### 📍 {location} ({len(fw_list)})")
+            lines.append("| Name | IP | Type |")
+            lines.append("|------|-----|------|")
+            
+            for fw in fw_list:
+                # Extract display name (prefer displayName over technicalName)
+                name = fw.get("displayName") or fw.get("technicalName") or fw.get("name") or "Unknown"
+                ip = fw.get("ip") or "N/A"
+                fw_type = fw.get("component") or fw.get("componentType") or "Firewall"
+                
+                # Add type emoji
+                if "Vayu" in fw_type or "IZO" in fw_type:
+                    if "(N)" in fw_type or "EdgeGateway" in str(fw.get("config", {}).get("category", "")):
+                        type_display = "🔵 Vayu Firewall(N)"
+                    else:
+                        type_display = "🟢 Vayu Firewall(F)"
+                elif "Fortinet" in fw_type:
+                    type_display = "🟠 Fortinet"
+                else:
+                    type_display = f"⚪ {fw_type}"
+                
+                lines.append(f"| {name} | {ip} | {type_display} |")
+        
+        lines.append(f"\n💡 **Tip:** Ask about a specific firewall by name for more details (e.g., 'show details for TataCo_113').")
+        
+        return "\n".join(lines)

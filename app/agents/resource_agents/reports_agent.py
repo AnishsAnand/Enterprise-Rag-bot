@@ -155,7 +155,16 @@ class ReportsAgent(BaseResourceAgent):
         context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """List report data for the requested report type."""
+        # Extract auth context - MUST be done FIRST
+        user_roles = context.get("user_roles", [])
+        user_id = context.get("user_id")
+        auth_token = context.get("auth_token")
+        user_type = context.get("user_type")
+        selected_engagement_id = context.get("selected_engagement_id")
         user_query = context.get("user_query", "")
+        
+        logger.info(f"🔐 Reports listing with auth_token: {'✓' if auth_token else '✗'}, engagement: {selected_engagement_id}")
+        
         if self._wants_report_catalog(user_query, params):
             return self._get_report_catalog_response()
 
@@ -179,7 +188,13 @@ class ReportsAgent(BaseResourceAgent):
         if filter_request:
             return await self._get_filter_options(filter_request, report_def, context)
 
-        engagement_id = await self.get_engagement_id(user_roles=context.get("user_roles", []))
+        engagement_id = selected_engagement_id or await self.get_engagement_id(
+            user_roles=user_roles, 
+            auth_token=auth_token, 
+            user_id=user_id, 
+            user_type=user_type,
+            selected_engagement_id=selected_engagement_id
+        )
         if not engagement_id:
             return {
                 "success": False,
@@ -199,7 +214,8 @@ class ReportsAgent(BaseResourceAgent):
             resource_type="reports",
             operation="list",
             params=api_payload,
-            user_roles=context.get("user_roles", [])
+            user_roles=context.get("user_roles", []),
+            auth_token=context.get("auth_token")
         )
 
         if not result.get("success"):
@@ -223,7 +239,8 @@ class ReportsAgent(BaseResourceAgent):
                 resource_type="reports",
                 operation="list",
                 params=api_payload,
-                user_roles=context.get("user_roles", [])
+                user_roles=context.get("user_roles", []),
+                auth_token=context.get("auth_token")
             )
             if result.get("success"):
                 raw = result.get("data") or {}

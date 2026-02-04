@@ -61,21 +61,42 @@ class BaseResourceAgent(ABC):
         """
         pass
     
-    async def get_engagement_id(self, user_roles: List[str] = None) -> Optional[int]:
+    async def get_engagement_id(self, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
         """
         Common utility: Get engagement ID.
         Args:
-            user_roles: User roles for permission checking 
+            user_roles: User roles for permission checking
+            auth_token: Bearer token from UI (Keycloak)
+            user_id: User ID for session lookup
+            user_type: User type (ENG/CUS) for selection logic
+            selected_engagement_id: Pre-selected engagement ID from context
         Returns:
             Engagement ID or None if not found
         """
         from app.services.api_executor_service import api_executor_service
+        
+        # If we already have a selected engagement ID, use it
+        if selected_engagement_id:
+            logger.info(f"✅ Using pre-selected engagement ID: {selected_engagement_id}")
+            return selected_engagement_id
+        
         try:
+            # Use api_executor_service.get_engagement_id which handles all the logic
+            engagement_id = await api_executor_service.get_engagement_id(
+                auth_token=auth_token,
+                user_id=user_id,
+                user_type=user_type
+            )
+            if engagement_id:
+                return engagement_id
+            
+            # Fallback to execute_operation
             result = await api_executor_service.execute_operation(
                 resource_type="engagement",
                 operation="get",
                 params={},
-                user_roles=user_roles or [])
+                user_roles=user_roles or [],
+                auth_token=auth_token)
             if not result.get("success"):
                 logger.error(f"Failed to fetch engagement ID: {result.get('error')}")
                 return None
@@ -90,21 +111,24 @@ class BaseResourceAgent(ABC):
             logger.error(f"Error fetching engagement ID: {str(e)}")
             return None
 
-    async def maybe_get_engagement_id(self,operation: str,user_roles: List[str] = None) -> Optional[int]:
+    async def maybe_get_engagement_id(self, operation: str, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
         """
         Engagement is required ONLY for mutating operations.
         LIST / READ operations must work without engagement.
         """
         if operation in ("list", "get", "describe"):
             return None
-        return await self.get_engagement_id(user_roles=user_roles)
+        return await self.get_engagement_id(user_roles=user_roles, auth_token=auth_token, user_id=user_id, user_type=user_type, selected_engagement_id=selected_engagement_id)
     
-    async def get_datacenters(self,operation: str = "list", engagement_id: int = None, user_roles: List[str] = None) -> List[Dict[str, Any]]:
+    async def get_datacenters(self, operation: str = "list", engagement_id: int = None, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None) -> List[Dict[str, Any]]:
         """
         Common utility: Get available datacenters.
         Args:
             engagement_id: Optional engagement ID (fetches if not provided)
             user_roles: User roles for permission checking
+            auth_token: Bearer token from UI (Keycloak)
+            user_id: User ID for session lookup
+            user_type: User type (ENG/CUS) for selection logic
         Returns:
             List of datacenter objects
         """
@@ -113,7 +137,10 @@ class BaseResourceAgent(ABC):
             if not engagement_id:
                 engagement_id = await self.maybe_get_engagement_id(
                     operation=operation,
-                    user_roles=user_roles)
+                    user_roles=user_roles,
+                    auth_token=auth_token,
+                    user_id=user_id,
+                    user_type=user_type)
             params = {}
             if engagement_id:
                 params["engagement_id"] = engagement_id
@@ -121,7 +148,8 @@ class BaseResourceAgent(ABC):
                 resource_type="endpoint",
                 operation="list",
                 params={"engagement_id": engagement_id},
-                user_roles=user_roles or [])
+                user_roles=user_roles or [],
+                auth_token=auth_token)
             if not result.get("success"):
                 logger.error(f"Failed to fetch datacenters: {result.get('error')}")
                 return []
@@ -180,6 +208,33 @@ class BaseResourceAgent(ABC):
             raw_data=raw_data,
             user_query=user_query,
             context=context)
+    
+    async def format_response_agentic(self, operation: str, raw_data: Any, user_query: str, context: Dict[str, Any] = None, chunk_size: int = 15) -> str:
+        """
+        Use agentic LLM formatting with validation to prevent hallucination.
+        Automatically chunks large datasets and validates output.
+        
+        This method maintains agentic behavior (adapts to API structure changes)
+        while preventing LLM hallucination through chunking and validation.
+        
+        Args:
+            operation: Operation performed (list, create, etc.)
+            raw_data: Raw API response data
+            user_query: Original user query for context
+            context: Additional context
+            chunk_size: Items per chunk for large datasets (default: 15)
+            
+        Returns:
+            Natural language formatted response with validated accuracy
+        """
+        return await llm_formatter.format_response_agentic(
+            resource_type=self.resource_type,
+            operation=operation,
+            raw_data=raw_data,
+            user_query=user_query,
+            context=context,
+            chunk_size=chunk_size
+        )
     
     async def filter_with_llm(self,data: List[Dict[str, Any]],filter_criteria: str,user_query: str) -> List[Dict[str, Any]]:
         """

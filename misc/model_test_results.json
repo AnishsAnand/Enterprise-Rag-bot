@@ -1,0 +1,305 @@
+[
+  {
+    "model": "meta/Llama-4-Scout-17B-16E-Instruct",
+    "status": "success",
+    "response_time": 0.466,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 22,
+      "completion_tokens": 3,
+      "total_tokens": 25
+    },
+    "response_text": "Four.",
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:51.625006"
+  },
+  {
+    "model": "meta/Llama-3.3-70B-Instruct",
+    "status": "success",
+    "response_time": 0.297,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 47,
+      "completion_tokens": 3,
+      "total_tokens": 50
+    },
+    "response_text": "Four.",
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:52.592378"
+  },
+  {
+    "model": "openai/gpt-3.5-turbo",
+    "status": "error",
+    "response_time": 0.157,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=openai/gpt-3.5-turbo. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\",\"co",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:53.391073"
+  },
+  {
+    "model": "Qwen/Qwen2.5-14B-Instruct",
+    "status": "error",
+    "response_time": 0.162,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=Qwen/Qwen2.5-14B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:54.049296"
+  },
+  {
+    "model": "meta/llama-3.1-8b-instruct",
+    "status": "error",
+    "response_time": 0.153,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=meta/llama-3.1-8b-instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"Non",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:54.712745"
+  },
+  {
+    "model": "google/gemma-7b-it",
+    "status": "error",
+    "response_time": 0.159,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=google/gemma-7b-it. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\",\"code",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:55.367215"
+  },
+  {
+    "model": "Qwen/Qwen2.5-72B-Instruct",
+    "status": "error",
+    "response_time": 0.17,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=Qwen/Qwen2.5-72B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:56.027218"
+  },
+  {
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "status": "error",
+    "response_time": 0.16,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=Qwen/Qwen2.5-7B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\"",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:56.697921"
+  },
+  {
+    "model": "openai/gpt-oss-120b",
+    "status": "success",
+    "response_time": 0.433,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 77,
+      "completion_tokens": 37,
+      "total_tokens": 114
+    },
+    "response_text": "Four",
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:57.359863"
+  },
+  {
+    "model": "test-meta/Llama-4-Scout-17B-16E-Instruct",
+    "status": "success",
+    "response_time": 0.381,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 22,
+      "completion_tokens": 3,
+      "total_tokens": 25
+    },
+    "response_text": "Four.",
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:58.293970"
+  },
+  {
+    "model": "mistralai/Mixtral-8x7B-Instruct",
+    "status": "error",
+    "response_time": 0.152,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=mistralai/Mixtral-8x7B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\"",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:59.176667"
+  },
+  {
+    "model": "meta/Llama-3.1-8B-Instruct",
+    "status": "success",
+    "response_time": 0.179,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 47,
+      "completion_tokens": 2,
+      "total_tokens": 49
+    },
+    "response_text": "Four.",
+    "correct": false,
+    "timestamp": "2026-02-03T09:54:59.829994"
+  },
+  {
+    "model": "meta/llama-3-8b-instruct",
+    "status": "error",
+    "response_time": 0.155,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=meta/llama-3-8b-instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\"",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:00.510537"
+  },
+  {
+    "model": "Qwen/Qwen3-Embedding-8B",
+    "status": "error",
+    "response_time": 3.831,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"litellm.BadRequestError: OpenAIException - The model does not support Chat Completions API. Received Model Group=Qwen/Qwen3-Embedding-8B\\nAvailable Model Group Fallbacks=None\",\"ty",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:01.166975"
+  },
+  {
+    "model": "openai/gpt-4o",
+    "status": "error",
+    "response_time": 0.16,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=openai/gpt-4o. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\",\"code\":\"40",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:05.499536"
+  },
+  {
+    "model": "openai/gpt-oss-20b",
+    "status": "success",
+    "response_time": 0.345,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 81,
+      "completion_tokens": 44,
+      "total_tokens": 125
+    },
+    "response_text": "four",
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:06.160791"
+  },
+  {
+    "model": "Qwen/Qwen2.5-32B-Instruct",
+    "status": "error",
+    "response_time": 0.16,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=Qwen/Qwen2.5-32B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:07.006847"
+  },
+  {
+    "model": "meta/llama-3-70b-instruct",
+    "status": "error",
+    "response_time": 0.167,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=meta/llama-3-70b-instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:07.668177"
+  },
+  {
+    "model": "meta/Llama-3.1-70B-Instruct",
+    "status": "error",
+    "response_time": 0.163,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=meta/Llama-3.1-70B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"No",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:08.336695"
+  },
+  {
+    "model": "google/gemma-2b-it",
+    "status": "error",
+    "response_time": 0.171,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=google/gemma-2b-it. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\",\"code",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:09.001627"
+  },
+  {
+    "model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "status": "success",
+    "response_time": 0.23,
+    "response_code": 200,
+    "error": null,
+    "tokens_used": {
+      "prompt_tokens": 41,
+      "completion_tokens": 2,
+      "total_tokens": 43
+    },
+    "response_text": "Four",
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:09.674227"
+  },
+  {
+    "model": "meta/llama-3.1-70b-instruct",
+    "status": "error",
+    "response_time": 0.177,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"litellm.BadRequestError: You passed in model=meta/llama-3.1-70b-instruct. There are no healthy deployments for this model. Received Model Group=meta/llama-3.1-70b-instruct\\nAvaila",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:10.405232"
+  },
+  {
+    "model": "mistralai/Mistral-7B-Instruct",
+    "status": "error",
+    "response_time": 0.162,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=mistralai/Mistral-7B-Instruct. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:11.084019"
+  },
+  {
+    "model": "avsolatorio/GIST-Embedding-v0",
+    "status": "error",
+    "response_time": 3.627,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"litellm.BadRequestError: OpenAIException - The model does not support Chat Completions API. Received Model Group=avsolatorio/GIST-Embedding-v0\\nAvailable Model Group Fallbacks=Non",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:11.747166"
+  },
+  {
+    "model": "openai/gpt-4o-mini",
+    "status": "error",
+    "response_time": 0.157,
+    "response_code": 400,
+    "error": "HTTP 400: {\"error\":{\"message\":\"{'error': '/chat/completions: Invalid model name passed in model=openai/gpt-4o-mini. Call `/v1/models` to view available models for your key.'}\",\"type\":\"None\",\"param\":\"None\",\"code",
+    "tokens_used": null,
+    "response_text": null,
+    "correct": false,
+    "timestamp": "2026-02-03T09:55:15.875208"
+  }
+]

@@ -137,6 +137,30 @@ Always confirm destructive operations (delete, update) before executing."""
         if not user_input or not user_input.strip():
             return None
         
+        # FAST PRE-CHECK: If input contains resource keywords, skip LLM check entirely
+        # This prevents misclassification of obvious resource operations
+        input_lower = user_input.lower()
+        resource_keywords = [
+            "cluster", "clusters", "vm", "vms", "virtual machine", 
+            "firewall", "firewalls", "load balancer", "database", "databases",
+            "endpoint", "endpoints", "jenkins", "kafka", "gitlab", "postgres",
+            "datacenter", "data center", "registry", "volume", "storage",
+            "kubernetes", "k8s", "node", "nodes", "pod", "pods", "service"
+        ]
+        action_keywords = [
+            "list", "listing", "show", "view", "get", "fetch", "display",
+            "create", "deploy", "provision", "delete", "remove", "update",
+            "modify", "scale", "restart", "stop", "start", "check", "status"
+        ]
+        
+        has_resource = any(kw in input_lower for kw in resource_keywords)
+        has_action = any(kw in input_lower for kw in action_keywords)
+        
+        # If input has resource OR action keywords, it's an operation - skip greeting check
+        if has_resource or has_action:
+            logger.debug(f"⚡ Fast-path: detected resource/action keywords in '{user_input[:30]}', skipping greeting check")
+            return None
+        
         try:
             prompt = f"""You are analyzing user input for a cloud infrastructure management assistant.
 Determine if the user is GREETING you or asking about your CAPABILITIES, versus making an actual operational request.
@@ -380,7 +404,7 @@ Return ONLY a JSON array of strings, like:
         logger.info(f"❓ Clarifying question: {question}")
         return f"CLARIFICATION_NEEDED: {question}"
     
-    async def orchestrate(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None) -> Dict[str, Any]:
+    async def orchestrate(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None,auth_token: str = None,user_type: str = None) -> Dict[str, Any]:
         """
         Main orchestration method that coordinates the entire flow.
         Args:
@@ -388,6 +412,8 @@ Return ONLY a JSON array of strings, like:
             session_id: Conversation session ID
             user_id: User identifier
             user_roles: User's roles for permission checking
+            auth_token: Bearer token from UI (Keycloak) for API authentication
+            user_type: User type (ENG or CUS) for engagement selection logic
         Returns:
             Dict with orchestration result
         """
@@ -399,23 +425,74 @@ Return ONLY a JSON array of strings, like:
             logger.info(f"🎭 Orchestrating request for session {session_id}")
             # Get or create conversation state
             state = conversation_state_manager.get_session(session_id)
+            
+            # Debug: Log state details when loaded
+            if state:
+                logger.info(f"📂 Loaded existing session: status={state.status.value}, engagement_id={state.selected_engagement_id}, user_type={state.user_type}")
             # Detect OpenWebUI metadata requests (title, tags, follow-ups generation)
             is_metadata_request = any([
                 user_input.strip().startswith("### Task:"),
                 "Generate a concise" in user_input and "title" in user_input.lower(),
                 "Suggest 3-5 relevant follow-up" in user_input,
                 "Generate 1-3 broad tags" in user_input])
-            # If state exists but is COMPLETED/FAILED, delete it and start fresh
+            # If state exists but is COMPLETED/FAILED, reset for new operation but PRESERVE engagement
             if state and state.status in [ConversationStatus.COMPLETED, ConversationStatus.FAILED, ConversationStatus.CANCELLED]:
                 if is_metadata_request:
                     logger.info(f"📋 Metadata request detected, preserving session state")
                 else:
-                    logger.info(f"🔄 Previous conversation {state.status.value}, starting fresh session")
-                    conversation_state_manager.delete_session(session_id)
-                    state = None
+                    # Preserve engagement ID before resetting
+                    preserved_engagement_id = state.selected_engagement_id
+                    preserved_user_type = state.user_type
+                    logger.info(f"🔄 Previous conversation {state.status.value}, resetting for new operation (preserving engagement: {preserved_engagement_id})")
+                    
+                    # Reset operation-specific state but keep session
+                    state.status = ConversationStatus.INITIATED
+                    state.resource_type = None
+                    state.operation = None
+                    state.intent = None
+                    state.required_params = set()
+                    state.optional_params = set()
+                    state.collected_params = {}
+                    state.missing_params = set()
+                    state.invalid_params = {}
+                    state.execution_result = None
+                    state.error_message = None
+                    state.pending_filter_options = None
+                    state.pending_filter_type = None
+                    state.pending_engagements = None
+                    # Keep the engagement ID!
+                    state.selected_engagement_id = preserved_engagement_id
+                    state.user_type = preserved_user_type
+                    state.user_query = user_input
+                    
+                    # Persist the reset state
+                    conversation_state_manager.update_session(state)
+                    
             if not state:
-                state = conversation_state_manager.create_session(session_id, user_id)
+                state = conversation_state_manager.create_session(session_id, user_id, auth_token=auth_token, user_type=user_type)
                 state.user_query = user_input
+            # Update auth token and user_type in case they changed
+            else:
+                if auth_token:
+                    state.auth_token = auth_token
+                if user_type:
+                    state.user_type = user_type
+                
+                # Restore engagement ID to api_executor_service if it exists in state
+                # (needed after server restart since api_executor cache is in-memory only)
+                if state.selected_engagement_id and state.user_id:
+                    from app.services.api_executor_service import api_executor_service
+                    await api_executor_service.set_engagement_id(
+                        user_id=state.user_id,
+                        engagement_id=state.selected_engagement_id
+                    )
+                    logger.info(f"♻️ Restored engagement ID {state.selected_engagement_id} from persisted state")
+                
+                # Update user_query for new operational queries
+                # Skip only when in engagement selection (preserve original query for continuation)
+                if state.status != ConversationStatus.AWAITING_ENGAGEMENT_SELECTION:
+                    state.user_query = user_input
+                    logger.debug(f"📝 Updated user_query to: '{user_input[:50]}...'")
             # Add user message to history
             state.add_message("user", user_input)
             # Determine routing based on conversation state and input
@@ -483,20 +560,90 @@ Return ONLY a JSON array of strings, like:
         Returns:
             Dict with routing decision
         """
-        if state.status == ConversationStatus.COLLECTING_PARAMS:
-            # For cluster creation workflow, always route to validation
-            if state.operation == "create" and state.resource_type == "k8s_cluster":
-                logger.info(f"🎯 Cluster creation in progress, routing to validation")
+        # PRIORITY 0: Check for greeting/capability questions
+        # But ONLY when session is in a neutral state (INITIATED or COMPLETED)
+        # When in active workflow (AWAITING_SELECTION, etc.), user input is contextual - don't check
+        is_neutral_state = state.status in [ConversationStatus.INITIATED, 
+                                            ConversationStatus.COMPLETED,
+                                            ConversationStatus.FAILED,
+                                            ConversationStatus.CANCELLED]
+        
+        # PRIORITY 0: For AWAITING_ENGAGEMENT_SELECTION, only reset if user says an EXPLICIT greeting
+        # DO NOT use LLM here - it misclassifies numbers like "20" as capability queries
+        if state.status == ConversationStatus.AWAITING_ENGAGEMENT_SELECTION:
+            # Simple keyword check for explicit greetings only
+            explicit_greetings = ["hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening"]
+            input_lower = user_input.lower().strip()
+            is_explicit_greeting = input_lower in explicit_greetings or any(input_lower.startswith(g + " ") for g in explicit_greetings)
+            
+            if is_explicit_greeting:
+                logger.info(f"👋 Explicit greeting detected during engagement selection, resetting workflow")
+                state.status = ConversationStatus.INITIATED
+                state.pending_engagements = None
+                conversation_state_manager.update_session(state)
                 return {
-                    "route": "validation",
-                    "reason": "Continuing cluster creation workflow"
+                    "route": "greeting",
+                    "reason": "User explicit greeting during engagement selection",
+                    "greeting_type": "greeting"
                 }
-            if state.missing_params:
+            # Otherwise, proceed to engagement_selection handler (handled in PRIORITY 1 below)
+        
+        # For neutral states, check for greeting/capability using LLM
+        # BUT FIRST: Check if this is a follow-up to a recent operation
+        elif is_neutral_state:
+            # Check if there's a recent resource operation that this might be a follow-up to
+            has_recent_operation = (
+                state.resource_type and 
+                state.operation and 
+                state.status == ConversationStatus.COMPLETED
+            )
+            
+            # Short responses (1-3 words) after a completed operation are likely follow-ups
+            input_words = user_input.strip().split()
+            is_short_response = len(input_words) <= 3 and len(user_input.strip()) < 50
+            
+            # Common follow-up patterns
+            follow_up_keywords = ["all", "everything", "show all", "list all", "yes", "ok", "okay", "sure", "go ahead"]
+            is_follow_up_keyword = user_input.lower().strip() in follow_up_keywords
+            
+            # If we have a recent operation and user gives a short response, treat as follow-up
+            if has_recent_operation and (is_short_response or is_follow_up_keyword):
+                logger.info(f"🔄 Detected follow-up to recent operation ({state.operation} {state.resource_type}): '{user_input}'")
+                # Reset state and route to intent agent to re-process with context
+                state.status = ConversationStatus.INITIATED
+                # Build a contextual query that includes the follow-up
+                contextual_query = f"{state.operation} {state.resource_type} {user_input}"
+                logger.info(f"📝 Contextual query: '{contextual_query}'")
+                # Route to intent agent with the contextual query
                 return {
-                    "route": "validation",
-                    "reason": "Collecting missing parameters"
+                    "route": "intent",
+                    "reason": f"Follow-up to recent {state.operation} {state.resource_type} operation",
+                    "contextual_query": contextual_query
                 }
-        # Check if we're awaiting user selection 
+            
+            # Only check for greeting/capability if it's not a follow-up
+            greeting_check = await self._check_greeting_or_capability(user_input)
+            if greeting_check:
+                greeting_type = greeting_check.get('type', 'greeting')
+                logger.info(f"👋 Detected greeting/capability question: {greeting_type}")
+                return {
+                    "route": "greeting",
+                    "reason": f"User greeting or capability question: {greeting_type}",
+                    "greeting_type": greeting_type
+                }
+        
+        # PRIORITY 1: Check for active workflow states
+        # These states indicate user is responding to a prompt for a resource operation
+        
+        # Check if we're awaiting engagement selection (ENG users)
+        if state.status == ConversationStatus.AWAITING_ENGAGEMENT_SELECTION:
+            logger.info(f"🔄 Session in AWAITING_ENGAGEMENT_SELECTION status, routing to engagement_selection handler")
+            return {
+                "route": "engagement_selection",
+                "reason": "Processing user engagement selection"
+            }
+        
+        # Check if we're awaiting user selection (endpoints, etc.)
         if state.status == ConversationStatus.AWAITING_SELECTION:
             logger.info(f"🔄 Session in AWAITING_SELECTION status, routing to validation to process user selection")
             return {
@@ -511,21 +658,30 @@ Return ONLY a JSON array of strings, like:
                 "route": "filter_selection",
                 "reason": "Processing user filter selection (BU/Environment/Zone)"
             }
+        
+        # Check if we're collecting parameters
+        if state.status == ConversationStatus.COLLECTING_PARAMS:
+            # For cluster creation workflow, always route to validation
+            if state.operation == "create" and state.resource_type == "k8s_cluster":
+                logger.info(f"🎯 Cluster creation in progress, routing to validation")
+                return {
+                    "route": "validation",
+                    "reason": "Continuing cluster creation workflow"
+                }
+            if state.missing_params:
+                return {
+                    "route": "validation",
+                    "reason": "Collecting missing parameters"
+                }
+        
         # Check if ready to execute
         if state.status == ConversationStatus.READY_TO_EXECUTE:
             return {
                 "route": "execution",
-                "reason": "All parameters collected, ready to execute"}
-        
-        # Check for greeting/capability questions first
-        greeting_check = await self._check_greeting_or_capability(user_input)
-        if greeting_check:
-            logger.info(f"👋 Detected greeting/capability question: {greeting_check.get('type')}")
-            return {
-                "route": "greeting",
-                "reason": f"User greeting or capability question: {greeting_check.get('type')}",
-                "greeting_type": greeting_check.get("type")
+                "reason": "All parameters collected, ready to execute"
             }
+        
+        # Note: Greeting check already done at PRIORITY 0 above
         
         # PRE-CHECK: Fast rule-based routing for obvious resource operations.This avoids LLM call latency for clear-cut cases
         query_lower = user_input.lower()
@@ -647,6 +803,7 @@ Respond with ONLY ONE of these:
             Dict with execution result
         """
         route = routing_decision["route"]
+        auth_token = state.auth_token  # Extract auth token from conversation state
         try:
             # Handle greetings and capability questions directly
             if route == "greeting":
@@ -664,7 +821,13 @@ Respond with ONLY ONE of these:
                 # Route to intent agent
                 state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
                 if self.intent_agent:
-                    result = await self.intent_agent.execute(user_input, {
+                    # Use contextual query if provided (for follow-ups), otherwise use original user_input
+                    query_to_use = routing_decision.get("contextual_query", user_input)
+                    # Update state.user_query to reflect the contextual query for follow-ups
+                    if routing_decision.get("contextual_query"):
+                        state.user_query = query_to_use
+                        logger.info(f"📝 Updated user_query to contextual query: '{query_to_use[:50]}...'")
+                    result = await self.intent_agent.execute(query_to_use, {
                         "session_id": state.session_id,
                         "user_id": state.user_id,
                         "conversation_state": state.to_dict()})
@@ -695,7 +858,9 @@ Respond with ONLY ONE of these:
                             if self.validation_agent:
                                 validation_result = await self.validation_agent.execute(user_input, {
                                     "session_id": state.session_id,
-                                    "conversation_state": state.to_dict()})
+                                    "conversation_state": state.to_dict(),
+                                    "auth_token": auth_token,
+                                    "user_type": state.user_type})
                                 
                                 # CHECK: If workflow was aborted to handle a different request
                                 if validation_result.get("workflow_aborted") and validation_result.get("pending_request"):
@@ -739,13 +904,18 @@ Respond with ONLY ONE of these:
                                         exec_result = await self.execution_agent.execute("", {
                                             "session_id": state.session_id,
                                             "conversation_state": state.to_dict(),
-                                            "user_roles": user_roles or []
+                                            "user_roles": user_roles or [],
+                                            "auth_token": auth_token,
+                                            "user_type": state.user_type
                                         })
                                         
-                                        # Check if awaiting filter selection - don't mark as completed
-                                        if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
-                                            if exec_result.get("success"):
-                                                state.set_execution_result(exec_result.get("execution_result", {}))
+                                        # Check if awaiting selection - don't mark as completed
+                                        is_awaiting = (
+                                            state.status in [ConversationStatus.AWAITING_FILTER_SELECTION, ConversationStatus.AWAITING_ENGAGEMENT_SELECTION] or
+                                            exec_result.get("engagement_selection_required")
+                                        )
+                                        if not is_awaiting and exec_result.get("success"):
+                                            state.set_execution_result(exec_result.get("execution_result", {}))
                                         return {
                                             "success": True,
                                             "response": exec_result.get("output", ""),
@@ -773,13 +943,18 @@ Respond with ONLY ONE of these:
                                 exec_result = await self.execution_agent.execute("", {
                                     "session_id": state.session_id,
                                     "conversation_state": state.to_dict(),
-                                    "user_roles": user_roles or []
+                                    "user_roles": user_roles or [],
+                                    "auth_token": auth_token,
+                                    "user_type": state.user_type
                                 })
                                 
-                                # Check if awaiting filter selection - don't mark as completed
-                                if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
-                                    if exec_result.get("success"):
-                                        state.set_execution_result(exec_result.get("execution_result", {}))
+                                # Check if awaiting selection - don't mark as completed
+                                is_awaiting = (
+                                    state.status in [ConversationStatus.AWAITING_FILTER_SELECTION, ConversationStatus.AWAITING_ENGAGEMENT_SELECTION] or
+                                    exec_result.get("engagement_selection_required")
+                                )
+                                if not is_awaiting and exec_result.get("success"):
+                                    state.set_execution_result(exec_result.get("execution_result", {}))
                                 return {
                                     "success": True,
                                     "response": exec_result.get("output", ""),
@@ -805,7 +980,9 @@ Respond with ONLY ONE of these:
                 if self.validation_agent:
                     result = await self.validation_agent.execute(user_input, {
                         "session_id": state.session_id,
-                        "conversation_state": state.to_dict()
+                        "conversation_state": state.to_dict(),
+                        "auth_token": auth_token,
+                        "user_type": state.user_type
                     })
                     # CHECK: If user cancelled the workflow
                     if result.get("cancelled"):
@@ -825,7 +1002,7 @@ Respond with ONLY ONE of these:
                         return await self.execute(pending_request, {
                             "session_id": state.session_id,
                             "conversation_state": state.to_dict(),
-                            "user_roles": context.get("user_roles") if context else None
+                            "user_roles": user_roles
                         })
                     
                     # CHECK: If workflow was paused to handle a different request
@@ -836,7 +1013,7 @@ Respond with ONLY ONE of these:
                         pending_result = await self.execute(pending_request, {
                             "session_id": state.session_id,
                             "conversation_state": state.to_dict(),
-                            "user_roles": context.get("user_roles") if context else None
+                            "user_roles": user_roles
                         })
                         # Combine the save message with the result
                         combined_response = result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
@@ -864,7 +1041,9 @@ Respond with ONLY ONE of these:
                             exec_result = await self.execution_agent.execute("", {
                                 "session_id": state.session_id,
                                 "conversation_state": state.to_dict(),
-                                "user_roles": user_roles or []
+                                "user_roles": user_roles or [],
+                                "auth_token": auth_token,
+                                "user_type": state.user_type
                             })
                             
                             # Check if execution is awaiting filter selection (BU/Env/Zone)
@@ -916,11 +1095,19 @@ Respond with ONLY ONE of these:
                     result = await self.execution_agent.execute("", {
                         "session_id": state.session_id,
                         "conversation_state": state.to_dict(),
-                        "user_roles": user_roles or []
+                        "user_roles": user_roles or [],
+                        "auth_token": auth_token,
+                        "user_type": state.user_type
                     })
                     
-                    # Check if awaiting filter selection - don't mark as completed
-                    if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
+                    # Check if awaiting filter or engagement selection - don't mark as completed
+                    is_awaiting_selection = (
+                        state.status == ConversationStatus.AWAITING_FILTER_SELECTION or
+                        state.status == ConversationStatus.AWAITING_ENGAGEMENT_SELECTION or
+                        result.get("engagement_selection_required")
+                    )
+                    
+                    if not is_awaiting_selection:
                         # Update state with execution result
                         if result.get("success"):
                             state.set_execution_result(result.get("execution_result", {}))
@@ -929,6 +1116,11 @@ Respond with ONLY ONE of these:
                                 "success": False,
                                 "error": result.get("error", "Execution failed")
                             })
+                    else:
+                        # Persist state with engagement selection status (already set by ExecutionAgent)
+                        conversation_state_manager.update_session(state)
+                        logger.info(f"📝 State persisted with engagement_selection_required (status={state.status.value})")
+                    
                     return {
                         "success": True,
                         "response": result.get("output", ""),
@@ -960,6 +1152,11 @@ Respond with ONLY ONE of these:
             elif route == "filter_selection":
                 # Process user's filter selection (BU/Environment/Zone)
                 return await self._handle_filter_selection(user_input, state, user_roles)
+            
+            elif route == "engagement_selection":
+                # Process user's engagement selection (ENG users)
+                return await self._handle_engagement_selection(user_input, state, user_roles)
+            
             else:
                 return {
                     "success": False,
@@ -1124,13 +1321,18 @@ Respond with ONLY ONE of these:
                 exec_result = await self.execution_agent.execute("", {
                     "session_id": state.session_id,
                     "conversation_state": state.to_dict(),
-                    "user_roles": user_roles or []
+                    "user_roles": user_roles or [],
+                    "auth_token": state.auth_token,
+                    "user_type": state.user_type
                 })
                 
-                # Only mark as completed if not awaiting another filter selection
-                if state.status != ConversationStatus.AWAITING_FILTER_SELECTION:
-                    if exec_result.get("success"):
-                        state.set_execution_result(exec_result.get("execution_result", {}))
+                # Only mark as completed if not awaiting selection
+                is_awaiting = (
+                    state.status in [ConversationStatus.AWAITING_FILTER_SELECTION, ConversationStatus.AWAITING_ENGAGEMENT_SELECTION] or
+                    exec_result.get("engagement_selection_required")
+                )
+                if not is_awaiting and exec_result.get("success"):
+                    state.set_execution_result(exec_result.get("execution_result", {}))
                 
                 return {
                     "success": True,
@@ -1161,6 +1363,180 @@ Respond with ONLY ONE of these:
                 "error": str(e),
                 "response": f"Error processing your selection: {str(e)}",
                 "routing": "filter_selection"
+            }
+
+    async def _handle_engagement_selection(
+        self,
+        user_input: str,
+        state: ConversationState,
+        user_roles: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Handle user's engagement selection (for ENG users with multiple engagements).
+        
+        This is called when state.status == AWAITING_ENGAGEMENT_SELECTION.
+        User input could be:
+        - A number: "1" → select first engagement
+        - A name: "MyProject" → match by engagement name
+        - An ID: "1923" → match by engagement ID
+        
+        Args:
+            user_input: User's response
+            state: Conversation state with pending_engagements
+            user_roles: User's roles
+            
+        Returns:
+            Dict with result (either continue with operation or ask again)
+        """
+        try:
+            logger.info(f"🏢 Processing engagement selection: '{user_input}'")
+            
+            engagements = state.pending_engagements
+            if not engagements:
+                logger.error("❌ No pending engagements found in state")
+                state.status = ConversationStatus.INITIATED
+                state.pending_engagements = None
+                conversation_state_manager.update_session(state)
+                return {
+                    "success": False,
+                    "response": "I lost track of the engagement options. Could you please ask again?",
+                    "routing": "engagement_selection"
+                }
+            
+            # Parse user selection
+            selected_engagement = None
+            user_input_lower = user_input.strip().lower()
+            
+            # Try to match by number (index)
+            try:
+                index = int(user_input_lower) - 1  # Convert to 0-based index
+                if 0 <= index < len(engagements):
+                    selected_engagement = engagements[index]
+                    logger.info(f"✅ Matched engagement by index: {index + 1}")
+            except ValueError:
+                pass
+            
+            # Try to match by ID
+            if not selected_engagement:
+                try:
+                    eng_id = int(user_input_lower)
+                    for eng in engagements:
+                        if eng.get("id") == eng_id:
+                            selected_engagement = eng
+                            logger.info(f"✅ Matched engagement by ID: {eng_id}")
+                            break
+                except ValueError:
+                    pass
+            
+            # Try to match by name (partial match)
+            if not selected_engagement:
+                for eng in engagements:
+                    eng_name = (eng.get("engagementName") or eng.get("name") or "").lower()
+                    if user_input_lower in eng_name or eng_name in user_input_lower:
+                        selected_engagement = eng
+                        logger.info(f"✅ Matched engagement by name: {eng_name}")
+                        break
+            
+            if not selected_engagement:
+                # Could not parse - ask again
+                logger.warning(f"⚠️ Could not match '{user_input}' to any engagement")
+                
+                # Build a helpful message
+                response = f"I couldn't match '{user_input}' to any engagement.\n\n"
+                response += "Please select from the available engagements:\n\n"
+                for i, eng in enumerate(engagements, 1):
+                    name = eng.get("engagementName") or eng.get("name") or "Unknown"
+                    eng_id = eng.get("id")
+                    response += f"**{i}. {name}** (ID: {eng_id})\n"
+                response += "\nYou can say the number, name, or ID."
+                
+                return {
+                    "success": True,
+                    "response": response,
+                    "routing": "engagement_selection"
+                }
+            
+            # Successfully selected - store in state and session
+            engagement_id = selected_engagement.get("id")
+            engagement_name = selected_engagement.get("engagementName") or selected_engagement.get("name")
+            
+            logger.info(f"✅ User selected engagement: {engagement_name} (ID: {engagement_id})")
+            
+            # Store in state
+            state.selected_engagement_id = engagement_id
+            state.pending_engagements = None
+            state.status = ConversationStatus.COLLECTING_PARAMS  # Resume the original flow
+            
+            # Store in API executor session for future calls
+            from app.services.api_executor_service import api_executor_service
+            await api_executor_service.set_engagement_id(
+                user_id=state.user_id,
+                engagement_id=engagement_id,
+                engagement_data=selected_engagement
+            )
+            
+            # Persist state
+            conversation_state_manager.update_session(state)
+            
+            # Now continue with the original operation - re-route to validation
+            response = f"✅ Great! I've selected **{engagement_name}** (ID: {engagement_id}) for this session.\n\n"
+            response += "Now let me continue with your request..."
+            
+            # Re-process the original query with the engagement now set
+            if state.user_query:
+                logger.info(f"🔄 Continuing with original query: '{state.user_query}'")
+                # Route back to validation to continue
+                state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", "Engagement selected, continuing operation")
+                if self.validation_agent:
+                    validation_result = await self.validation_agent.execute(state.user_query, {
+                        "session_id": state.session_id,
+                        "conversation_state": state.to_dict(),
+                        "auth_token": state.auth_token,
+                        "user_type": state.user_type
+                    })
+                    
+                    # Check if ready to execute
+                    if validation_result.get("ready_to_execute") and validation_result.get("success"):
+                        logger.info("🚀 ValidationAgent says ready after engagement selection - routing to ExecutionAgent")
+                        state.status = ConversationStatus.EXECUTING
+                        if self.execution_agent:
+                            exec_result = await self.execution_agent.execute("", {
+                                "session_id": state.session_id,
+                                "conversation_state": state.to_dict(),
+                                "user_roles": user_roles or [],
+                                "auth_token": state.auth_token,
+                                "user_type": state.user_type
+                            })
+                            
+                            if exec_result.get("success"):
+                                state.set_execution_result(exec_result.get("execution_result", {}))
+                            
+                            return {
+                                "success": True,
+                                "response": response + "\n\n" + exec_result.get("output", ""),
+                                "routing": "execution",
+                                "execution_result": exec_result.get("execution_result")
+                            }
+                    
+                    return {
+                        "success": True,
+                        "response": response + "\n\n" + validation_result.get("output", ""),
+                        "routing": "validation"
+                    }
+            
+            return {
+                "success": True,
+                "response": response,
+                "routing": "engagement_selection"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Engagement selection handling failed: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": str(e),
+                "response": f"Error processing your selection: {str(e)}",
+                "routing": "engagement_selection"
             }
 
     def _parse_generic_selection(

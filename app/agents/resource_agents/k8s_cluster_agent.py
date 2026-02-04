@@ -84,6 +84,31 @@ class K8sClusterAgent(BaseResourceAgent):
             Formatted cluster list
         """
         try:
+            # FIRST: Extract auth_token, user_id, user_type, and engagement_id from context
+            # This must happen BEFORE any API calls
+            auth_token = context.get("auth_token")
+            user_id = context.get("user_id")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
+            
+            # Get engagement_id (required for URL parameter)
+            if selected_engagement_id:
+                engagement_id = selected_engagement_id
+                logger.info(f"✅ Using selected engagement ID from context: {engagement_id}")
+            else:
+                engagement_id = await api_executor_service.get_engagement_id(
+                    auth_token=auth_token,
+                    user_id=user_id,
+                    user_type=user_type
+                )
+            
+            if not engagement_id:
+                return {
+                    "success": False,
+                    "error": "Failed to get engagement ID",
+                    "response": "Unable to retrieve engagement information. Please select an engagement first."
+                }
+            
             # Get endpoint IDs
             endpoint_ids = params.get("endpoints", [])
             
@@ -101,7 +126,7 @@ class K8sClusterAgent(BaseResourceAgent):
             if filter_request and not (business_units or environments or zones):
                 # User asked to filter but hasn't selected options yet - show them the list
                 logger.info(f"🔍 Filter request detected: {filter_request}")
-                filter_options = await self._get_filter_options(filter_request)
+                filter_options = await self._get_filter_options(filter_request, context)
                 if filter_options and filter_options.get("needs_selection"):
                     # Store options in response metadata for orchestrator to save to state
                     filter_options["set_filter_state"] = True
@@ -111,12 +136,20 @@ class K8sClusterAgent(BaseResourceAgent):
             if not endpoint_ids and not wants_all:
                 # This is a fallback; ideally ValidationAgent should have asked for endpoint selection
                 logger.info("📍 No specific endpoints provided, fetching all available endpoints")
-                datacenters = await self.get_datacenters()
+                datacenters = await self.get_datacenters(
+                    engagement_id=engagement_id,
+                    user_roles=context.get("user_roles"),
+                    auth_token=auth_token
+                )
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             elif not endpoint_ids and wants_all:
                 # User explicitly wants all endpoints
                 logger.info("📍 User requested all endpoints, fetching all")
-                datacenters = await self.get_datacenters()
+                datacenters = await self.get_datacenters(
+                    engagement_id=engagement_id,
+                    user_roles=context.get("user_roles"),
+                    auth_token=auth_token
+                )
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             if not endpoint_ids:
                 return {
@@ -130,14 +163,6 @@ class K8sClusterAgent(BaseResourceAgent):
                 logger.info(f"🌍 Filtering by Environment IDs: {environments}")
             if zones:
                 logger.info(f"📍 Filtering by Zone IDs: {zones}")
-            # Get engagement_id (required for URL parameter)
-            engagement_id = await api_executor_service.get_engagement_id()
-            if not engagement_id:
-                return {
-                    "success": False,
-                    "error": "Failed to get engagement ID",
-                    "response": "Unable to retrieve engagement information."
-                }
             
             # Build API payload with filters
             api_payload = {
@@ -159,7 +184,8 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="list",
                 params=api_payload,
-                user_roles=context.get("user_roles", [])
+                user_roles=context.get("user_roles", []),
+                auth_token=context.get("auth_token")
             )
             if not result.get("success"):
                 return {
@@ -178,12 +204,12 @@ class K8sClusterAgent(BaseResourceAgent):
                 logger.info(f"🔍 Applying filter: {filter_criteria}")
                 clusters = await self.filter_with_llm(clusters, filter_criteria, user_query)
                 logger.info(f"✅ After filtering: {len(clusters)} clusters")
-            # Format response with LLM
-            formatted_response = await self.format_response_with_llm(
+            # Format response with agentic formatter (prevents hallucination)
+            formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=clusters,
                 user_query=user_query,
-                context={"endpoint_names": params.get("endpoint_names", [])})
+                context={"query_type": "general", "endpoint_names": params.get("endpoint_names", [])})
             return {
                 "success": True,
                 "data": clusters,
@@ -230,8 +256,19 @@ class K8sClusterAgent(BaseResourceAgent):
             
             logger.info(f"🔍 Looking up cluster: {cluster_name} (wants_firewall: {wants_firewall})")
             
+            # Extract auth_token and user_id from context
+            auth_token = context.get("auth_token")
+            user_id = context.get("user_id")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
+            
             # Step 1: Get all endpoints
-            endpoints = await api_executor_service.get_endpoints()
+            endpoints = await api_executor_service.get_endpoints(
+                auth_token=auth_token,
+                user_id=user_id,
+                user_type=user_type,
+                engagement_id=selected_engagement_id
+            )
             if not endpoints:
                 return {
                     "success": False,
@@ -242,7 +279,15 @@ class K8sClusterAgent(BaseResourceAgent):
             all_endpoint_ids = [ep.get("endpointId") for ep in endpoints if ep.get("endpointId")]
             
             # Step 2: Get engagement_id
-            engagement_id = await api_executor_service.get_engagement_id()
+            if selected_engagement_id:
+                engagement_id = selected_engagement_id
+                logger.info(f"✅ Using selected engagement ID from state: {engagement_id}")
+            else:
+                engagement_id = await api_executor_service.get_engagement_id(
+                    auth_token=auth_token,
+                    user_id=user_id,
+                    user_type=user_type
+                )
             if not engagement_id:
                 return {
                     "success": False,
@@ -260,7 +305,8 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="list",
                 params=api_payload,
-                user_roles=context.get("user_roles", [])
+                user_roles=context.get("user_roles", []),
+                auth_token=context.get("auth_token")
             )
             
             if not result.get("success"):
@@ -293,7 +339,10 @@ class K8sClusterAgent(BaseResourceAgent):
             logger.info(f"✅ Found cluster: {target_cluster.get('clusterName')}")
             
             # Step 4: Get department details for hierarchy lookup
-            dept_result = await api_executor_service.get_department_details()
+            dept_result = await api_executor_service.get_department_details(
+                user_id=user_id,
+                auth_token=auth_token
+            )
             
             if not dept_result or not dept_result.get("success"):
                 # Return basic cluster info without hierarchy
@@ -499,9 +548,15 @@ class K8sClusterAgent(BaseResourceAgent):
             
             logger.info(f"🔥 Looking for firewall for BU ID: {bu_id}, Endpoint ID: {endpoint_id}")
             
+            # Extract auth_token and user_id from context
+            auth_token = context.get("auth_token") if context else None
+            user_id = context.get("user_id") if context else None
+            
             # Use the direct list_firewalls method for better control
             result = await api_executor_service.list_firewalls(
-                endpoint_ids=[endpoint_id]
+                endpoint_ids=[endpoint_id],
+                auth_token=auth_token,
+                user_id=user_id
             )
             
             if not result.get("success"):
@@ -653,7 +708,8 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="create",
                 params=api_payload,
-                user_roles=context.get("user_roles", []))
+                user_roles=context.get("user_roles", []),
+                auth_token=context.get("auth_token"))
             if not result.get("success"):
                 return {
                     "success": False,
@@ -824,7 +880,7 @@ class K8sClusterAgent(BaseResourceAgent):
         
         return None
     
-    async def _get_filter_options(self, filter_type: str) -> Optional[Dict[str, Any]]:
+    async def _get_filter_options(self, filter_type: str, context: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
         """
         Get available filter options (BU/Environment/Zone) for user to select.
         
@@ -833,13 +889,19 @@ class K8sClusterAgent(BaseResourceAgent):
         
         Args:
             filter_type: "bu", "environment", or "zone"
+            context: Context with auth_token, user_id, etc.
             
         Returns:
             Response dict with formatted options for user selection, or None on error
         """
         try:
             # Fetch department details
-            dept_result = await api_executor_service.get_department_details()
+            user_id = context.get("user_id") if context else None
+            auth_token = context.get("auth_token") if context else None
+            dept_result = await api_executor_service.get_department_details(
+                user_id=user_id,
+                auth_token=auth_token
+            )
             
             if not dept_result.get("success"):
                 logger.warning("⚠️ Could not fetch department details for filtering")

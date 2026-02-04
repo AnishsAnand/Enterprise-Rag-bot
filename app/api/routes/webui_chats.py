@@ -31,6 +31,7 @@ from app.models.chat_models import (
     ChatListResponse, TagModel, MessageForm
 )
 from app.services.chat_service import chat_service
+from app.utils.token_utils import get_user_id_from_request, extract_user_from_token
 
 log = logging.getLogger(__name__)
 
@@ -41,25 +42,15 @@ router = APIRouter(prefix="/api/v1/chats", tags=["chats"])
 
 def get_current_user_id(request: Request) -> str:
     """
-    Extract user ID from request.
-    For now, uses a header or defaults to 'default_user'.
-    
-    In production, this should validate JWT tokens.
+    Extract user ID from Keycloak JWT token in Authorization header.
+    Falls back to X-User-Id/X-User-Email headers or default_user.
     """
-    # Try to get from header (OpenWebUI style)
-    user_id = request.headers.get("X-User-Id")
-    if user_id:
-        return user_id
-    
-    # Try authorization header
-    auth_header = request.headers.get("Authorization")
-    if auth_header and auth_header.startswith("Bearer "):
-        # In production: decode JWT and extract user_id
-        # For now, use a placeholder
-        pass
-    
-    # Default user for development
-    return "default_user"
+    return get_user_id_from_request(
+        authorization=request.headers.get("Authorization"),
+        x_user_id=request.headers.get("X-User-Id"),
+        x_user_email=request.headers.get("X-User-Email"),
+        default="default_user"
+    )
 
 
 # ==================== Chat List Endpoints ====================

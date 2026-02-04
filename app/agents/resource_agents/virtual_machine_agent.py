@@ -35,6 +35,14 @@ class VirtualMachineAgent(BaseResourceAgent):
     async def _list_vms(self, params: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
         """List VMs with intelligent filtering."""
         try:
+            # Extract auth info from context - MUST be done FIRST before any API calls
+            auth_token = context.get("auth_token") if context else None
+            user_id = context.get("user_id") if context else None
+            user_type = context.get("user_type") if context else None
+            selected_engagement_id = context.get("selected_engagement_id") if context else None
+            
+            logger.info(f"🔐 VM listing with auth_token: {'✓' if auth_token else '✗'}, user_id: {user_id}, engagement: {selected_engagement_id}")
+            
             # Handle both parameter naming conventions
             endpoint_ids = params.get("endpoints") or params.get("endpoint_ids") or []
             endpoint_names = params.get("endpoint_names") or []
@@ -69,11 +77,26 @@ class VirtualMachineAgent(BaseResourceAgent):
                     logger.info(f"✅ Inferred endpoint from query: {endpoint_filter}")
             if endpoint_filter and endpoint_filter not in endpoint_names:
                 endpoint_names = endpoint_names + [endpoint_filter]
+            
+            # Get IPC engagement ID if we have a selected engagement
+            ipc_engagement_id = None
+            if selected_engagement_id:
+                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                    engagement_id=selected_engagement_id,
+                    auth_token=auth_token,
+                    user_id=user_id
+                )
+                logger.info(f"✅ Using IPC engagement ID: {ipc_engagement_id} (from selected: {selected_engagement_id})")
+            
             logger.info(f"🔍 Listing VMs with filters: endpoint={endpoint_filter}, zone={zone_filter}, dept={department_filter}")
             result = await api_executor_service.list_vms(
+                ipc_engagement_id=ipc_engagement_id,
                 endpoint_filter=endpoint_filter,
                 zone_filter=zone_filter,
-                department_filter=department_filter)
+                department_filter=department_filter,
+                auth_token=auth_token,
+                user_id=user_id
+            )
             if not result.get("success"):
                 return {
                     "success": False,
@@ -90,11 +113,11 @@ class VirtualMachineAgent(BaseResourceAgent):
                 ]
             # Use common LLM formatter
             user_query = context.get("user_query", "") if context else ""
-            formatted_response = await self.format_response_with_llm(
+            formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=simplified_vms,
                 user_query=user_query,
-                context={"endpoint_names": endpoint_names})
+                context={"query_type": "general", "endpoint_names": endpoint_names})
             return {
                 "success": True,
                 "data": vms,

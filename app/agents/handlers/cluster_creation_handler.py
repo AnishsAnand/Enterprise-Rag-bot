@@ -69,19 +69,34 @@ class ClusterCreationHandler:
     
     def _check_cancel_intent(self, input_text: str, state: Any) -> Optional[Dict[str, Any]]:
         """
-        Handle explicit cancellation of the cluster creation workflow.
+        Check if user wants to cancel the cluster creation workflow.
         
-        This is called when AI has already identified intent as "cancel".
+        Only triggers on explicit cancel keywords/phrases.
         
         Args:
             input_text: User's current input
             state: Conversation state
             
         Returns:
-            Dict with cancel response
+            Dict with cancel response if cancel detected, None otherwise
         """
         if not input_text:
             return None
+        
+        input_lower = input_text.lower().strip()
+        
+        # Only trigger on explicit cancel keywords
+        cancel_keywords = [
+            "cancel", "abort", "stop", "quit", "exit", "nevermind", "never mind",
+            "forget it", "forget about it", "don't want to", "dont want to",
+            "i don't want", "i dont want", "stop this", "cancel this",
+            "cancel creation", "abort creation", "stop creating"
+        ]
+        
+        is_cancel = any(keyword in input_lower for keyword in cancel_keywords)
+        
+        if not is_cancel:
+            return None  # Not a cancel intent
         
         logger.info(f"🚫 Processing cancel request: '{input_text}'")
         

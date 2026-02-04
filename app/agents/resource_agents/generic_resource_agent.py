@@ -84,9 +84,16 @@ class GenericResourceAgent(BaseResourceAgent):
         Returns:
             Formatted list response
         """
+        # Extract auth context - MUST be done FIRST
         user_roles = context.get("user_roles", [])
         user_id = context.get("user_id")
+        auth_token = context.get("auth_token")
+        user_type = context.get("user_type")
+        selected_engagement_id = context.get("selected_engagement_id")
         user_query = context.get("user_query", f"list {resource_type}")
+        
+        logger.info(f"🔐 Generic resource listing with auth_token: {'✓' if auth_token else '✗'}, engagement: {selected_engagement_id}")
+        
         # Get resource config
         resource_config = self.RESOURCE_METHOD_MAP.get(resource_type)
         if resource_config:
@@ -96,28 +103,38 @@ class GenericResourceAgent(BaseResourceAgent):
             logger.info(f"📋 Using {method_name} for {display_name}")
             # Call the appropriate method
             if method_name == "list_endpoints":
-                result = await api_executor_service.list_endpoints()
+                # Use selected_engagement_id from context if available, otherwise let it fetch from session
+                engagement_id = selected_engagement_id if selected_engagement_id else None
+                result = await api_executor_service.list_endpoints(
+                    engagement_id=engagement_id,
+                    auth_token=auth_token, 
+                    user_id=user_id
+                )
             elif method_name == "get_business_units_list":
                 result = await api_executor_service.get_business_units_list(
                     ipc_engagement_id=None,
-                    user_id=user_id
+                    user_id=user_id,
+                    auth_token=auth_token
                 )
             elif method_name == "get_environments_list":
                 result = await api_executor_service.get_environments_list(
                     ipc_engagement_id=None,
-                    user_id=user_id
+                    user_id=user_id,
+                    auth_token=auth_token
                 )
             elif method_name == "get_zones_list":
                 result = await api_executor_service.get_zones_list(
                     ipc_engagement_id=None,
-                    user_id=user_id
+                    user_id=user_id,
+                    auth_token=auth_token
                 )
             else:
                 result = await api_executor_service.execute_operation(
                     resource_type=resource_type,
                     operation="list",
                     params=params,
-                    user_roles=user_roles
+                    user_roles=user_roles,
+                    auth_token=auth_token
                 )
         else:
             # Generic execution
@@ -126,7 +143,8 @@ class GenericResourceAgent(BaseResourceAgent):
                 resource_type=resource_type,
                 operation="list",
                 params=params,
-                user_roles=user_roles)
+                user_roles=user_roles,
+                auth_token=auth_token)
         if not result.get("success"):
             return {
                 "success": False,
@@ -166,7 +184,8 @@ class GenericResourceAgent(BaseResourceAgent):
             operation=operation,
             params=params,
             user_roles=user_roles,
-            user_id=user_id)
+            user_id=user_id,
+            auth_token=context.get("auth_token"))
         if not result.get("success"):
             return {
                 "success": False,

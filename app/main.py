@@ -20,9 +20,7 @@ from app.api.routes import (
     health,
     # chat_persistence,  # REMOVED: Using PostgreSQL-backed webui_chats instead
     orchestrator,
-    openwebui_auth,
-    tata_auth,
-    user_credentials,
+    # Auth routes removed - auth handled by UI via Keycloak tokens
 )
 from app.api.routes.user_chat import router as user_chat_router
 from app.api.routes.webui_chats import router as webui_chats_router
@@ -179,9 +177,7 @@ app.include_router(agent_chat.router, tags=["agent-chat"])
 # REMOVED: chat_persistence.router (in-memory) - replaced with PostgreSQL-backed webui_chats
 app.include_router(user_chat_router)
 app.include_router(orchestrator.router)
-app.include_router(openwebui_auth.router)
-app.include_router(tata_auth.router)
-app.include_router(user_credentials.router)
+# Auth routes removed - auth handled by UI via Keycloak tokens passed in Authorization header
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)
 

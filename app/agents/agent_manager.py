@@ -68,14 +68,16 @@ class AgentManager:
             logger.error(f"❌ Failed to initialize agent manager: {str(e)}")
             raise
     
-    async def process_request(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None) -> Dict[str, Any]:
+    async def process_request(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None,auth_token: str = None,user_type: str = None) -> Dict[str, Any]:
         """
         Process a user request through the multi-agent system.
         Args:
             user_input: User's message
             session_id: Conversation session ID
             user_id: User identifier
-            user_roles: User's roles for permission checking   
+            user_roles: User's roles for permission checking
+            auth_token: Bearer token from UI (Keycloak) for API authentication
+            user_type: User type (ENG or CUS) for engagement selection logic
         Returns:
             Dict with response and metadata
         """
@@ -86,13 +88,15 @@ class AgentManager:
             start_time = datetime.utcnow()
             logger.info(
                 f"📥 Processing request #{self.total_requests} | "
-                f"Session: {session_id} | User: {user_id}")
+                f"Session: {session_id} | User: {user_id} | Type: {user_type}")
             # Process through orchestrator
             result = await self.orchestrator.orchestrate(
                 user_input=user_input,
                 session_id=session_id,
                 user_id=user_id,
-                user_roles=user_roles or [])
+                user_roles=user_roles or [],
+                auth_token=auth_token,
+                user_type=user_type)
             # Add metadata
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()

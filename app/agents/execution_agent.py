@@ -273,10 +273,83 @@ All operations are routed through specialized resource agents for proper handlin
             user_roles = context.get("user_roles", []) if context else []
             user_id = context.get("user_id") if context else None
             user_query = context.get("user_query", state.user_query) if context else state.user_query
+            auth_token = context.get("auth_token") if context else state.auth_token
+            
+            # ENGAGEMENT CHECK: For operations that need IPC engagement ID, ensure we have a selected engagement
+            # This applies to ALL resource operations that call APIs
+            # - CUS users: Auto-select their engagement (they typically have one)
+            # - ENG users: Must select from multiple engagements
+            resources_needing_engagement = [
+                "k8s_cluster", "vm", "firewall", "kafka", "gitlab", "jenkins", 
+                "postgres", "documentdb", "container_registry", "managed_service", 
+                "load_balancer", "lb", "cluster", "virtual_machine", "endpoint",
+                "business_unit", "zone", "environment"
+            ]
+            
+            user_type = state.user_type or context.get("user_type") if context else None
+            
+            if state.resource_type in resources_needing_engagement and not state.selected_engagement_id:
+                logger.info(f"🏢 Resource {state.resource_type} needs engagement ID - user_type={user_type}")
+                
+                # Fetch engagements
+                engagements = await api_executor_service.get_engagements_list(auth_token=auth_token, user_id=user_id)
+                
+                if not engagements:
+                    logger.error("❌ No engagements found for user")
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": False,
+                        "error": "No engagements found",
+                        "output": "I couldn't find any engagements for your account. Please contact support."
+                    }
+                
+                # CUS users: Always auto-select (they typically have one engagement assigned)
+                if user_type == "CUS":
+                    single_eng = engagements[0]
+                    state.selected_engagement_id = single_eng.get("id")
+                    logger.info(f"✅ CUS user - auto-selected engagement: {state.selected_engagement_id}")
+                    # Also set in api_executor_service for API calls
+                    api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
+                    conversation_state_manager.update_session(state)
+                
+                # Multiple engagements AND not CUS → Must select (ENG or unknown user_type)
+                # This is the safe default - if we don't know the user type, ask them to select
+                elif len(engagements) > 1:
+                    logger.info(f"🔄 User has {len(engagements)} engagements (user_type={user_type}) - prompting for selection")
+                    
+                    # Store engagements in state
+                    state.pending_engagements = engagements
+                    state.status = ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
+                    conversation_state_manager.update_session(state)
+                    
+                    # Format the selection prompt
+                    prompt = "Before I can proceed, please select an engagement to work with:\n\n"
+                    for i, eng in enumerate(engagements, 1):
+                        eng_name = eng.get("engagementName") or eng.get("name", "Unknown")
+                        eng_id = eng.get("id")
+                        prompt += f"{i}. {eng_name} (ID: {eng_id})\n"
+                    prompt += "\nYou can say the number, name, or ID. You can change this later by saying 'switch engagement'."
+                    
+                    return {
+                        "agent_name": self.agent_name,
+                        "success": True,
+                        "output": prompt,
+                        "engagement_selection_required": True
+                    }
+                
+                # Single engagement - auto-select (any user type)
+                else:
+                    single_eng = engagements[0]
+                    state.selected_engagement_id = single_eng.get("id")
+                    logger.info(f"✅ Auto-selected single engagement: {state.selected_engagement_id} (user_type={user_type})")
+                    # Also set in api_executor_service for API calls
+                    api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
+                    conversation_state_manager.update_session(state)
+            
             # Check for multi-resource requests (e.g., "gitlab, kafka")
             if state.resource_type and ("," in state.resource_type or " and " in state.resource_type.lower()):
                 logger.info(f"🔀 Multi-resource request detected: {state.resource_type}")
-                return await self._execute_multi_resource(state, user_roles, session_id)
+                return await self._execute_multi_resource(state, user_roles, session_id, auth_token)
             # Execute via resource agent (single resource)
             execution_result = await self._execute_via_resource_agent(
                 resource_type=state.resource_type,
@@ -286,7 +359,10 @@ All operations are routed through specialized resource agents for proper handlin
                     "session_id": session_id,
                     "user_id": user_id,
                     "user_query": user_query,
-                    "user_roles": user_roles
+                    "user_roles": user_roles,
+                    "auth_token": auth_token,
+                    "user_type": state.user_type,
+                    "selected_engagement_id": state.selected_engagement_id
                 }
             )
             
@@ -342,14 +418,15 @@ All operations are routed through specialized resource agents for proper handlin
     # ========================================================================
     # MULTI-RESOURCE: Execute Multiple Resources in Parallel
     # =========================================================================
-    async def _execute_multi_resource(self,state: ConversationState,user_roles: List[str],session_id: str) -> Dict[str, Any]:
+    async def _execute_multi_resource(self,state: ConversationState,user_roles: List[str],session_id: str,auth_token: str = None) -> Dict[str, Any]:
         """
         Execute operations on multiple resource types in parallel.
         PRODUCTION: Supports load balancers in multi-resource queries. 
         Args:
             state: Conversation state with comma-separated resource_type
             user_roles: User roles for permission checking
-            session_id: Session identifier 
+            session_id: Session identifier
+            auth_token: Bearer token from UI (Keycloak) for API authentication
         Returns:
             Combined execution result
         """
@@ -392,7 +469,8 @@ All operations are routed through specialized resource agents for proper handlin
                     "user_id": state.user_id,
                     "user_query": state.user_query,
                     "user_roles": user_roles,
-                    "resource_type": resource_type})
+                    "resource_type": resource_type,
+                    "auth_token": auth_token})
             tasks.append((resource_type, task))
         if not tasks:
             return {

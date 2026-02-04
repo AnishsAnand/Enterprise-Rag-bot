@@ -15,6 +15,7 @@ class ConversationStatus(Enum):
     COLLECTING_PARAMS = "collecting_params"
     AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options (e.g., endpoints)
     AWAITING_FILTER_SELECTION = "awaiting_filter_selection"  # Waiting for user to select BU/Env/Zone filter
+    AWAITING_ENGAGEMENT_SELECTION = "awaiting_engagement_selection"  # Waiting for user to select engagement (ENG users)
     VALIDATING = "validating"
     READY_TO_EXECUTE = "ready_to_execute"
     EXECUTING = "executing"
@@ -27,15 +28,19 @@ class ConversationState:
     Manages the state of a multi-turn conversation for CRUD operations.
     Tracks intent, parameters, validation status, and execution flow.
     """
-    def __init__(self, session_id: str, user_id: str):
+    def __init__(self, session_id: str, user_id: str, auth_token: str = None, user_type: str = None):
         """
         Initialize conversation state.
         Args:
             session_id: Unique session identifier
             user_id: User identifier for permission checks
+            auth_token: Bearer token from UI (Keycloak) for API authentication
+            user_type: User type (ENG or CUS) for engagement selection logic
         """
         self.session_id = session_id
         self.user_id = user_id
+        self.auth_token = auth_token  # Store auth token for API calls
+        self.user_type = user_type  # Store user type (ENG=Engineer, CUS=Customer)
         self.created_at = datetime.utcnow()
         self.updated_at = datetime.utcnow()
         self.user_query: Optional[str] = None  # Store original query for context
@@ -64,6 +69,10 @@ class ConversationState:
         # Filter selection tracking (for BU/Environment/Zone filtering)
         self.pending_filter_options: Optional[List[Dict[str, Any]]] = None
         self.pending_filter_type: Optional[str] = None  # "bu", "environment", "zone"
+        
+        # Engagement selection tracking (for ENG users with multiple engagements)
+        self.pending_engagements: Optional[List[Dict[str, Any]]] = None
+        self.selected_engagement_id: Optional[int] = None
         
         logger.info(f"✅ Created conversation state for session {session_id}, user {user_id}")
     
@@ -263,6 +272,8 @@ class ConversationState:
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
+            "auth_token": self.auth_token,  # Include auth token for API calls
+            "user_type": self.user_type,  # Include user type (ENG/CUS)
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
             "user_query": self.user_query,
@@ -283,6 +294,8 @@ class ConversationState:
             "agent_handoffs": self.agent_handoffs,
             "pending_filter_options": self.pending_filter_options,
             "pending_filter_type": self.pending_filter_type,
+            "pending_engagements": self.pending_engagements,
+            "selected_engagement_id": self.selected_engagement_id,
             "metadata": metadata
         }
     
@@ -295,7 +308,7 @@ class ConversationState:
         Returns:
             ConversationState instance
         """
-        state = cls(data["session_id"], data["user_id"])
+        state = cls(data["session_id"], data["user_id"], auth_token=data.get("auth_token"), user_type=data.get("user_type"))
         # Handle datetime fields with both string and datetime types
         created_at = data.get("created_at")
         if isinstance(created_at, str):
@@ -332,6 +345,10 @@ class ConversationState:
         # Restore filter selection state
         state.pending_filter_options = data.get("pending_filter_options")
         state.pending_filter_type = data.get("pending_filter_type")
+        
+        # Restore engagement selection state
+        state.pending_engagements = data.get("pending_engagements")
+        state.selected_engagement_id = data.get("selected_engagement_id")
         
         # Restore additional attributes from metadata
         metadata = data.get("metadata", {})
@@ -404,12 +421,14 @@ class ConversationStateManager:
             logger.error(f"❌ Failed to load persistent state: {e}")
         return None
     
-    def create_session(self, session_id: str, user_id: str) -> ConversationState:
+    def create_session(self, session_id: str, user_id: str, auth_token: str = None, user_type: str = None) -> ConversationState:
         """
         Create a new conversation session.
         Args:
             session_id: Unique session identifier
-            user_id: User identifier 
+            user_id: User identifier
+            auth_token: Bearer token from UI (Keycloak) for API authentication
+            user_type: User type (ENG or CUS) for engagement selection logic
         Returns:
             New ConversationState instance
         """
@@ -425,7 +444,7 @@ class ConversationStateManager:
                 logger.info(f"📖 Restored session from persistent storage: {session_id}")
                 return existing
         # Create new session
-        state = ConversationState(session_id, user_id)
+        state = ConversationState(session_id, user_id, auth_token=auth_token, user_type=user_type)
         self._states[session_id] = state
         # Persist immediately
         self._save_to_persistent(state)

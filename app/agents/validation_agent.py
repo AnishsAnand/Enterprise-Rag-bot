@@ -9,7 +9,7 @@ import logging
 import json
 import re
 from app.agents.base_agent import BaseAgent
-from app.agents.state.conversation_state import conversation_state_manager
+from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
 from app.services.api_executor_service import api_executor_service
 from app.services.ai_service import ai_service
 from app.agents.handlers.cluster_creation_handler import ClusterCreationHandler
@@ -35,6 +35,11 @@ class ValidationAgent(BaseAgent):
         # Initialize handlers and tools
         self.cluster_creation_handler = ClusterCreationHandler()
         self.param_extractor = ParameterExtractor()
+        # Store auth token and user type for API calls
+        self._current_auth_token = None
+        self._current_user_type = None
+        self._current_user_id = None
+        self._current_engagement_id = None
         self.setup_agent()
 
     def get_system_prompt(self) -> str:
@@ -226,14 +231,27 @@ Remember: You have tools to fetch real-time data and match user input intelligen
             }, indent=2)
         except Exception as e:
             return json.dumps({"success": False, "error": str(e)})
-    async def _fetch_available_options(self, option_type: str) -> str:
+    async def _fetch_available_options(self, option_type: str, auth_token: str = None, user_type: str = None) -> str:
         """Fetch available options dynamically from API."""
         try:
             option_type_lower = option_type.lower().strip()
+            
+            # Use provided auth_token/user_type or fall back to instance variables
+            token = auth_token or self._current_auth_token
+            utype = user_type or self._current_user_type
+            user_id = getattr(self, '_current_user_id', None)
+            engagement_id = getattr(self, '_current_engagement_id', None)
 
             if option_type_lower in ["endpoints", "endpoint", "data_centers", "datacenters", "dc", "locations"]:
                 # Fetch available endpoints/data centers
-                endpoints = await api_executor_service.get_endpoints()
+                # Pass user_id and engagement_id to ensure we use the selected engagement
+                logger.info(f"🔍 Fetching endpoints with user_id={user_id}, engagement_id={engagement_id}")
+                endpoints = await api_executor_service.get_endpoints(
+                    auth_token=token, 
+                    user_type=utype,
+                    user_id=user_id,
+                    engagement_id=engagement_id
+                )
 
                 if endpoints:
                     formatted_options = []
@@ -256,9 +274,55 @@ Remember: You have tools to fetch real-time data and match user input intelligen
                         )
                     }, indent=2)
                 else:
+                    # No endpoints returned - check if engagement selection is needed
+                    # Use cached engagements from get_engagement_id to avoid double API call
+                    engagements = api_executor_service.get_cached_pending_engagements()
+                    if not engagements:
+                        # Fallback: fetch if not cached
+                        engagements = await api_executor_service.get_engagements_list(auth_token=token)
+                    
+                    if engagements:
+                        # CUS users: Auto-select first engagement (they typically have one)
+                        if utype == "CUS":
+                            logger.info(f"✅ CUS user - auto-selecting first engagement")
+                            # Auto-select and retry fetching endpoints
+                            first_eng = engagements[0]
+                            eng_id = first_eng.get("id")
+                            # This should be handled by the caller, but for now return empty
+                            return json.dumps({
+                                "option_type": "endpoints",
+                                "auto_selected_engagement": eng_id,
+                                "error": "CUS user - auto-selected engagement, please retry",
+                                "count": 0,
+                                "options": []
+                            }, indent=2)
+                        
+                        # Multiple engagements AND not CUS → Must select (ENG or unknown user_type)
+                        # This is the safe default - if we don't know the user type, ask them to select
+                        elif len(engagements) > 1:
+                            logger.info(f"🔄 User has {len(engagements)} engagements (user_type={utype}) - selection required")
+                            return json.dumps({
+                                "option_type": "engagement_selection_required",
+                                "engagements": engagements,
+                                "count": len(engagements),
+                                "error": "Please select an engagement first",
+                                "prompt_suggestion": self._format_engagement_selection_prompt(engagements)
+                            }, indent=2)
+                        
+                        # Single engagement - auto-select (any user type)
+                        else:
+                            logger.info(f"✅ Auto-selecting single engagement (user_type={utype}, count={len(engagements)})")
+                            return json.dumps({
+                                "option_type": "endpoints",
+                                "auto_selected_engagement": engagements[0].get("id"),
+                                "error": "Auto-selected engagement, please retry",
+                                "count": 0,
+                                "options": []
+                            }, indent=2)
+                    
                     return json.dumps({
                         "option_type": "endpoints",
-                        "error": "No endpoints available",
+                        "error": "No engagements or endpoints available",
                         "count": 0,
                         "options": []
                     })
@@ -285,6 +349,16 @@ Remember: You have tools to fetch real-time data and match user input intelligen
         except Exception as e:
             logger.error(f"Error fetching options: {e}")
             return json.dumps({"error": str(e)})
+    
+    def _format_engagement_selection_prompt(self, engagements: list) -> str:
+        """Format a user-friendly engagement selection prompt."""
+        prompt = "Before I can proceed, please select an engagement to work with:\n\n"
+        for i, eng in enumerate(engagements, 1):
+            name = eng.get("engagementName") or eng.get("name") or "Unknown"
+            eng_id = eng.get("id")
+            prompt += f"**{i}. {name}** (ID: {eng_id})\n"
+        prompt += "\nYou can say the number, name, or ID. You can change this later by saying 'switch engagement'."
+        return prompt
 
     async def _extract_location_from_query_json(self, input_json: str) -> str:
         """Use LLM to intelligently extract location/endpoint from user query (JSON input version)."""
@@ -540,7 +614,7 @@ If NO location is mentioned in user's response:
         Execute validation and parameter collection with INTELLIGENT tools.
         Args:
             input_text: User's response
-            context: Context including session_id and conversation_state
+            context: Context including session_id, conversation_state, and auth_token
         Returns:
             Dict with validation result
         """
@@ -555,6 +629,20 @@ If NO location is mentioned in user's response:
                     "success": False,
                     "error": "No conversation state found",
                     "output": "I couldn't find our conversation. Let's start over."}
+            
+            # Extract auth_token from context or state
+            auth_token = context.get("auth_token") if context else None
+            if not auth_token and state:
+                auth_token = state.auth_token
+            # Extract user_type from context or state
+            user_type = context.get("user_type") if context else None
+            if not user_type and state:
+                user_type = state.user_type
+            # Store in instance variables for tool methods to access
+            self._current_auth_token = auth_token
+            self._current_user_type = user_type
+            self._current_user_id = state.user_id if state else None
+            self._current_engagement_id = state.selected_engagement_id if state else None
             # USE INTELLIGENT TOOLS for parameter collection
             # SPECIAL HANDLING FOR K8S CLUSTER CREATION (CUSTOMER WORKFLOW)
             # This must be checked BEFORE missing_params check because cluster creation
@@ -678,6 +766,24 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         endpoints_json = await self._fetch_available_options("endpoints")
                         endpoints_data = json.loads(endpoints_json)
                         
+                        # CHECK: If engagement selection is required (ENG users with multiple engagements)
+                        if endpoints_data.get("option_type") == "engagement_selection_required":
+                            logger.info("🏢 Engagement selection required - prompting user")
+                            engagements = endpoints_data.get("engagements", [])
+                            
+                            # Store engagements in state for later selection
+                            state.pending_engagements = engagements
+                            state.status = ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
+                            conversation_state_manager.update_session(state)
+                            
+                            return {
+                                "agent_name": self.agent_name,
+                                "success": True,
+                                "output": endpoints_data.get("prompt_suggestion", "Please select an engagement."),
+                                "ready_to_execute": False,
+                                "engagement_selection_required": True
+                            }
+                        
                         if endpoints_data.get("options"):
                             all_endpoint_ids = [opt.get("id") for opt in endpoints_data["options"] if opt.get("id")]
                             all_endpoint_names = [opt.get("name") for opt in endpoints_data["options"] if opt.get("name")]
@@ -702,6 +808,25 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                     # Fetch available endpoints dynamically
                     endpoints_json = await self._fetch_available_options("endpoints")
                     endpoints_data = json.loads(endpoints_json)
+                    
+                    # CHECK: If engagement selection is required (ENG users with multiple engagements)
+                    if endpoints_data.get("option_type") == "engagement_selection_required":
+                        logger.info("🏢 Engagement selection required - prompting user")
+                        engagements = endpoints_data.get("engagements", [])
+                        
+                        # Store engagements in state for later selection
+                        state.pending_engagements = engagements
+                        state.status = ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
+                        conversation_state_manager.update_session(state)
+                        
+                        return {
+                            "agent_name": self.agent_name,
+                            "success": True,
+                            "output": endpoints_data.get("prompt_suggestion", "Please select an engagement."),
+                            "ready_to_execute": False,
+                            "engagement_selection_required": True
+                        }
+                    
                     if endpoints_data.get("options"):
                         available_options = endpoints_data["options"]
                         # ALWAYS use input_text for NEW requests (not cached state.user_query!)
@@ -785,7 +910,6 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             # Multiple matches - ask for clarification
                             clarification = match_result.get("clarification_needed", "")
                             # Set status to AWAITING_SELECTION - we need user to pick one
-                            from app.agents.state.conversation_state import ConversationStatus
                             state.status = ConversationStatus.AWAITING_SELECTION
                             # Persist state so it's available for next request
                             conversation_state_manager.update_session(state)
@@ -804,7 +928,6 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                 prompt = f"I found {len(available_options)} available data centers:\n{options_list}\n\nWhich one would you like? You can also say 'all'."
 
                             # CRITICAL: Set status to AWAITING_SELECTION so orchestrator knows we're waiting for user selection
-                            from app.agents.state.conversation_state import ConversationStatus
                             state.status = ConversationStatus.AWAITING_SELECTION
                             logger.info(f"🔄 Set conversation status to AWAITING_SELECTION for session {state.session_id}")
                             # Persist state so it's available for next request

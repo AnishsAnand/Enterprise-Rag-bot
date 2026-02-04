@@ -838,13 +838,16 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                         candidate = output_text[start_idx:i+1]
                         try:
                             parsed = json.loads(candidate)
-                            if isinstance(parsed, dict):
+                            # IMPORTANT: Validate parsed JSON has expected intent keys
+                            # This prevents matching empty {} or unrelated JSON fragments
+                            if isinstance(parsed, dict) and ("intent_detected" in parsed or "resource_type" in parsed):
                                 logger.debug("✅ Parsed JSON using brace matching")
                                 return parsed
                         except json.JSONDecodeError:
-                            # Reset and continue looking for another JSON block
-                            start_idx = -1
-                            continue
+                            pass
+                        # Reset and continue looking for another JSON block
+                        start_idx = -1
+                        continue
 
             # Method 3: Last resort - try original approach with { to end
             start_idx = output_text.find('{')
@@ -855,11 +858,23 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                     candidate = output_text[start_idx:end_idx+1]
                     try:
                         parsed = json.loads(candidate)
-                        if isinstance(parsed, dict):
+                        # IMPORTANT: Validate parsed JSON has expected intent keys
+                        if isinstance(parsed, dict) and ("intent_detected" in parsed or "resource_type" in parsed):
                             logger.debug("✅ Parsed JSON using first-last brace method")
                             return parsed
                     except json.JSONDecodeError:
                         pass
+
+            # Method 4: Parse markdown bullet point format (fallback for non-JSON LLM responses)
+            # Handles output like:
+            # - intent_detected: true
+            # - resource_type: k8s_cluster
+            # - operation: list
+            logger.info("🔍 JSON parsing failed, trying bullet point format fallback...")
+            bullet_result = self._parse_bullet_format(output_text)
+            if bullet_result and bullet_result.get("intent_detected"):
+                logger.info(f"✅ Parsed intent from markdown bullet format: {bullet_result.get('resource_type')}/{bullet_result.get('operation')}")
+                return bullet_result
 
             logger.warning("⚠️ Could not locate JSON in LLM output. Returning default structure.")
             default_result["ambiguities"] = ["Could not parse LLM JSON response"]
@@ -869,4 +884,79 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             logger.warning("⚠️ Exception while parsing intent output: %s", str(e))
             default_result["ambiguities"] = ["Parsing error"]
             return default_result
+
+    def _parse_bullet_format(self, output_text: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse markdown bullet point format as fallback when LLM doesn't return JSON.
+        Handles output like:
+        - **intent_detected**: true
+        - **resource_type**: k8s_cluster
+        - **operation**: list
+        Or plain format:
+        - intent_detected: true
+        - resource_type: k8s_cluster
+        """
+        try:
+            result = {
+                "intent_detected": False,
+                "resource_type": None,
+                "operation": None,
+                "extracted_params": {},
+                "confidence": 0.0,
+                "ambiguities": [],
+                "clarification_needed": None
+            }
+            
+            # Look for bullet point patterns - handle both bold (**key**:) and plain (key:) formats
+            # Pattern explanation: -?\s* = optional dash and whitespace, \*{0,2} = 0-2 asterisks for bold
+            patterns = {
+                "intent_detected": r'-?\s*\*{0,2}intent_detected\*{0,2}[:\s]+(\w+)',
+                "resource_type": r'-?\s*\*{0,2}resource_type\*{0,2}[:\s]+(\w+)',
+                "operation": r'-?\s*\*{0,2}operation\*{0,2}[:\s]+(\w+)',
+                "confidence": r'-?\s*\*{0,2}confidence\*{0,2}[:\s]+([\d.]+)',
+            }
+            
+            for key, pattern in patterns.items():
+                match = re.search(pattern, output_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1).strip()
+                    if key == "intent_detected":
+                        result[key] = value.lower() == "true"
+                    elif key == "confidence":
+                        try:
+                            result[key] = float(value)
+                        except ValueError:
+                            result[key] = 0.8 if result.get("intent_detected") else 0.0
+                    else:
+                        result[key] = value
+            
+            # Check for extracted_params: {} or similar - handle bold format too
+            params_match = re.search(r'\*{0,2}extracted_params\*{0,2}[:\s]*\{([^}]*)\}', output_text, re.IGNORECASE)
+            if params_match:
+                params_str = params_match.group(1).strip()
+                if params_str:
+                    # Try to parse as JSON-like key:value pairs
+                    # First, try to fix common issues: unquoted keys/values
+                    try:
+                        result["extracted_params"] = json.loads("{" + params_str + "}")
+                    except json.JSONDecodeError:
+                        # Try to fix unquoted keys: cluster_name: "blr-paas" -> "cluster_name": "blr-paas"
+                        fixed_params = re.sub(r'(\w+):', r'"\1":', params_str)
+                        # Also quote unquoted string values
+                        fixed_params = re.sub(r':\s*([a-zA-Z][\w-]*)\s*([,}]|$)', r': "\1"\2', fixed_params)
+                        try:
+                            result["extracted_params"] = json.loads("{" + fixed_params + "}")
+                        except json.JSONDecodeError:
+                            logger.debug(f"⚠️ Could not parse extracted_params: {params_str}")
+            
+            # Only return if we found meaningful data
+            if result.get("resource_type") and result.get("operation"):
+                logger.info(f"✅ Bullet parse result: resource={result['resource_type']}, op={result['operation']}, params={result.get('extracted_params')}")
+                return result
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Bullet format parsing failed: {e}")
+            return None
 

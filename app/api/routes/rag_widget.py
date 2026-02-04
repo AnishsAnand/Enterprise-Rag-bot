@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File, Request
 from pydantic import BaseModel, HttpUrl, Field
 from typing import List, Dict, Any, Optional
+from app.utils.token_utils import get_user_id_from_request, get_token_from_request
 import asyncio
 from datetime import datetime
 import mimetypes
@@ -867,18 +868,31 @@ async def call_maybe_async(fn, *args, **kwargs):
 # ===================== API Endpoints =====================
 
 @router.post("/widget/query")
-async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks):
+async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks, http_request: Request = None):
     """
     Enhanced query processing with automatic orchestration.
     Detects user intent and automatically executes appropriate tasks.
     Routes to Agent Manager for resource operations with multi-turn conversation support.
+    
+    User authentication is extracted from the Authorization header (Keycloak token).
     """
     try:
         query = request.query.strip()
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
+        
+        # Extract user_id from Authorization header if not provided in request body
+        if not request.user_id and http_request:
+            request.user_id = get_user_id_from_request(
+                authorization=http_request.headers.get("Authorization"),
+                x_user_id=http_request.headers.get("X-User-Id"),
+                x_user_email=http_request.headers.get("X-User-Email"),
+                default=None
+            )
+            if request.user_id:
+                logger.info(f"📋 Extracted user_id from token: {request.user_id}")
 
-        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute}, force_rag_only: {request.force_rag_only})")
+        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute}, force_rag_only: {request.force_rag_only}, user: {request.user_id})")
         
         # ==================== STEP 1: Session Management ====================
         session_id = await _get_or_create_session_id(request)
@@ -895,11 +909,24 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         # ==================== STEP 3: Route to Agent Manager if Applicable ====================
         if should_route_to_agent:
             logger.info(f"🎯 Routing to Agent Manager")
+            # Extract auth token from Authorization header
+            auth_token = None
+            user_type = None
+            if http_request:
+                auth_header = http_request.headers.get("Authorization", "")
+                if auth_header.startswith("Bearer "):
+                    auth_token = auth_header.replace("Bearer ", "")
+                # Extract user type (ENG = Engineer, CUS = Customer)
+                user_type = http_request.headers.get("usertype") or http_request.headers.get("Usertype")
+                if user_type:
+                    logger.info(f"👤 User type from header: {user_type}")
             return await _handle_agent_routing(
                 query=query,
                 session_id=session_id,
                 request=request,
-                background_tasks=background_tasks
+                background_tasks=background_tasks,
+                auth_token=auth_token,
+                user_type=user_type
             )
         
         # ==================== STEP 4: Standard RAG Flow ====================
@@ -1146,7 +1173,8 @@ def _check_conversation_context(existing_state, query_lower: str) -> bool:
     return False
 
 async def _handle_agent_routing(query: str, session_id: str, request: WidgetQueryRequest, 
-                                background_tasks: BackgroundTasks) -> dict:
+                                background_tasks: BackgroundTasks, auth_token: str = None,
+                                user_type: str = None) -> dict:
     """Handle routing to agent manager and process response."""
     from app.services.openwebui_formatter import format_agent_response_for_openwebui
     
@@ -1159,7 +1187,9 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
         user_input=query,
         session_id=session_id,
         user_id=request.user_id or "widget_user",
-        user_roles=user_roles)
+        user_roles=user_roles,
+        auth_token=auth_token,
+        user_type=user_type)
     
     logger.info(f"✅ Agent processing complete: routing={agent_result.get('routing')}, "
                f"success={agent_result.get('success')}")

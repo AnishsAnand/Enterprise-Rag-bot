@@ -141,15 +141,21 @@ class ManagedServicesAgent(BaseResourceAgent):
             service_display_name = self.SERVICE_DISPLAY_NAMES.get(service_type, service_type)
             logger.info(f"📋 Listing {service_display_name} services")
             
-            # Get user roles from context for permissions
+            # Get user roles and auth from context - MUST be done FIRST
             user_roles = context.get("user_roles", [])
+            auth_token = context.get("auth_token")
+            user_id = context.get("user_id")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
+            
+            logger.info(f"🔐 Managed services listing with auth_token: {'✓' if auth_token else '✗'}, engagement: {selected_engagement_id}")
             
             # Get endpoint IDs
             endpoint_ids = params.get("endpoints", [])
             
             if not endpoint_ids:
                 # List all
-                datacenters = await self.get_datacenters(user_roles=user_roles)
+                datacenters = await self.get_datacenters(user_roles=user_roles, auth_token=auth_token, user_id=user_id, user_type=user_type)
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             
             if not endpoint_ids:
@@ -161,10 +167,23 @@ class ManagedServicesAgent(BaseResourceAgent):
             
             logger.info(f"🔍 Querying endpoints: {endpoint_ids}")
             
+            # Get IPC engagement ID if we have a selected engagement
+            ipc_engagement_id = None
+            if selected_engagement_id:
+                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                    engagement_id=selected_engagement_id,
+                    auth_token=auth_token,
+                    user_id=user_id
+                )
+                logger.info(f"✅ Using IPC engagement ID: {ipc_engagement_id} (from selected: {selected_engagement_id})")
+            
             # Call API
             result = await api_executor_service.list_managed_services(
                 service_type=service_type,
-                endpoint_ids=endpoint_ids
+                endpoint_ids=endpoint_ids,
+                ipc_engagement_id=ipc_engagement_id,
+                auth_token=auth_token,
+                user_id=user_id
             )
             
             if not result.get("success"):
@@ -182,13 +201,14 @@ class ManagedServicesAgent(BaseResourceAgent):
             
             logger.info(f"✅ Found {len(services)} {service_display_name} service(s)")
             
-            # Format response with LLM
+            # Format response with agentic formatter (prevents hallucination)
             user_query = context.get("user_query", "")
-            formatted_response = await self.format_response_with_llm(
+            formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=services,
                 user_query=user_query,
                 context={
+                    "query_type": "general",
                     "service_type": service_type,
                     "service_display_name": service_display_name,
                     "endpoint_names": params.get("endpoint_names", [])

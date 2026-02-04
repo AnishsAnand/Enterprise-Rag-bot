@@ -40,6 +40,11 @@ from app.services.openwebui_formatter import (
     format_agent_response_for_openwebui,
     format_error_for_openwebui
 )
+from app.utils.token_utils import (
+    get_user_id_from_request,
+    get_token_from_request,
+    extract_user_from_token
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +165,20 @@ def create_stream_chunk(
 async def get_rich_content_from_widget(
     query: str,
     user_id: Optional[str],
-    session_id: str
+    session_id: str,
+    auth_token: Optional[str] = None,
+    user_type: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Call the widget endpoint to get rich content with steps and images.
     This ensures we get properly formatted, step-by-step responses.
+    
+    Args:
+        query: User query
+        user_id: User identifier
+        session_id: Session ID for conversation continuity
+        auth_token: Keycloak bearer token for pass-through authentication
+        user_type: User type (ENG or CUS) for engagement selection logic
     
     Returns:
         Dict with answer, steps, images, and metadata, or None if call fails
@@ -188,11 +202,18 @@ async def get_rich_content_from_widget(
             "user_id": user_id or "openwebui_user"
         }
         
+        # Build headers - pass through auth token and user type if available
+        headers = {"Content-Type": "application/json"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        if user_type:
+            headers["usertype"] = user_type
+        
         logger.info(f"[OpenWebUI] Calling widget endpoint for rich content: {query[:50]}")
         
         # Make async HTTP call to widget (longer timeout for SSE/streaming operations)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(widget_url, json=widget_payload)
+            response = await client.post(widget_url, json=widget_payload, headers=headers)
             
             if response.status_code == 200:
                 widget_response = response.json()
@@ -225,7 +246,9 @@ async def build_rich_response(
     query: str,
     user_id: Optional[str],
     session_id: str,
-    temperature: float = 0.7
+    temperature: float = 0.7,
+    auth_token: Optional[str] = None,
+    user_type: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Build a rich response with steps, images, and proper formatting.
@@ -235,12 +258,20 @@ async def build_rich_response(
     2. If widget fails, fall back to direct RAG
     3. Format everything for OpenWebUI display
     
+    Args:
+        query: User query
+        user_id: User identifier
+        session_id: Session ID for conversation continuity
+        temperature: AI temperature setting
+        auth_token: Keycloak bearer token for pass-through authentication
+        user_type: User type (ENG or CUS) for engagement selection logic
+    
     Returns:
         Dict with formatted_answer, metadata, and confidence
     """
     
     # STEP 1: Try to get rich content from widget
-    widget_response = await get_rich_content_from_widget(query, user_id, session_id)
+    widget_response = await get_rich_content_from_widget(query, user_id, session_id, auth_token, user_type)
     
     if widget_response:
         # Widget succeeded - extract rich content
@@ -481,7 +512,33 @@ async def chat_completions(
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
-        user_id = request_data.user or "openwebui_user"
+        # Extract user ID from Keycloak token in Authorization header
+        # Falls back to request_data.user or X-User-* headers
+        user_id = get_user_id_from_request(
+            authorization=request.headers.get("Authorization"),
+            x_user_id=request.headers.get("X-User-Id"),
+            x_user_email=request.headers.get("X-User-Email"),
+            default=request_data.user or "openwebui_user"
+        )
+        
+        # Get raw token for pass-through to downstream APIs
+        # Try multiple sources: Authorization header, X-Auth-Token header, X-Access-Token header
+        auth_token = get_token_from_request(request.headers.get("Authorization"))
+        if not auth_token:
+            # Fallback: Check custom headers that OpenWebUI might use
+            auth_token = request.headers.get("X-Auth-Token") or request.headers.get("X-Access-Token")
+            if auth_token:
+                logger.info(f"🔐 Using auth token from custom header (X-Auth-Token/X-Access-Token)")
+        
+        if auth_token:
+            logger.debug(f"🔐 Auth token extracted: {auth_token[:20]}...{auth_token[-10:]}")
+        else:
+            logger.warning(f"⚠️ No auth token found in request headers. Available headers: {list(request.headers.keys())}")
+        
+        # Extract user type (ENG = Engineer, CUS = Customer)
+        user_type = request.headers.get("usertype") or request.headers.get("Usertype") or request.headers.get("X-User-Type")
+        if user_type:
+            logger.info(f"👤 User type from header: {user_type}")
         
         # Create stable session ID for conversation continuity
         # Use the FIRST user message as the anchor for session ID (not the changing history)
@@ -515,7 +572,9 @@ async def chat_completions(
             query=query,
             user_id=user_id,
             session_id=session_id,
-            temperature=request_data.temperature or 0.7
+            temperature=request_data.temperature or 0.7,
+            auth_token=auth_token,  # Pass Keycloak token for downstream API calls
+            user_type=user_type  # Pass user type for engagement selection logic
         )
         
         formatted_answer = response_data["formatted_answer"]

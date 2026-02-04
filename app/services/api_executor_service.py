@@ -11,11 +11,7 @@ import re
 from datetime import datetime, timedelta
 import asyncio
 logger = logging.getLogger(__name__)
-try:
-    from app.services.user_credentials_service import user_credentials_service
-except ImportError:
-    user_credentials_service = None
-    logger.warning("⚠️ UserCredentialsService not available, will use env vars only")
+# Auth is now handled by UI - tokens passed via Authorization header from Keycloak
 
 class APIExecutorService:
     """
@@ -46,6 +42,8 @@ class APIExecutorService:
         # Keep env vars as fallback for backward compatibility
         self.default_auth_email = os.getenv("API_AUTH_EMAIL", "")
         self.default_auth_password = os.getenv("API_AUTH_PASSWORD", "")
+        # Development mode: skip authentication if explicitly disabled
+        self.auth_enabled = os.getenv("API_AUTH_ENABLED", "true").lower() == "true"
         # Per-user session storage for engagement IDs and other frequently accessed data
         self.user_sessions: Dict[str, Dict[str, Any]] = {}
         self.session_cache_duration = timedelta(hours=24)  
@@ -159,7 +157,10 @@ class APIExecutorService:
         email = auth_email or self.default_auth_email
         password = auth_password or self.default_auth_password
         if not email or not password:
-            logger.error("❌ API credentials not configured (email or password missing)")
+            if self.auth_enabled:
+                logger.error("❌ API credentials not configured (email or password missing)")
+            else:
+                logger.debug("ℹ️ API credentials not configured (auth disabled)")
             return None
         try:
             client = await self._get_http_client()
@@ -213,6 +214,11 @@ class APIExecutorService:
         Returns:
             True if valid token available, False otherwise
         """
+        # Skip authentication if disabled (development mode)
+        if not self.auth_enabled:
+            logger.warning("⚠️ Authentication is disabled (development mode)")
+            return True
+            
         # Use default user_id if not provided
         cache_key = user_id or "default"
         async with self.token_lock:
@@ -271,46 +277,48 @@ class APIExecutorService:
     
     def _get_user_credentials(self, user_id: str = None) -> Optional[Dict[str, str]]:
         """
-        Get API credentials for a user.
-        First tries to get from database by email, then by username, then falls back to env vars.
+        Get API credentials for fallback (service-to-service calls).
+        Auth is now primarily handled via tokens passed from UI.
         Args:
-            user_id: User identifier (can be email or username)  
+            user_id: User identifier (for logging)
         Returns:
-            Dict with 'email' and 'password' keys, or None if not found
+            Dict with 'email' and 'password' keys from env vars, or None if not configured
         """
-        if user_credentials_service and user_id:
-            credentials = user_credentials_service.get_credentials_by_email(user_id)
-            if credentials:
-                logger.info(f"✅ Got credentials by email for: {user_id}")
-                return credentials
-            # Then try by username
-            credentials = user_credentials_service.get_user_credentials(user_id)
-            if credentials:
-                logger.info(f"✅ Got credentials by username for: {user_id}")
-                return credentials
-        # Fall back to env vars if user_id not provided or credentials not found
+        # Fall back to env vars for service-to-service calls (e.g., background jobs)
         if self.default_auth_email and self.default_auth_password:
-            if user_id:
-                logger.info(f"⚠️ No stored credentials for {user_id}, using default from env")
+            logger.debug(f"Using default credentials from env (user: {user_id or 'service'})")
             return {
                 "email": self.default_auth_email,
                 "password": self.default_auth_password}
-        logger.warning(f"❌ No credentials found for user: {user_id}")
+        logger.warning(f"❌ No credentials available (user: {user_id})")
         return None
     
-    async def _get_auth_headers(self,user_id: str = None,auth_email: str = None,auth_password: str = None) -> Dict[str, str]:
+    async def _get_auth_headers(self,user_id: str = None,auth_email: str = None,auth_password: str = None,auth_token: str = None) -> Dict[str, str]:
         """
         Get authentication headers with current token for a user.
         Args:
             user_id: User identifier (for per-user token caching)
             auth_email: Email for authentication (uses default from env if not provided)
             auth_password: Password for authentication (uses default from env if not provided)
+            auth_token: Bearer token from UI (Keycloak) - takes precedence over email/password
         Returns:
             Dictionary of headers including authorization
         """
         headers = {
             "Content-Type": "application/json"}
-        # Ensure we have a valid token
+        
+        # Skip token logic if auth is disabled
+        if not self.auth_enabled:
+            logger.debug("⚠️ Auth disabled - returning basic headers")
+            return headers
+        
+        # If auth_token provided (from Keycloak/UI), use it directly
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+            logger.debug("✅ Using Bearer token from UI (Keycloak)")
+            return headers
+            
+        # Otherwise, fetch token using email/password (legacy flow)
         await self._ensure_valid_token(user_id, auth_email, auth_password)
         # Get token for this user
         cache_key = user_id or "default"
@@ -329,54 +337,170 @@ class APIExecutorService:
             await self.http_client.aclose()
             self.http_client = None
 
-    async def get_engagement_id(self, force_refresh: bool = False, user_id: str = None) -> Optional[int]:
+    async def get_engagements_list(self, auth_token: str = None, user_id: str = None) -> Optional[List[Dict[str, Any]]]:
+        """
+        Fetch list of all available engagements for the user.
+        
+        Args:
+            auth_token: Bearer token from UI (Keycloak)
+            user_id: User ID for session lookup
+            
+        Returns:
+            List of engagement dicts with id, name, etc. or None if failed
+        """
+        logger.info("🔍 Fetching engagements list from API...")
+        result = await self.execute_operation(
+            resource_type="engagement",
+            operation="get",
+            params={},
+            user_roles=None,
+            auth_token=auth_token)
+        
+        if result.get("success") and result.get("data"):
+            data = result["data"]
+            if isinstance(data, dict) and "data" in data:
+                engagements = data["data"]
+                logger.info(f"✅ Found {len(engagements)} engagements")
+                return engagements
+        
+        logger.error("❌ Failed to fetch engagements list")
+        return None
+    
+    async def set_engagement_id(self, user_id: str, engagement_id: int, engagement_data: Dict = None) -> bool:
+        """
+        Set/update the selected engagement ID for a user session.
+        Called when ENG user selects an engagement.
+        
+        Args:
+            user_id: User ID for session
+            engagement_id: Selected engagement ID
+            engagement_data: Full engagement data dict (optional)
+            
+        Returns:
+            True if successful
+        """
+        await self._update_user_session(
+            user_id=user_id,
+            paas_engagement_id=engagement_id,
+            engagement_data=engagement_data
+        )
+        logger.info(f"✅ Set engagement ID {engagement_id} for user {user_id}")
+        return True
+    
+    async def get_engagement_id(self, force_refresh: bool = False, user_id: str = None, auth_token: str = None, user_type: str = None) -> Optional[int]:
         """
         Get engagement ID for the authenticated user.
         Uses per-user session storage to avoid repeated API calls.
+        
+        For CUS (Customer): Auto-selects the single engagement returned by API
+        For ENG (Engineer): Checks session for selected engagement, returns None if not selected
+        
         Args:
             force_refresh: Force fetch even if cached
-            user_id: User ID (email) for session lookup  
+            user_id: User ID (email) for session lookup
+            auth_token: Bearer token from UI (Keycloak)
+            user_type: User type from header (ENG or CUS)
         Returns:
-            PAAS Engagement ID or None if failed
+            PAAS Engagement ID or None if selection needed (for ENG) or failed
         """
         if not user_id:
             user_id = self._get_user_id_from_email()
         
-        # Check user session cache first
+        # Check user session cache first (works for both ENG and CUS once selected)
         if not force_refresh:
             session = await self._get_user_session(user_id)
             if session and "paas_engagement_id" in session:
                 paas_id = session["paas_engagement_id"]
                 logger.debug(f"✅ Using cached PAAS engagement ID from session: {paas_id}")
                 return paas_id
-        # Fetch engagement details from API
-        logger.info("🔍 Fetching engagement details from API...")
-        result = await self.execute_operation(
-            resource_type="engagement",
-            operation="get",
-            params={},
-            user_roles=None  )
         
-        if result.get("success") and result.get("data"):
-            data = result["data"]
-            if isinstance(data, dict) and "data" in data:
-                engagements = data["data"]
-                if engagements and len(engagements) > 0:
-                    engagement = engagements[0]  
-                    paas_engagement_id = engagement.get("id")
-
-                    await self._update_user_session(user_id=user_id,paas_engagement_id=paas_engagement_id,engagement_data=engagement)
-                    # Also update legacy cache for backward compatibility
-                    self.cached_engagement = engagement
-                    self.engagement_cache_time = datetime.utcnow()
-                    
-                    logger.info(f"✅ Cached PAAS engagement: {engagement.get('engagementName')} (ID: {paas_engagement_id})")
-                    return paas_engagement_id
+        # Fetch engagements from API
+        logger.info(f"🔍 Fetching engagement details from API (user_type: {user_type})...")
+        engagements = await self.get_engagements_list(auth_token=auth_token, user_id=user_id)
         
-        logger.error("❌ Failed to fetch engagement ID")
+        if not engagements:
+            logger.error("❌ Failed to fetch engagement ID - no engagements returned")
+            return None
+        
+        # CUS (Customer): Auto-select the single engagement
+        if user_type == "CUS" or len(engagements) == 1:
+            engagement = engagements[0]
+            paas_engagement_id = engagement.get("id")
+            
+            await self._update_user_session(
+                user_id=user_id,
+                paas_engagement_id=paas_engagement_id,
+                engagement_data=engagement
+            )
+            # Also update legacy cache for backward compatibility
+            self.cached_engagement = engagement
+            self.engagement_cache_time = datetime.utcnow()
+            
+            logger.info(f"✅ Auto-selected engagement: {engagement.get('engagementName')} (ID: {paas_engagement_id})")
+            return paas_engagement_id
+        
+        # ENG (Engineer) with multiple engagements: Need to prompt for selection
+        # Cache the engagements so we don't need to fetch them again
+        self._pending_engagements = engagements
+        self._pending_engagements_user = user_id
+        logger.info(f"🔄 ENG user has {len(engagements)} engagements - selection required")
+        return None  # Caller should handle engagement selection flow
+    
+    def get_cached_pending_engagements(self, user_id: str = None) -> Optional[List[Dict[str, Any]]]:
+        """Get cached pending engagements if available (to avoid double API call)."""
+        if hasattr(self, '_pending_engagements') and self._pending_engagements:
+            # Check if it's for the same user
+            if not user_id or getattr(self, '_pending_engagements_user', None) == user_id:
+                engagements = self._pending_engagements
+                # Clear cache after retrieval
+                self._pending_engagements = None
+                self._pending_engagements_user = None
+                return engagements
         return None
     
-    async def get_ipc_engagement_id(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Optional[int]:
+    async def get_engagement_selection_prompt(self, auth_token: str = None, user_id: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Get engagement selection prompt for ENG users with multiple engagements.
+        
+        Args:
+            auth_token: Bearer token from UI
+            user_id: User ID
+            
+        Returns:
+            Dict with engagements list and formatted prompt, or None if failed/not needed
+        """
+        engagements = await self.get_engagements_list(auth_token=auth_token, user_id=user_id)
+        
+        if not engagements:
+            return None
+        
+        if len(engagements) == 1:
+            # Only one engagement, no selection needed
+            return None
+        
+        # Format engagements for display
+        options = []
+        for i, eng in enumerate(engagements, 1):
+            options.append({
+                "index": i,
+                "id": eng.get("id"),
+                "name": eng.get("engagementName") or eng.get("name"),
+                "description": eng.get("description", "")
+            })
+        
+        prompt = "Please select an engagement to work with:\n\n"
+        for opt in options:
+            prompt += f"**{opt['index']}. {opt['name']}** (ID: {opt['id']})\n"
+        prompt += "\nYou can say the number, name, or ID. You can also change this later by saying 'switch engagement'."
+        
+        return {
+            "engagements": engagements,
+            "options": options,
+            "prompt": prompt,
+            "needs_selection": True
+        }
+    
+    async def get_ipc_engagement_id(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Optional[int]:
         """
         Convert PAAS engagement ID to IPC engagement ID.
         Uses per-user session storage to avoid repeated API calls.
@@ -384,6 +508,7 @@ class APIExecutorService:
             engagement_id: PAAS Engagement ID (fetches if not provided)
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI (Keycloak)
         Returns:
             IPC Engagement ID or None if failed
         """
@@ -398,7 +523,7 @@ class APIExecutorService:
                 return ipc_id
         # Get PAAS engagement ID if not provided
         if engagement_id is None:
-            engagement_id = await self.get_engagement_id(user_id=user_id)
+            engagement_id = await self.get_engagement_id(user_id=user_id, auth_token=auth_token)
             if not engagement_id:
                 return None
         logger.info(f"🔄 Converting PAAS engagement {engagement_id} to IPC engagement ID...")
@@ -406,7 +531,8 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="get_ipc_engagement",
             params={"engagement_id": engagement_id},
-            user_roles=None
+            user_roles=None,
+            auth_token=auth_token
         )
         if result.get("success") and result.get("data"):
             data = result["data"]
@@ -423,14 +549,16 @@ class APIExecutorService:
                     return ipc_engid
         logger.error("❌ Failed to get IPC engagement ID")
         return None
-    async def get_endpoints(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Optional[List[Dict[str, Any]]]:
+    async def get_endpoints(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None, user_type: str = None) -> Optional[List[Dict[str, Any]]]:
         """
         Get available endpoints (data centers) for an engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             engagement_id: Engagement ID (fetches if not provided)
             user_id: User ID (email) for session lookup
-            force_refresh: Force fetch even if cached  
+            force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI (Keycloak)
+            user_type: User type (ENG or CUS) for engagement selection logic
         Returns:
             List of endpoint dicts or None if failed
         """
@@ -445,16 +573,27 @@ class APIExecutorService:
                 return endpoints
         # Get engagement ID if not provided
         if engagement_id is None:
-            engagement_id = await self.get_engagement_id(user_id=user_id)
-            if not engagement_id:
-                return None
+            # First check if there's a cached engagement in session
+            session = await self._get_user_session(user_id)
+            if session and "paas_engagement_id" in session:
+                engagement_id = session["paas_engagement_id"]
+                logger.info(f"✅ Using engagement ID from session cache: {engagement_id}")
+            else:
+                engagement_id = await self.get_engagement_id(user_id=user_id, auth_token=auth_token, user_type=user_type)
+                if not engagement_id:
+                    # For ENG users with multiple engagements, return None to trigger selection flow
+                    logger.info(f"🔄 No engagement ID - selection may be required (user_type: {user_type})")
+                    return None
+        else:
+            logger.info(f"✅ Using provided engagement ID: {engagement_id}")
         
         logger.info(f"🔍 Fetching endpoints for engagement {engagement_id}...")
         result = await self.execute_operation(
             resource_type="endpoint",
             operation="list",
             params={"engagement_id": engagement_id},
-            user_roles=None)
+            user_roles=None,
+            auth_token=auth_token)
         if result.get("success") and result.get("data"):
             data = result["data"]
             # API returns {"status": "success", "data": [{...}]}
@@ -469,19 +608,21 @@ class APIExecutorService:
         logger.error("❌ Failed to fetch endpoints")
         return None
 
-    async def list_endpoints(self,engagement_id: int = None) -> Dict[str, Any]:
+    async def list_endpoints(self, engagement_id: int = None, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         List available endpoints (datacenters/locations) for the user's engagement.
         This is the main workflow method for endpoint listing.
         Args:
             engagement_id: Engagement ID (fetches if not provided)
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with endpoint list or error
         """
         try:
             # Step 1: Get engagement ID
             if engagement_id is None:
-                engagement_id = await self.get_engagement_id()
+                engagement_id = await self.get_engagement_id(auth_token=auth_token, user_id=user_id)
                 if not engagement_id:
                     return {
                         "success": False,
@@ -489,7 +630,11 @@ class APIExecutorService:
                         "step": "get_engagement"}
             # Step 2: Fetch endpoints
             logger.info(f"📍 Fetching endpoints for engagement {engagement_id}")
-            endpoints = await self.get_endpoints(engagement_id)
+            endpoints = await self.get_endpoints(
+                engagement_id=engagement_id,
+                user_id=user_id,
+                auth_token=auth_token
+            )
             if endpoints:
                 # Format the response nicely
                 formatted_endpoints = []
@@ -520,20 +665,22 @@ class APIExecutorService:
                 "success": False,
                 "error": str(e)}
     
-    async def list_clusters(self,endpoint_ids: List[int] = None,engagement_id: int = None) -> Dict[str, Any]:
+    async def list_clusters(self, endpoint_ids: List[int] = None, engagement_id: int = None, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         List Kubernetes clusters for given endpoints.
         This is the main workflow method that handles the multi-step process.
         Args:
             endpoint_ids: List of endpoint IDs to query (fetches all if not provided)
             engagement_id: Engagement ID (fetches if not provided)
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with cluster list or error
         """
         try:
             # Step 1: Get engagement ID
             if engagement_id is None:
-                engagement_id = await self.get_engagement_id()
+                engagement_id = await self.get_engagement_id(auth_token=auth_token, user_id=user_id)
                 if not engagement_id:
                     return {
                         "success": False,
@@ -543,7 +690,7 @@ class APIExecutorService:
             
             # Step 2: Get endpoints if not provided
             if endpoint_ids is None:
-                endpoints = await self.get_endpoints(engagement_id)
+                endpoints = await self.get_endpoints(engagement_id, auth_token=auth_token, user_id=user_id)
                 if not endpoints:
                     return {
                         "success": False,
@@ -576,7 +723,7 @@ class APIExecutorService:
                 "error": str(e)
             }
     
-    async def list_managed_services(self,service_type: str,endpoint_ids: List[int] = None,ipc_engagement_id: int = None) -> Dict[str, Any]:
+    async def list_managed_services(self, service_type: str, endpoint_ids: List[int] = None, ipc_engagement_id: int = None, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         List managed services (Kafka, GitLab, etc.) for given endpoints.
         This is the main workflow method that handles the multi-step process.
@@ -584,6 +731,8 @@ class APIExecutorService:
             service_type: Service type to list (e.g., "IKSKafka", "IKSGitlab")
             endpoint_ids: List of endpoint IDs to query (fetches all if not provided)
             ipc_engagement_id: IPC Engagement ID (fetches and converts if not provided)
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with service list or error
         """
@@ -591,7 +740,7 @@ class APIExecutorService:
             # Step 1: Get PAAS engagement ID (if needed for endpoints)
             paas_engagement_id = None
             if endpoint_ids is None:
-                paas_engagement_id = await self.get_engagement_id()
+                paas_engagement_id = await self.get_engagement_id(auth_token=auth_token, user_id=user_id)
                 if not paas_engagement_id:
                     return {
                         "success": False,
@@ -600,9 +749,9 @@ class APIExecutorService:
             # Step 2: Get IPC engagement ID (required for managed services API)
             if ipc_engagement_id is None:
                 if paas_engagement_id is None:
-                    paas_engagement_id = await self.get_engagement_id()
+                    paas_engagement_id = await self.get_engagement_id(auth_token=auth_token, user_id=user_id)
                 
-                ipc_engagement_id = await self.get_ipc_engagement_id(paas_engagement_id)
+                ipc_engagement_id = await self.get_ipc_engagement_id(paas_engagement_id, auth_token=auth_token, user_id=user_id)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -613,8 +762,8 @@ class APIExecutorService:
             # Step 3: Get endpoints if not provided
             if endpoint_ids is None:
                 if paas_engagement_id is None:
-                    paas_engagement_id = await self.get_engagement_id()
-                endpoints = await self.get_endpoints(paas_engagement_id)
+                    paas_engagement_id = await self.get_engagement_id(auth_token=auth_token, user_id=user_id)
+                endpoints = await self.get_endpoints(paas_engagement_id, auth_token=auth_token, user_id=user_id)
                 if not endpoints:
                     return {
                         "success": False,
@@ -633,7 +782,7 @@ class APIExecutorService:
                 "endpoints": endpoint_ids,
                 "serviceType": service_type}
             client = await self._get_http_client()
-            headers = await self._get_auth_headers()
+            headers = await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
             logger.info(f"🌐 POST {url}")
             logger.debug(f"📦 Payload: {json.dumps(payload, indent=2)}")
             response = await client.post(
@@ -765,11 +914,16 @@ class APIExecutorService:
             endpoint_ids=endpoint_ids,
             ipc_engagement_id=ipc_engagement_id)
     
-    async def list_vms(self,ipc_engagement_id: int = None,endpoint_filter: str = None,zone_filter: str = None,department_filter: str = None) -> Dict[str, Any]:
+    async def list_vms(self, ipc_engagement_id: int = None, endpoint_filter: str = None, zone_filter: str = None, department_filter: str = None, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         List all virtual machines for the engagement.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            endpoint_filter: Filter by endpoint
+            zone_filter: Filter by zone
+            department_filter: Filter by department
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with VM list or error
         """
@@ -779,7 +933,7 @@ class APIExecutorService:
             # Get IPC engagement ID if not provided
             if not ipc_engagement_id:
                 logger.info("🔄 Fetching IPC engagement ID for VM listing...")
-                ipc_engagement_id = await self.get_ipc_engagement_id()
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -789,8 +943,12 @@ class APIExecutorService:
             # Build URL
             url = f"https://ipcloud.tatacommunications.com/portalservice/instances/vmlist/{ipc_engagement_id}"
             logger.info(f"📡 Calling VM list API: GET {url}")
-            # Get auth headers (will use default/env credentials if user_id not provided)
-            headers = await self._get_auth_headers()
+            # Get auth headers - prefer passed token, fallback to refresh
+            token = auth_token or await self._get_or_refresh_token(user_id)
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            } if token else await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
             # Get HTTP client
             client = await self._get_http_client()
             # Make GET request
@@ -857,13 +1015,15 @@ class APIExecutorService:
                 "error": str(e)
             }
     
-    async def list_firewalls(self,endpoint_ids: List[int] = None,ipc_engagement_id: int = None,variant: str = "") -> Dict[str, Any]:
+    async def list_firewalls(self, endpoint_ids: List[int] = None, ipc_engagement_id: int = None, variant: str = "", auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         List firewalls across multiple endpoints.
         Args:
             endpoint_ids: List of endpoint IDs to query
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
             variant: Firewall variant filter (default: empty string)
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with firewall list or error
         """
@@ -873,7 +1033,7 @@ class APIExecutorService:
             # Get IPC engagement ID if not provided
             if not ipc_engagement_id:
                 logger.info("🔄 Fetching IPC engagement ID for firewall listing...")
-                ipc_engagement_id = await self.get_ipc_engagement_id()
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -896,7 +1056,7 @@ class APIExecutorService:
             endpoint_results = {}
             
             url = "https://ipcloud.tatacommunications.com/networkservice/firewallconfig/details"
-            headers = await self._get_auth_headers()
+            headers = await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
             
             # Get HTTP client
             client = await self._get_http_client()
@@ -974,7 +1134,8 @@ class APIExecutorService:
     self,
     ipc_engagement_id: int = None,
     user_id: str = None,
-    force_refresh: bool = False
+    force_refresh: bool = False,
+    auth_token: str = None
 ) -> Dict[str, Any]:
 
         import time
@@ -1018,7 +1179,7 @@ class APIExecutorService:
             logger.info(f"🔑 Using IPC engagement ID: {ipc_engagement_id}")
         
         # Get auth headers
-            headers = await self._get_auth_headers(user_id=user_id)
+            headers = await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
         
         # Get HTTP client
             client = await self._get_http_client()
@@ -1148,7 +1309,7 @@ class APIExecutorService:
             "error": str(e),
             "ipc_engagement_id": ipc_engagement_id}
 
-    async def get_load_balancer_details(self,lbci: str,user_id: str = None) -> Dict[str, Any]:
+    async def get_load_balancer_details(self, lbci: str, user_id: str = None, auth_token: str = None) -> Dict[str, Any]:
         import time
         start_time = time.time()
         try:
@@ -1163,7 +1324,7 @@ class APIExecutorService:
             url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/getDetails/{lbci}"
             logger.info(f"📡 API Call: GET {url}")
         # Get auth headers
-            headers = await self._get_auth_headers(user_id=user_id)
+            headers = await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
         # Get HTTP client
             client = await self._get_http_client()
         # Make GET request
@@ -1217,7 +1378,7 @@ class APIExecutorService:
             "error": str(e),
             "lbci": lbci}
         
-    async def get_load_balancer_virtual_services(self,lbci: str,user_id: str = None) -> Dict[str, Any]:
+    async def get_load_balancer_virtual_services(self, lbci: str, user_id: str = None, auth_token: str = None) -> Dict[str, Any]:
         import time
         start_time = time.time()
         try:
@@ -1233,7 +1394,7 @@ class APIExecutorService:
             url = f"https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/virtualservices/{lbci}"
             logger.info(f"📡 API Call: GET {url}")
         # Get auth headers
-            headers = await self._get_auth_headers(user_id=user_id)
+            headers = await self._get_auth_headers(user_id=user_id, auth_token=auth_token)
         # Get HTTP client
             client = await self._get_http_client()
         # Make GET request
@@ -1431,7 +1592,8 @@ class APIExecutorService:
         dry_run: bool = False,
         user_id: str = None,
         auth_email: str = None,
-        auth_password: str = None) -> Dict[str, Any]:
+        auth_password: str = None,
+        auth_token: str = None) -> Dict[str, Any]:
         """
         Execute a CRUD operation on a resource.
         Args:
@@ -1440,6 +1602,10 @@ class APIExecutorService:
             params: Operation parameters
             user_roles: User's roles for permission checking
             dry_run: If True, validate but don't execute
+            user_id: User identifier
+            auth_email: Email for authentication (legacy)
+            auth_password: Password for authentication (legacy)
+            auth_token: Bearer token from UI (Keycloak) - takes precedence
         Returns:
             Dict with execution result
         """
@@ -1511,7 +1677,8 @@ class APIExecutorService:
                 params,
                 user_id=user_id,
                 auth_email=auth_email,
-                auth_password=auth_password)
+                auth_password=auth_password,
+                auth_token=auth_token)
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
             return {
@@ -1537,7 +1704,8 @@ class APIExecutorService:
         params: Dict[str, Any],
         user_id: str = None,
         auth_email: str = None,
-        auth_password: str = None
+        auth_password: str = None,
+        auth_token: str = None
     ) -> Dict[str, Any]:
         """
         Make the actual API call with automatic token refresh.
@@ -1547,17 +1715,22 @@ class APIExecutorService:
             params: Request parameters
             user_id: User identifier (for per-user token caching)
             auth_email: Email for authentication (uses default from env if not provided)
-            auth_password: Password for authentication (uses default from env if not provided) 
+            auth_password: Password for authentication (uses default from env if not provided)
+            auth_token: Bearer token from UI (Keycloak) - takes precedence over email/password
         Returns:
             API response dict
         """
-        # Ensure we have a valid token before making the call
-        token_valid = await self._ensure_valid_token(user_id, auth_email, auth_password)
-        if not token_valid:
-            logger.error(f"❌ Cannot make API call: No valid auth token (user: {user_id or 'default'})")
-            return {
-                "success": False,
-                "error": "Authentication failed: Unable to obtain valid token"}
+        # DEBUG: Log auth_token status
+        logger.debug(f"🔐 _make_api_call auth_token: {'PROVIDED' if auth_token else 'NONE'}")
+        
+        # Skip token validation if auth_token provided from UI or auth is disabled
+        if not auth_token:
+            token_valid = await self._ensure_valid_token(user_id, auth_email, auth_password)
+            if not token_valid:
+                logger.error(f"❌ Cannot make API call: No valid auth token (user: {user_id or 'default'})")
+                return {
+                    "success": False,
+                    "error": "Authentication failed: Unable to obtain valid token"}
         method = endpoint_config.get("method", "GET").upper()
         url = endpoint_config.get("url", "")
         is_streaming = endpoint_config.get("streaming", False)
@@ -1574,7 +1747,7 @@ class APIExecutorService:
         client = await self._get_http_client()
         headers = endpoint_config.get("headers", {})
         headers.setdefault("Content-Type", "application/json")
-        auth_headers = await self._get_auth_headers(user_id, auth_email, auth_password)
+        auth_headers = await self._get_auth_headers(user_id, auth_email, auth_password, auth_token)
         headers.update(auth_headers)
         
         try:
@@ -1997,7 +2170,7 @@ class APIExecutorService:
             "error": "Failed to fetch zone data from API",
             "zones": []}
 
-    async def get_os_images(self, zone_id: int, circuit_id: str, k8s_version: str) -> Dict[str, Any]:
+    async def get_os_images(self, zone_id: int, circuit_id: str, k8s_version: str, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         Get OS images (templates) for zone, filtered by k8s version.
         Uses the templates API: /uat-portalservice/configservice/templates/{zoneId}?type=Container
@@ -2007,13 +2180,15 @@ class APIExecutorService:
             zone_id: Zone ID
             circuit_id: Circuit ID (not used by new API, kept for compatibility)
             k8s_version: Kubernetes version to filter by (e.g., "v1.30.9")
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with OS options
         """
         logger.info(f"💿 Fetching OS templates for zone {zone_id}, k8s {k8s_version}")
         try:
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token
+            token = auth_token or await self._get_or_refresh_token(user_id)
             if not token:
                 return {"success": False, "error": "Failed to get auth token", "os_options": []}
             # Call the templates API directly
@@ -2075,20 +2250,25 @@ class APIExecutorService:
             logger.error(f"❌ Error fetching OS images: {str(e)}")
             return {"success": False, "error": str(e), "os_options": []}
         
-    async def get_flavors(self, zone_id: int, os_model: str = None, node_type: str = None, k8s_version: str = None) -> Dict[str, Any]:
+    async def get_flavors(self, zone_id: int, os_model: str = None, node_type: str = None, k8s_version: str = None, auth_token: str = None, user_id: str = None) -> Dict[str, Any]:
         """
         Get compute flavors for zone using the flavordetails API.
         API: GET /uat-portalservice/configservice/flavordetails/{zoneId}
         Args:
             zone_id: Zone ID
+            os_model: OS model filter
+            node_type: Node type filter
+            k8s_version: K8s version filter
+            auth_token: Bearer token from UI for API authentication
+            user_id: User ID for session lookup
         Returns:
             Dict with node_types (unique flavorCategory values) and formatted flavors
         """
         logger.info(f"💻 Fetching flavors for zone {zone_id}, OS filter: {os_model}, node type filter: {node_type}, k8s version: {k8s_version}")
         
         try:
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token
+            token = auth_token or await self._get_or_refresh_token(user_id)
             if not token:
                 return {"success": False, "error": "Failed to get auth token", "node_types": [], "flavors": []}
             # Call the flavordetails API directly
@@ -2193,14 +2373,15 @@ class APIExecutorService:
         logger.info(f"🔌 Fetching circuit ID for engagement {engagement_id}")
         return "E-IPCTEAM-1602"
     
-    async def get_business_units_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+    async def get_business_units_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get business units (departments) listing for engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
             user_id: User ID (email) for session lookup
-            force_refresh: Force fetch even if cached 
+            force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI for API authentication
         Returns:
             Dict with business units data including zones, environments, and VMs count
         """
@@ -2224,7 +2405,7 @@ class APIExecutorService:
                 logger.info(f"🔄 Force refresh requested, bypassing cache")
             # Get IPC engagement ID if not provided
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2233,8 +2414,8 @@ class APIExecutorService:
                 logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
             url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}"
             logger.info(f"🏢 Fetching business units from: {url} (IPC engagement ID: {ipc_engagement_id})")
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token
+            token = auth_token or await self._get_or_refresh_token(user_id)
             if not token:
                 return {
                     "success": False,
@@ -2289,7 +2470,7 @@ class APIExecutorService:
                 "error": str(e),
                 "data": None}
 
-    async def get_department_details(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+    async def get_department_details(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get full department details including nested environments and zones.
         This API returns hierarchical data:
@@ -2299,7 +2480,8 @@ class APIExecutorService:
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
             user_id: User ID (email) for session lookup
-            force_refresh: Force fetch even if cached 
+            force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI for API authentication
         Returns:
             Dict with full department hierarchy including environments and zones
         """
@@ -2319,7 +2501,7 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
             # Get IPC engagement ID if not provided
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2327,8 +2509,8 @@ class APIExecutorService:
                         "data": None}
             url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{ipc_engagement_id}"
             logger.info(f"🏢 Fetching department details from: {url}")
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token, fallback to refresh
+            token = auth_token or await self._get_or_refresh_token()
             if not token:
                 return {
                     "success": False,
@@ -2375,14 +2557,15 @@ class APIExecutorService:
                 "error": str(e),
                 "data": None}
     
-    async def get_environments_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+    async def get_environments_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get environments listing per engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
             user_id: User ID (email) for session lookup
-            force_refresh: Force fetch even if cached 
+            force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI for API authentication
         Returns:
             Dict with environments data
         """
@@ -2401,7 +2584,7 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
             
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2410,8 +2593,8 @@ class APIExecutorService:
                 logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
             url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/environmentsperengagement/{ipc_engagement_id}"
             logger.info(f"🌍 Fetching environments from: {url}")
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token
+            token = auth_token or await self._get_or_refresh_token(user_id)
             if not token:
                 return {
                     "success": False,
@@ -2451,7 +2634,7 @@ class APIExecutorService:
                 "error": str(e),
                 "data": None}
         
-    async def get_zones_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False) -> Dict[str, Any]:
+    async def get_zones_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get zones (network segments/VLANs) listing for engagement.
         Uses per-user session storage to avoid repeated API calls.
@@ -2459,6 +2642,7 @@ class APIExecutorService:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
+            auth_token: Bearer token from UI for API authentication
         Returns:
             Dict with zones data including CIDR, hypervisors, status, and associated environments
         """
@@ -2477,7 +2661,7 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
 
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id)
+                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2487,8 +2671,8 @@ class APIExecutorService:
 
             url = f"https://ipcloud.tatacommunications.com/portalservice/api/v1/{ipc_engagement_id}/zonelist"
             logger.info(f"🌐 Fetching zones from: {url}")
-            # Get auth token
-            token = await self._get_or_refresh_token()
+            # Get auth token - prefer passed token
+            token = auth_token or await self._get_or_refresh_token(user_id)
             if not token:
                 return {
                     "success": False,

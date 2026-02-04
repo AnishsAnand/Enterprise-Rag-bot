@@ -87,12 +87,16 @@ class LoadBalancerAgent(BaseResourceAgent):
         List load balancers with AUTOMATIC detail fetching for specific LB queries.
         """
         try:
-            # Extract context
+            # Extract context - MUST be done FIRST
             user_roles = context.get("user_roles", [])
             user_id = context.get("user_id")
+            auth_token = context.get("auth_token")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
             user_query = context.get("user_query", "").lower()
             force_refresh = params.get("force_refresh", False)
             
+            logger.info(f"🔐 LB listing with auth_token: {'✓' if auth_token else '✗'}, engagement: {selected_engagement_id}")
             logger.info(f"📋 Processing LB query: '{user_query}'")
             
             # ═════════════════════════════════════════════════════════════════
@@ -107,7 +111,7 @@ class LoadBalancerAgent(BaseResourceAgent):
                 lbci = matched_lb.get("lbci") or matched_lb.get("circuitId")
                 return await self._fetch_complete_lb_details(load_balancer=matched_lb,
                                                              user_query=user_query,
-                                                             query_intent=query_analysis,user_id=user_id,lbci=lbci )
+                                                             query_intent=query_analysis,user_id=user_id,lbci=lbci,auth_token=auth_token)
             # ═════════════════════════════════════════════════════════════════
             # STEP 1.5: Handle DIRECT LBCI queries FIRST (if user knows LBCI)
             # ═════════════════════════════════════════════════════════════════
@@ -118,7 +122,8 @@ class LoadBalancerAgent(BaseResourceAgent):
                 return await self._handle_lbci_query(
                     lbci=lbci,
                     user_query=user_query,
-                    user_id=user_id
+                    user_id=user_id,
+                    auth_token=auth_token
                 )
             
             # ═════════════════════════════════════════════════════════════════
@@ -134,21 +139,24 @@ class LoadBalancerAgent(BaseResourceAgent):
                 ipc_engagement_id = await self._get_ipc_engagement_id(
                     user_id=user_id,
                     user_roles=user_roles,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    auth_token=auth_token,
+                    selected_engagement_id=selected_engagement_id
                 )
                 
                 if not ipc_engagement_id:
                     return {
                         "success": False,
                         "error": "Failed to get IPC engagement ID",
-                        "response": "Unable to retrieve engagement information."
+                        "response": "Unable to retrieve engagement information. Please select an engagement first."
                     }
                 
                 # Get list of all load balancers
                 list_result = await api_executor_service.list_load_balancers(
                     ipc_engagement_id=ipc_engagement_id,
                     user_id=user_id,
-                    force_refresh=False
+                    force_refresh=False,
+                    auth_token=auth_token
                 )
                 
                 if not list_result.get("success"):
@@ -225,7 +233,8 @@ class LoadBalancerAgent(BaseResourceAgent):
                     user_query=user_query,
                     query_intent=query_analysis,
                     user_id=user_id,
-                    lbci=lbci
+                    lbci=lbci,
+                    auth_token=auth_token
                 )
             
             # ═════════════════════════════════════════════════════════════════
@@ -238,20 +247,23 @@ class LoadBalancerAgent(BaseResourceAgent):
                 ipc_engagement_id = await self._get_ipc_engagement_id(
                     user_id=user_id,
                     user_roles=user_roles,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    auth_token=auth_token,
+                    selected_engagement_id=selected_engagement_id
                 )
                 
                 if not ipc_engagement_id:
                     return {
                         "success": False,
                         "error": "Failed to get IPC engagement ID",
-                        "response": "Unable to retrieve engagement information."
+                        "response": "Unable to retrieve engagement information. Please select an engagement first."
                     }
                 
                 result = await api_executor_service.list_load_balancers(
                     ipc_engagement_id=ipc_engagement_id,
                     user_id=user_id,
-                    force_refresh=force_refresh
+                    force_refresh=force_refresh,
+                    auth_token=auth_token
                 )
                 
                 if not result.get("success"):
@@ -303,8 +315,8 @@ class LoadBalancerAgent(BaseResourceAgent):
                 total_count = len(filtered_lbs)
                 filter_reason = " + ".join(filter_reasons) if filter_reasons else None
                 
-                # Format response
-                formatted_response = await self.format_response_with_llm(
+                # Format response with agentic formatter (prevents hallucination for large lists)
+                formatted_response = await self.format_response_agentic(
                     operation="list",
                     raw_data=filtered_lbs,
                     user_query=user_query,
@@ -363,7 +375,7 @@ class LoadBalancerAgent(BaseResourceAgent):
             logger.error(f"❌ Error in _list_load_balancers: {str(e)}", exc_info=True)
             raise
 
-    async def _fetch_complete_lb_details(self,load_balancer: Dict[str, Any],user_query: str,query_intent: Dict[str, Any],user_id: str,lbci: str) -> Dict[str, Any]:
+    async def _fetch_complete_lb_details(self, load_balancer: Dict[str, Any], user_query: str, query_intent: Dict[str, Any], user_id: str, lbci: str, auth_token: str = None) -> Dict[str, Any]:
         """
     Fetch COMPLETE details for a specific load balancer.
     Called when user asks about a specific LB by name or LBCI.
@@ -378,6 +390,7 @@ class LoadBalancerAgent(BaseResourceAgent):
         query_intent: Parsed query intent
         user_id: User ID
         lbci: Load Balancer Circuit ID
+        auth_token: Bearer token for API authentication
         
     Returns:
         Dict with complete LB details
@@ -387,8 +400,9 @@ class LoadBalancerAgent(BaseResourceAgent):
     # 1️⃣ Fetch configuration details
         logger.info(f"📋 Fetching configuration details...")
         details_result = await api_executor_service.get_load_balancer_details(
-        lbci=lbci,
-        user_id=user_id)
+            lbci=lbci,
+            user_id=user_id,
+            auth_token=auth_token)
         details = None
         details_error = None
         if details_result.get("success"):
@@ -400,8 +414,9 @@ class LoadBalancerAgent(BaseResourceAgent):
     # 2️⃣ Fetch virtual services
         logger.info(f"🌐 Fetching virtual services...")
         vs_result = await api_executor_service.get_load_balancer_virtual_services(
-        lbci=lbci,
-        user_id=user_id)
+            lbci=lbci,
+            user_id=user_id,
+            auth_token=auth_token)
     
         virtual_services = []
         vs_error = None
@@ -442,13 +457,14 @@ class LoadBalancerAgent(BaseResourceAgent):
             "has_details": details is not None,
             "has_virtual_services": len(virtual_services) > 0}}
 
-    async def _handle_lbci_query(self,lbci: str,user_query: str,user_id: str = None) -> Dict[str, Any]:
+    async def _handle_lbci_query(self, lbci: str, user_query: str, user_id: str = None, auth_token: str = None) -> Dict[str, Any]:
         logger.info(f"⚖️ LBCI QUERY HANDLER: {lbci}")
     # 1️⃣ Fetch virtual services (MANDATORY - this is what user wants!)
         logger.info(f"🌐 Fetching virtual services for LBCI {lbci}...")
         vs_result = await api_executor_service.get_load_balancer_virtual_services(
             lbci=lbci,
-            user_id=user_id
+            user_id=user_id,
+            auth_token=auth_token
         )
         virtual_services = []
         vs_error = None
@@ -461,8 +477,9 @@ class LoadBalancerAgent(BaseResourceAgent):
     # 2️⃣ Fetch LB details (OPTIONAL but recommended for complete picture)
         logger.info(f"📋 Fetching configuration details for LBCI {lbci}...")
         details_result = await api_executor_service.get_load_balancer_details(
-        lbci=lbci,
-        user_id=user_id)
+            lbci=lbci,
+            user_id=user_id,
+            auth_token=auth_token)
         details = None
         details_error = None
         if details_result.get("success"):
@@ -635,7 +652,7 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
         try:
             response = await ai_service._call_chat_with_retries(
             prompt=prompt,
-            max_tokens=4000,  
+            max_tokens=5000,  
             temperature=0.1,   
             timeout=30)
             return response.strip()
@@ -1084,21 +1101,29 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
         logger.warning(f"❌ NO MATCH for: {lb_identifier}")
         return None
     
-    async def _get_ipc_engagement_id(self,user_id: str,user_roles=None,force_refresh: bool = False) -> Optional[int]:
+    async def _get_ipc_engagement_id(self, user_id: str, user_roles=None, force_refresh: bool = False, auth_token: str = None, selected_engagement_id: int = None) -> Optional[int]:
         """Get IPC engagement ID (helper method)."""
 
-    # 🛡️ HARDEN against OpenWebUI / Gateway garbage
+        # 🛡️ HARDEN against OpenWebUI / Gateway garbage
         if not user_roles or not isinstance(user_roles, (list, tuple, set)):
             user_roles = []
-    # Fetch engagement based on roles
-        engagement_id = await self.get_engagement_id(user_roles)
+        
+        # Use selected engagement ID if available
+        engagement_id = selected_engagement_id
+        if not engagement_id:
+            # Fetch engagement based on roles
+            engagement_id = await self.get_engagement_id(user_roles=user_roles, auth_token=auth_token, user_id=user_id, selected_engagement_id=selected_engagement_id)
+        
         if not engagement_id:
             return None
-    # Fetch IPC engagement
+        
+        # Fetch IPC engagement
         ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
-        engagement_id=engagement_id,
-        user_id=user_id,
-        force_refresh=force_refresh)
+            engagement_id=engagement_id,
+            user_id=user_id,
+            auth_token=auth_token,
+            force_refresh=force_refresh
+        )
         return ipc_engagement_id
 
     async def _get_load_balancer_details(self,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1106,6 +1131,7 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
         try:
             lbci = params.get("lbci")
             user_id = context.get("user_id")
+            auth_token = context.get("auth_token")
             user_query = context.get("user_query", "")
             
             if not lbci:
@@ -1121,7 +1147,8 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
             logger.info(f"🔍 Fetching details for: {lbci}") 
             result = await api_executor_service.get_load_balancer_details(
                 lbci=lbci,
-                user_id=user_id)
+                user_id=user_id,
+                auth_token=auth_token)
             if not result.get("success"):
                 return {
                     "success": False,
@@ -1153,6 +1180,7 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
         try:
             lbci = params.get("lbci")
             user_id = context.get("user_id")
+            auth_token = context.get("auth_token")
             user_query = context.get("user_query", "")
             
             if not lbci:
@@ -1171,7 +1199,8 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
             
             result = await api_executor_service.get_load_balancer_virtual_services(
                 lbci=lbci,
-                user_id=user_id)
+                user_id=user_id,
+                auth_token=auth_token)
             if not result.get("success"):
                 return {
                     "success": False,
@@ -1282,7 +1311,8 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
         user_query: str,
         query_intent: Dict[str, Any],
         ipc_engagement_id: int,
-        user_id: str
+        user_id: str,
+        auth_token: str = None
     ) -> Dict[str, Any]:
         """Fetch and format detailed information for a specific LB."""
         lbci = load_balancer.get("lbci") or load_balancer.get("circuitId")
@@ -1300,7 +1330,8 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
             logger.info(f"📋 Fetching full details for {lbci}")
             details_result = await api_executor_service.get_load_balancer_details(
                 lbci=lbci,
-                user_id=user_id
+                user_id=user_id,
+                auth_token=auth_token
             )
             if details_result.get("success"):
                 details = details_result.get("data")
@@ -1311,7 +1342,8 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
             logger.info(f"🌐 Fetching virtual services for {lbci}")
             vs_result = await api_executor_service.get_load_balancer_virtual_services(
                 lbci=lbci,
-                user_id=user_id
+                user_id=user_id,
+                auth_token=auth_token
             )
             if vs_result.get("success"):
                 virtual_services = vs_result.get("data")
