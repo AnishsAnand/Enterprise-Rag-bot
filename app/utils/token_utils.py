@@ -41,15 +41,16 @@ def decode_keycloak_token(token: str, verify: bool = False) -> Optional[Dict[str
             options={"verify_signature": verify},
             algorithms=["RS256", "HS256"]
         )
+        logger.debug(f"✅ Successfully decoded token. Claims: {list(payload.keys())}")
         return payload
     except jwt.ExpiredSignatureError:
-        logger.warning("Token has expired")
+        logger.warning("❌ Token has expired")
         return None
     except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid token: {e}")
+        logger.warning(f"❌ Invalid token: {e}")
         return None
     except Exception as e:
-        logger.error(f"Error decoding token: {e}")
+        logger.error(f"❌ Error decoding token: {e}", exc_info=True)
         return None
 
 
@@ -79,6 +80,7 @@ def extract_user_from_token(authorization_header: Optional[str]) -> Optional[Tok
     
     payload = decode_keycloak_token(token)
     if not payload:
+        logger.warning("❌ Failed to decode token payload")
         return None
     
     # Extract user info from Keycloak token claims
@@ -92,10 +94,11 @@ def extract_user_from_token(authorization_header: Optional[str]) -> Optional[Tok
     roles = realm_access.get("roles", [])
     
     if not user_id:
-        logger.warning("Token missing 'sub' claim")
+        logger.error("❌ Token missing 'sub' claim - cannot identify user uniquely. Available claims: " + str(list(payload.keys())))
         return None
     
-    logger.debug(f"Extracted user from token: {username} ({email})")
+    # Log extracted user info for debugging user isolation
+    logger.info(f"✅ Extracted user from token: sub={user_id[:20]}..., email={email or 'N/A'}, username={username or 'N/A'}")
     
     return TokenUser(
         user_id=user_id,
@@ -135,16 +138,34 @@ def get_user_id_from_request(
     if authorization:
         user = extract_user_from_token(authorization)
         if user:
-            # Use email as user_id for consistency with chat storage
-            return user.email or user.username or user.user_id
+            # CRITICAL: Use email as primary user_id, but fallback to sub (UUID) if email missing
+            # This ensures unique user identification even if email is not in token
+            if user.email:
+                logger.debug(f"Using email as user_id: {user.email}")
+                return user.email
+            elif user.username:
+                logger.debug(f"Using username as user_id (email missing): {user.username}")
+                return user.username
+            elif user.user_id:
+                logger.debug(f"Using sub claim as user_id (email/username missing): {user.user_id}")
+                return user.user_id
+            else:
+                logger.warning("Token extracted but no user identifier found (email/username/sub)")
+        else:
+            logger.warning("Failed to extract user from Authorization token - token may be invalid or expired")
     
     # Fallback to explicit headers
     if x_user_id:
+        logger.debug(f"Using X-User-Id header: {x_user_id}")
         return x_user_id
     
     if x_user_email:
+        logger.debug(f"Using X-User-Email header: {x_user_email}")
         return x_user_email
     
+    # CRITICAL: Only use default if NO authentication info is available
+    # This prevents user isolation issues
+    logger.warning(f"No user identification found - using default: {default}. This may cause user isolation issues!")
     return default
 
 

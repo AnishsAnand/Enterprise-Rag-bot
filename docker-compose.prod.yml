@@ -210,6 +210,9 @@ volumes:
   prometheus_data:
   grafana_data:
   backend_uploads:
+    name: enterprise-rag-backend-uploads-main
   backend_logs:
+    name: enterprise-rag-backend-logs-main
   backend_outputs:
+    name: enterprise-rag-backend-outputs-main
   #openwebui_data:
