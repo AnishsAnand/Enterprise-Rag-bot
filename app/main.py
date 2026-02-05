@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+import time
 
 import uvicorn
 
@@ -31,6 +32,7 @@ from app.api.routes.webui_tasks import router as webui_tasks_router
 from app.routers import openai_compatible
 from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
+from app.services.prometheus_metrics import metrics
 from app.core.database import init_db
 
 load_dotenv()
@@ -170,6 +172,55 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+
+# ------------------------ HTTP Metrics Middleware ------------------------
+class HTTPMetricsMiddleware(BaseHTTPMiddleware):
+    """Track HTTP request metrics for Prometheus monitoring."""
+
+    async def dispatch(self, request, call_next):
+        # Skip metrics endpoint to avoid recursion
+        if request.url.path == "/metrics":
+            return await call_next(request)
+        
+        start_time = time.time()
+        method = request.method
+        
+        # Normalize endpoint path (remove IDs to reduce cardinality)
+        path = request.url.path
+        # Replace UUIDs and numeric IDs with placeholders
+        import re
+        normalized_path = re.sub(r'/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '/{id}', path)
+        normalized_path = re.sub(r'/\d+', '/{id}', normalized_path)
+        
+        response = None
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        except Exception as e:
+            status_code = 500
+            raise
+        finally:
+            duration = time.time() - start_time
+            try:
+                # Record HTTP request metrics
+                metrics.http_requests_total.labels(
+                    method=method,
+                    endpoint=normalized_path,
+                    status_code=str(status_code)
+                ).inc()
+                
+                metrics.http_request_duration.labels(
+                    method=method,
+                    endpoint=normalized_path
+                ).observe(duration)
+            except Exception as metric_error:
+                logger.debug(f"Failed to record HTTP metrics: {metric_error}")
+
+
+app.add_middleware(HTTPMetricsMiddleware)
 
 # ===================== API Routes =====================
 app.include_router(health.router)  # Add health check routes

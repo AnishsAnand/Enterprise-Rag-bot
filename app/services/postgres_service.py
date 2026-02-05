@@ -20,6 +20,7 @@ from asyncpg.pool import Pool
 
 from app.core.config import settings
 from app.services.ai_service import ai_service
+import time
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("POSTGRES_LOG_LEVEL", "INFO"))
@@ -618,6 +619,7 @@ class PostgresService:
             logger.debug("⚠️ Search unavailable or empty query")
             return []
 
+        start_time = time.time()
         try:
             # Preprocess query
             cleaned_query, key_terms = self._preprocess_query(query)
@@ -708,10 +710,37 @@ class PostgresService:
                 })
 
             logger.info(f"✅ Returning {len(final_results)} results")
+            
+            # Track RAG retrieval metrics
+            try:
+                from app.services.prometheus_metrics import metrics
+                duration = time.time() - start_time
+                avg_relevance = sum(r["relevance_score"] for r in final_results) / len(final_results) if final_results else 0.0
+                metrics.track_rag_retrieval(
+                    source="postgres_vector",
+                    duration=duration,
+                    doc_count=len(final_results),
+                    avg_relevance=avg_relevance
+                )
+            except Exception as metric_error:
+                logger.debug(f"Failed to record RAG metrics: {metric_error}")
+            
             return final_results
 
         except Exception as e:
             logger.exception(f"❌ Search error: {e}")
+            # Track failed retrieval
+            try:
+                from app.services.prometheus_metrics import metrics
+                duration = time.time() - start_time
+                metrics.track_rag_retrieval(
+                    source="postgres_vector",
+                    duration=duration,
+                    doc_count=0,
+                    avg_relevance=0.0
+                )
+            except Exception:
+                pass
             return []
 
     def _coerce_images_from_db(self, images_field: Any) -> List[Dict[str, Any]]:

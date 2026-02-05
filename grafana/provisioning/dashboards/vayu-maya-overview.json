@@ -111,7 +111,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(increase(vayu_llm_estimated_cost_usd[$__range]))",
+          "expr": "sum(increase(vayu_llm_estimated_cost_usd_total[$__range]))",
           "refId": "A"
         }
       ],
@@ -146,7 +146,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(vayu_llm_call_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by (le) (vayu_llm_call_duration_seconds_bucket))",
           "refId": "A"
         }
       ],
@@ -212,7 +212,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(vayu_llm_active_requests)",
+          "expr": "sum(vayu_llm_active_requests) or vector(0)",
           "refId": "A"
         }
       ],
@@ -254,7 +254,7 @@
       "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "sum by (model) (rate(vayu_llm_tokens_total[5m]))",
+          "expr": "sum by (model) (rate(vayu_llm_tokens_total[5m])) or vector(0)",
           "legendFormat": "{{model}}",
           "refId": "A"
         }
@@ -297,12 +297,12 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(vayu_llm_call_duration_seconds_bucket[5m])) by (le, model))",
+          "expr": "(histogram_quantile(0.50, sum(rate(vayu_llm_call_duration_seconds_bucket[5m])) by (le, model)) >= 0) or vector(0)",
           "legendFormat": "p50 {{model}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(vayu_llm_call_duration_seconds_bucket[5m])) by (le, model))",
+          "expr": "(histogram_quantile(0.95, sum(rate(vayu_llm_call_duration_seconds_bucket[5m])) by (le, model)) >= 0) or vector(0)",
           "legendFormat": "p95 {{model}}",
           "refId": "B"
         }
@@ -414,7 +414,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(vayu_agent_execution_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum by (le) (vayu_agent_execution_duration_seconds_bucket))",
           "refId": "A"
         }
       ],
@@ -447,7 +447,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(vayu_agent_active_sessions)",
+          "expr": "sum(vayu_agent_active_sessions) or vector(0)",
           "refId": "A"
         }
       ],
@@ -517,7 +517,7 @@
       "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "sum by (agent_name, status) (rate(vayu_agent_sessions_total[5m]))",
+          "expr": "sum by (agent_name, status) (rate(vayu_agent_sessions_total[5m])) or vector(0)",
           "legendFormat": "{{agent_name}} ({{status}})",
           "refId": "A"
         }
@@ -568,22 +568,22 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "sum(rate(vayu_http_requests_total[5m]))",
+          "expr": "sum(rate(vayu_http_requests_total[5m])) or vector(0)",
           "legendFormat": "Total",
           "refId": "A"
         },
         {
-          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"2..\"}[5m]))",
+          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"2..\"}[5m])) or vector(0)",
           "legendFormat": "2xx",
           "refId": "B"
         },
         {
-          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"4..\"}[5m]))",
+          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"4..\"}[5m])) or vector(0)",
           "legendFormat": "4xx",
           "refId": "C"
         },
         {
-          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"5..\"}[5m]))",
+          "expr": "sum(rate(vayu_http_requests_total{status_code=~\"5..\"}[5m])) or vector(0)",
           "legendFormat": "5xx",
           "refId": "D"
         }
@@ -626,17 +626,17 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "(histogram_quantile(0.50, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le)) >= 0) or vector(0)",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "(histogram_quantile(0.95, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le)) >= 0) or vector(0)",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "(histogram_quantile(0.99, sum(rate(vayu_http_request_duration_seconds_bucket[5m])) by (le)) >= 0) or vector(0)",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -687,7 +687,7 @@
       "options": { "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(vayu_rag_retrieval_duration_seconds_bucket[5m])) by (le, source))",
+          "expr": "(histogram_quantile(0.95, sum(rate(vayu_rag_retrieval_duration_seconds_bucket[5m])) by (le, source)) >= 0) or vector(0)",
           "legendFormat": "{{source}} p95",
           "refId": "A"
         }
@@ -730,7 +730,7 @@
       "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "sum by (tool_name) (rate(vayu_agent_tool_calls_total{status=\"success\"}[5m]))",
+          "expr": "sum by (tool_name) (rate(vayu_agent_tool_calls_total{status=\"success\"}[5m])) or vector(0)",
           "legendFormat": "{{tool_name}}",
           "refId": "A"
         }
