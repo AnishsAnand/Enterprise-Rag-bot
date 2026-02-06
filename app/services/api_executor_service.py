@@ -1681,6 +1681,20 @@ class APIExecutorService:
                 auth_token=auth_token)
             end_time = datetime.utcnow()
             duration = (end_time - start_time).total_seconds()
+            
+            # Track tool call metrics
+            try:
+                from app.services.prometheus_metrics import metrics
+                tool_name = f"{resource_type}_{operation}"
+                metrics.track_tool_call(
+                    agent_name="APIExecutor",
+                    tool_name=tool_name,
+                    duration=duration,
+                    success=result.get("success", True)
+                )
+            except Exception as metric_error:
+                logger.debug(f"Failed to record tool metrics: {metric_error}")
+            
             return {
                 "success": result.get("success", True),
                 "data": result.get("data"),
@@ -1691,6 +1705,22 @@ class APIExecutorService:
                 "timestamp": end_time.isoformat()}
         except Exception as e:
             logger.error(f"❌ Failed to execute {operation} on {resource_type}: {str(e)}")
+            
+            # Track failed tool call
+            try:
+                from app.services.prometheus_metrics import metrics
+                end_time = datetime.utcnow()
+                duration = (end_time - start_time).total_seconds()
+                tool_name = f"{resource_type}_{operation}"
+                metrics.track_tool_call(
+                    agent_name="APIExecutor",
+                    tool_name=tool_name,
+                    duration=duration,
+                    success=False
+                )
+            except Exception:
+                pass
+            
             return {
                 "success": False,
                 "error": str(e),
