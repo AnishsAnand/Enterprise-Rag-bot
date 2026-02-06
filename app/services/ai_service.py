@@ -901,10 +901,15 @@ class AIService:
         
             raise
 
-    async def _call_chat_with_retries(self, prompt: str, max_tokens: int = 1500,
-                                   temperature: float = 0.2, 
-                                   system_message: str = None,
-                                   timeout: float = None) -> str:
+    async def _call_chat_with_retries(
+        self,
+        prompt: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.2,
+        system_message: str = None,
+        timeout: float = None,
+        model: str = None,
+    ) -> str:
         if timeout is None:
             timeout = 30
 
@@ -922,7 +927,7 @@ class AIService:
             try:
                 fut = asyncio.to_thread(
                     partial(self._llm_chat, prompt, max_tokens, 
-                        temperature, system_message)
+                        temperature, system_message, model)
                 )
                 result = await asyncio.wait_for(fut, timeout=timeout)
             

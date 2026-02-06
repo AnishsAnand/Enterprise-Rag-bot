@@ -46,6 +46,27 @@ class OrchestratorAgent(BaseAgent):
         self.rag_agent = rag_agent
         logger.info("✅ Orchestrator agent configured with specialized agents")
 
+    def _slim_state_for_llm(self, state: ConversationState) -> Dict[str, Any]:
+        """
+        Return a minimal, high-signal snapshot of state for LLM prompts.
+        Never include large caches / histories (can exceed model context windows).
+        """
+        return {
+            "status": state.status.value,
+            "selected_engagement_id": state.selected_engagement_id,
+            "user_type": state.user_type,
+            "resource_type": state.resource_type,
+            "operation": state.operation,
+            # Common per-chat selections (small + useful)
+            "endpoints": state.collected_params.get("endpoints"),
+            "endpoint_names": state.collected_params.get("endpoint_names"),
+            "businessUnits": state.collected_params.get("businessUnits"),
+            "environments": state.collected_params.get("environments"),
+            "zones": state.collected_params.get("zones"),
+            # Internal derived context (small)
+            "ipc_engagement_id": state.collected_params.get("ipc_engagement_id"),
+        }
+
     def get_system_prompt(self) -> str:
         return """You are the Orchestrator Agent, the main coordinator in a multi-agent system for managing cloud resources.
 
@@ -278,6 +299,66 @@ What would you like to do today?"""
 
 How can I help you today?"""
     
+    def _check_context_switch_intent(self, user_input: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if user wants to switch context (datacenter, engagement, etc.)
+        
+        Args:
+            user_input: User's message
+            
+        Returns:
+            Dict with entity_type and target_value if switch detected, None otherwise
+        """
+        import re
+        text_lower = user_input.lower().strip()
+        
+        # Context switch keywords
+        switch_keywords = ["switch", "change", "use", "set default", "update default", "select"]
+        
+        # Entity types that can be switched
+        entity_patterns = {
+            "engagement": r"\b(engagement|engagements)\b",
+            "datacenter": r"\b(datacenter|data\s*center|dc|location|endpoint)\b",
+            "cluster": r"\b(cluster|k8s\s*cluster)\b",
+            "firewall": r"\b(firewall|fw)\b",
+            "business_unit": r"\b(business\s*unit|bu|department)\b",
+            "environment": r"\b(environment|env)\b",
+            "zone": r"\b(zone)\b",
+        }
+        
+        # Check for switch intent
+        has_switch_intent = any(kw in text_lower for kw in switch_keywords)
+        
+        if not has_switch_intent:
+            return None
+        
+        # Detect which entity type is being switched
+        detected_entity = None
+        for entity_type, pattern in entity_patterns.items():
+            if re.search(pattern, text_lower):
+                detected_entity = entity_type
+                break
+        
+        if not detected_entity:
+            # Check for generic "switch to X" without entity type
+            # e.g., "switch to Mumbai" - assume datacenter
+            if re.search(r"\bswitch\s+to\s+\w+", text_lower):
+                detected_entity = "datacenter"
+        
+        if detected_entity:
+            # Extract the target value (e.g., "Mumbai" from "switch to Mumbai")
+            target_value = None
+            to_match = re.search(r"\bto\s+(\w+(?:\s*-\s*\w+)?)", text_lower)
+            if to_match:
+                target_value = to_match.group(1).strip()
+            
+            return {
+                "entity_type": detected_entity,
+                "target_value": target_value
+            }
+        
+        return None
+    
     async def _generate_follow_ups(self, user_input: str, response: str, context: Dict[str, Any] = None) -> List[str]:
         """
         Generate intelligent follow-up suggestions based on the conversation context.
@@ -440,10 +521,26 @@ Return ONLY a JSON array of strings, like:
                 if is_metadata_request:
                     logger.info(f"📋 Metadata request detected, preserving session state")
                 else:
-                    # Preserve engagement ID before resetting
+                    # Preserve context before resetting (engagement, datacenter/endpoints)
                     preserved_engagement_id = state.selected_engagement_id
                     preserved_user_type = state.user_type
-                    logger.info(f"🔄 Previous conversation {state.status.value}, resetting for new operation (preserving engagement: {preserved_engagement_id})")
+                    # Preserve endpoint/datacenter selection for follow-up queries in same chat
+                    preserved_endpoints = state.collected_params.get("endpoints")
+                    preserved_endpoint_names = state.collected_params.get("endpoint_names")
+                    # Preserve BU/Env/Zone filters (per-chat context)
+                    preserved_business_units = state.collected_params.get("businessUnits")
+                    preserved_environments = state.collected_params.get("environments")
+                    preserved_zones = state.collected_params.get("zones")
+                    # Preserve derived IPC engagement id (per-chat context)
+                    preserved_ipc_engagement_id = state.collected_params.get("ipc_engagement_id")
+                    # Preserve last list cache so "from above response" can filter without refetching
+                    preserved_last_list_cache = state.collected_params.get("_last_list_cache")
+                    preserved_last_list_resource = state.collected_params.get("_last_list_resource_type")
+                    preserved_last_list_endpoints = state.collected_params.get("_last_list_endpoints")
+                    preserved_last_list_engagement = state.collected_params.get("_last_list_engagement_id")
+                    
+                    logger.info(f"🔄 Previous conversation {state.status.value}, resetting for new operation")
+                    logger.info(f"   ♻️ Preserving: engagement={preserved_engagement_id}, endpoints={preserved_endpoints}")
                     
                     # Reset operation-specific state but keep session
                     state.status = ConversationStatus.INITIATED
@@ -460,9 +557,27 @@ Return ONLY a JSON array of strings, like:
                     state.pending_filter_options = None
                     state.pending_filter_type = None
                     state.pending_engagements = None
-                    # Keep the engagement ID!
+                    
+                    # Restore preserved context (engagement + datacenter/endpoints)
                     state.selected_engagement_id = preserved_engagement_id
                     state.user_type = preserved_user_type
+                    if preserved_endpoints:
+                        state.collected_params["endpoints"] = preserved_endpoints
+                        state.collected_params["endpoint_names"] = preserved_endpoint_names
+                        logger.info(f"   ♻️ Restored endpoints: {preserved_endpoint_names}")
+                    if preserved_business_units:
+                        state.collected_params["businessUnits"] = preserved_business_units
+                    if preserved_environments:
+                        state.collected_params["environments"] = preserved_environments
+                    if preserved_zones:
+                        state.collected_params["zones"] = preserved_zones
+                    if preserved_ipc_engagement_id:
+                        state.collected_params["ipc_engagement_id"] = preserved_ipc_engagement_id
+                    if preserved_last_list_cache is not None:
+                        state.collected_params["_last_list_cache"] = preserved_last_list_cache
+                        state.collected_params["_last_list_resource_type"] = preserved_last_list_resource
+                        state.collected_params["_last_list_endpoints"] = preserved_last_list_endpoints
+                        state.collected_params["_last_list_engagement_id"] = preserved_last_list_engagement
                     state.user_query = user_input
                     
                     # Persist the reset state
@@ -631,6 +746,18 @@ Return ONLY a JSON array of strings, like:
                     "reason": f"User greeting or capability question: {greeting_type}",
                     "greeting_type": greeting_type
                 }
+        
+        # PRIORITY 0.5: Check for context switch intent (switch datacenter, change engagement, etc.)
+        # This should be checked early as it's a high-priority user intent
+        context_switch_result = self._check_context_switch_intent(user_input)
+        if context_switch_result:
+            logger.info(f"🔄 Context switch detected: {context_switch_result.get('entity_type')} -> {context_switch_result.get('target_value')}")
+            return {
+                "route": "context_switch",
+                "reason": f"User wants to switch {context_switch_result.get('entity_type')}",
+                "entity_type": context_switch_result.get("entity_type"),
+                "target_value": context_switch_result.get("target_value")
+            }
         
         # PRIORITY 1: Check for active workflow states
         # These states indicate user is responding to a prompt for a resource operation
@@ -817,6 +944,37 @@ Respond with ONLY ONE of these:
                     "metadata": {"greeting_type": greeting_type}
                 }
             
+            # Handle context switch requests (switch datacenter, change engagement, etc.)
+            if route == "context_switch":
+                from app.agents.handlers.context_switch_handler import context_switch_handler
+                
+                entity_type = routing_decision.get("entity_type")
+                target_value = routing_decision.get("target_value")
+                
+                logger.info(f"🔄 Executing context switch: {entity_type} -> {target_value}")
+                
+                result = await context_switch_handler.handle_switch(
+                    state=state,
+                    entity_type=entity_type,
+                    target_value=target_value,
+                    auth_token=auth_token
+                )
+                
+                # Update state if awaiting selection
+                if result.get("awaiting_selection"):
+                    conversation_state_manager.update_session(state)
+                
+                return {
+                    "success": result.get("success", False),
+                    "response": result.get("response", ""),
+                    "routing": "context_switch",
+                    "metadata": {
+                        "entity_type": entity_type,
+                        "target_value": target_value,
+                        "switched_to": result.get("switched_to")
+                    }
+                }
+            
             if route == "intent":
                 # Route to intent agent
                 state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
@@ -827,10 +985,24 @@ Respond with ONLY ONE of these:
                     if routing_decision.get("contextual_query"):
                         state.user_query = query_to_use
                         logger.info(f"📝 Updated user_query to contextual query: '{query_to_use[:50]}...'")
+                    # IMPORTANT: Do NOT pass full state.to_dict() to the LLM (can exceed context window).
+                    # Provide only a slim, high-signal snapshot.
+                    slim_state = {
+                        "status": state.status.value,
+                        "selected_engagement_id": state.selected_engagement_id,
+                        "user_type": state.user_type,
+                        "resource_type": state.resource_type,
+                        "operation": state.operation,
+                        "endpoints": state.collected_params.get("endpoints"),
+                        "endpoint_names": state.collected_params.get("endpoint_names"),
+                        "businessUnits": state.collected_params.get("businessUnits"),
+                        "environments": state.collected_params.get("environments"),
+                        "zones": state.collected_params.get("zones"),
+                    }
                     result = await self.intent_agent.execute(query_to_use, {
                         "session_id": state.session_id,
                         "user_id": state.user_id,
-                        "conversation_state": state.to_dict()})
+                        "conversation_state": slim_state})
                     # STEP 1 : Update state based on intent detection
                     if result.get("success") and result.get("intent_detected"):
                         intent_data = result.get("intent_data", {})
@@ -858,7 +1030,7 @@ Respond with ONLY ONE of these:
                             if self.validation_agent:
                                 validation_result = await self.validation_agent.execute(user_input, {
                                     "session_id": state.session_id,
-                                    "conversation_state": state.to_dict(),
+                                    "conversation_state": slim_state,
                                     "auth_token": auth_token,
                                     "user_type": state.user_type})
                                 
@@ -868,7 +1040,6 @@ Respond with ONLY ONE of these:
                                     logger.info(f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'")
                                     return await self.execute(pending_request, {
                                         "session_id": state.session_id,
-                                        "conversation_state": state.to_dict(),
                                         "user_roles": user_roles
                                     })
                                 
@@ -878,7 +1049,6 @@ Respond with ONLY ONE of these:
                                     logger.info(f"💾 Workflow paused - handling pending request: '{pending_request}'")
                                     pending_result = await self.execute(pending_request, {
                                         "session_id": state.session_id,
-                                        "conversation_state": state.to_dict(),
                                         "user_roles": user_roles
                                     })
                                     combined_response = validation_result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
@@ -903,7 +1073,6 @@ Respond with ONLY ONE of these:
                                     if self.execution_agent:
                                         exec_result = await self.execution_agent.execute("", {
                                             "session_id": state.session_id,
-                                            "conversation_state": state.to_dict(),
                                             "user_roles": user_roles or [],
                                             "auth_token": auth_token,
                                             "user_type": state.user_type
@@ -942,7 +1111,6 @@ Respond with ONLY ONE of these:
                             if self.execution_agent:
                                 exec_result = await self.execution_agent.execute("", {
                                     "session_id": state.session_id,
-                                    "conversation_state": state.to_dict(),
                                     "user_roles": user_roles or [],
                                     "auth_token": auth_token,
                                     "user_type": state.user_type
@@ -978,9 +1146,10 @@ Respond with ONLY ONE of these:
                 # Route to validation agent
                 state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", routing_decision["reason"])
                 if self.validation_agent:
+                    slim_state = self._slim_state_for_llm(state)
                     result = await self.validation_agent.execute(user_input, {
                         "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
+                        "conversation_state": slim_state,
                         "auth_token": auth_token,
                         "user_type": state.user_type
                     })
@@ -1001,7 +1170,6 @@ Respond with ONLY ONE of these:
                         # Recursively process the pending request
                         return await self.execute(pending_request, {
                             "session_id": state.session_id,
-                            "conversation_state": state.to_dict(),
                             "user_roles": user_roles
                         })
                     
@@ -1012,7 +1180,6 @@ Respond with ONLY ONE of these:
                         # Process the pending request (workflow state is preserved for later resume)
                         pending_result = await self.execute(pending_request, {
                             "session_id": state.session_id,
-                            "conversation_state": state.to_dict(),
                             "user_roles": user_roles
                         })
                         # Combine the save message with the result
@@ -1040,7 +1207,6 @@ Respond with ONLY ONE of these:
                         if self.execution_agent:
                             exec_result = await self.execution_agent.execute("", {
                                 "session_id": state.session_id,
-                                "conversation_state": state.to_dict(),
                                 "user_roles": user_roles or [],
                                 "auth_token": auth_token,
                                 "user_type": state.user_type
@@ -1094,7 +1260,6 @@ Respond with ONLY ONE of these:
                 if self.execution_agent:
                     result = await self.execution_agent.execute("", {
                         "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
                         "user_roles": user_roles or [],
                         "auth_token": auth_token,
                         "user_type": state.user_type
@@ -1320,7 +1485,6 @@ Respond with ONLY ONE of these:
             if self.execution_agent:
                 exec_result = await self.execution_agent.execute("", {
                     "session_id": state.session_id,
-                    "conversation_state": state.to_dict(),
                     "user_roles": user_roles or [],
                     "auth_token": state.auth_token,
                     "user_type": state.user_type
@@ -1462,10 +1626,19 @@ Respond with ONLY ONE of these:
             
             logger.info(f"✅ User selected engagement: {engagement_name} (ID: {engagement_id})")
             
+            # If this was an explicit context-switch flow, clear dependent context (datacenter/endpoints, cluster, etc.)
+            # and DO NOT continue with the original "change engagement" text as an operation.
+            is_explicit_switch = state.collected_params.get("_pending_context_switch") == "engagement"
+            if is_explicit_switch:
+                from app.agents.handlers.context_switch_handler import context_switch_handler
+                await context_switch_handler._clear_dependents(state, state.user_id, "engagement")
+                state.collected_params.pop("_pending_context_switch", None)
+
             # Store in state
             state.selected_engagement_id = engagement_id
             state.pending_engagements = None
-            state.status = ConversationStatus.COLLECTING_PARAMS  # Resume the original flow
+            # Resume the original flow only when this engagement selection was needed for an operation.
+            state.status = ConversationStatus.COLLECTING_PARAMS if not is_explicit_switch else ConversationStatus.INITIATED
             
             # Store in API executor session for future calls
             from app.services.api_executor_service import api_executor_service
@@ -1478,8 +1651,21 @@ Respond with ONLY ONE of these:
             # Persist state
             conversation_state_manager.update_session(state)
             
-            # Now continue with the original operation - re-route to validation
             response = f"✅ Great! I've selected **{engagement_name}** (ID: {engagement_id}) for this session.\n\n"
+            if is_explicit_switch:
+                response += (
+                    "ℹ️ Since the engagement changed, I cleared the dependent context (datacenter/endpoints, "
+                    "cluster selection, derived IPC engagement ID, and last list cache)."
+                )
+                state.user_query = None
+                conversation_state_manager.update_session(state)
+                return {
+                    "success": True,
+                    "response": response,
+                    "routing": "engagement_selection",
+                    "metadata": {"context_cleared": ["datacenter", "cluster"]}
+                }
+
             response += "Now let me continue with your request..."
             
             # Re-process the original query with the engagement now set
@@ -1488,9 +1674,10 @@ Respond with ONLY ONE of these:
                 # Route back to validation to continue
                 state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", "Engagement selected, continuing operation")
                 if self.validation_agent:
+                    slim_state = self._slim_state_for_llm(state)
                     validation_result = await self.validation_agent.execute(state.user_query, {
                         "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
+                        "conversation_state": slim_state,
                         "auth_token": state.auth_token,
                         "user_type": state.user_type
                     })
@@ -1502,7 +1689,6 @@ Respond with ONLY ONE of these:
                         if self.execution_agent:
                             exec_result = await self.execution_agent.execute("", {
                                 "session_id": state.session_id,
-                                "conversation_state": state.to_dict(),
                                 "user_roles": user_roles or [],
                                 "auth_token": state.auth_token,
                                 "user_type": state.user_type

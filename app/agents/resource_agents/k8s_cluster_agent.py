@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import logging
 from app.agents.resource_agents.base_resource_agent import BaseResourceAgent
 from app.services.api_executor_service import api_executor_service
+from app.services.ai_service import ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,74 @@ class K8sClusterAgent(BaseResourceAgent):
     def get_supported_operations(self) -> List[str]:
         """Get list of supported operations."""
         return ["list", "create", "update", "delete", "scale", "read"]
+
+    async def _extract_firewall_name_with_llm(self, user_query: str) -> Optional[str]:
+        """
+        LLM-based firewall intent + name extraction.
+
+        This replaces regex extraction to avoid false positives like "for me".
+        Only returns a firewall name when the query clearly references a firewall (or fw).
+        """
+        if not user_query or not user_query.strip():
+            return None
+
+        prompt = f"""You are a strict JSON extractor.
+
+User message:
+\"\"\"{user_query}\"\"\"
+
+Decide if the user is asking to list/filter clusters by a specific firewall.
+
+Return ONLY valid JSON:
+{{"is_firewall_filter": true|false, "firewall_name": string|null, "confidence": number}}
+
+Hard rules (MUST follow):
+- If the message contains the word "firewall" or "fw" AND it is followed by an identifier/name, then:
+  - is_firewall_filter MUST be true
+  - firewall_name MUST be that identifier/name
+- "for me/us/you" are NOT firewall names.
+- If the message does not mention firewall/fw at all, is_firewall_filter MUST be false.
+
+Examples:
+- "list clusters for me" -> {{"is_firewall_filter": false, "firewall_name": null, "confidence": 0.95}}
+- "show clusters for firewall Tata_Com222" -> {{"is_firewall_filter": true, "firewall_name": "Tata_Com222", "confidence": 0.95}}
+- "clusters associated to fw vayu-blr-fw01" -> {{"is_firewall_filter": true, "firewall_name": "vayu-blr-fw01", "confidence": 0.9}}
+- "list firewalls in blr" -> {{"is_firewall_filter": false, "firewall_name": null, "confidence": 0.9}}
+"""
+
+        try:
+            llm_response = await ai_service._call_chat_with_retries(
+                prompt=prompt,
+                max_tokens=120,
+                temperature=0.0,
+            )
+            parsed = ai_service._extract_json_safe(llm_response) or {}
+            is_fw = bool(parsed.get("is_firewall_filter"))
+            fw_name = parsed.get("firewall_name")
+            confidence = parsed.get("confidence", None)
+
+            if isinstance(fw_name, str):
+                fw_name = fw_name.strip()
+                if not fw_name:
+                    fw_name = None
+            else:
+                fw_name = None
+
+            # Hard safety guard
+            if fw_name and fw_name.lower() in {"me", "us", "you", "him", "her", "them", "my", "our", "your"}:
+                return None
+
+            query_lower = user_query.lower()
+            explicitly_mentions_firewall = ("firewall" in query_lower) or (" fw" in query_lower) or query_lower.startswith("fw ")
+            if not explicitly_mentions_firewall:
+                return None
+
+            if is_fw and fw_name:
+                return fw_name
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Firewall LLM extraction failed: {e}")
+            return None
     
     async def execute_operation(self,operation: str,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -90,6 +159,11 @@ class K8sClusterAgent(BaseResourceAgent):
             user_id = context.get("user_id")
             user_type = context.get("user_type")
             selected_engagement_id = context.get("selected_engagement_id")
+            user_query = context.get("user_query", "")
+            
+            # Debug: Log all params to see what we're receiving
+            logger.info(f"📋 Received params keys: {list(params.keys())}")
+            logger.info(f"📋 User query: {user_query}")
             
             # Get engagement_id (required for URL parameter)
             if selected_engagement_id:
@@ -109,11 +183,57 @@ class K8sClusterAgent(BaseResourceAgent):
                     "response": "Unable to retrieve engagement information. Please select an engagement first."
                 }
             
-            # Get endpoint IDs
+            # Check if filtering by firewall name FIRST (before endpoint logic)
+            # This takes priority - when filtering by firewall, we filter by BU, not endpoints
+            firewall_name = params.get("firewall_name")
+            
+            # LLM-based extraction (replaces regex to avoid false positives like "for me")
+            if not firewall_name:
+                extracted_fw = await self._extract_firewall_name_with_llm(context.get("user_query", ""))
+                if extracted_fw:
+                    firewall_name = extracted_fw
+                    params["firewall_name"] = extracted_fw
+                    logger.info(f"🔍 LLM extracted firewall name from query: {firewall_name}")
+            
+            network_agent = None
+            firewall_info = None
+            business_units = []
+            
+            if firewall_name:
+                logger.info(f"🔥 Filtering clusters by firewall: {firewall_name}")
+                # Import NetworkAgent to find firewall
+                from app.agents.resource_agents.network_agent import NetworkAgent
+                network_agent = NetworkAgent()
+                
+                firewall_info = await network_agent.find_firewall_by_name(firewall_name, context)
+                if not firewall_info:
+                    return {
+                        "success": False,
+                        "error": f"Firewall '{firewall_name}' not found",
+                        "response": f"❌ Could not find firewall '{firewall_name}'. Please check the firewall name and try again."
+                    }
+                
+                # Extract department IDs from firewall (these are the BU IDs)
+                department_ids = firewall_info.get("department_ids", [])
+                if not department_ids:
+                    return {
+                        "success": False,
+                        "error": f"Firewall '{firewall_name}' has no associated departments",
+                        "response": f"❌ Firewall '{firewall_info['firewall']['display_name']}' does not have any associated business units/departments."
+                    }
+                
+                # CRITICAL: Use department IDs as business unit filter
+                # When filtering by firewall, we filter by BU, NOT by endpoints
+                business_units = department_ids
+                logger.info(f"🏢 Using department IDs from firewall: {department_ids} (departments: {firewall_info.get('department_names', [])})")
+                logger.info(f"🔥 Filtering clusters by BU IDs from firewall '{firewall_info['firewall']['display_name']}': {business_units}")
+            
+            # Get endpoint IDs (only use if NOT filtering by firewall, or if user explicitly requested endpoints)
             endpoint_ids = params.get("endpoints", [])
             
-            # Get BU/Environment/Zone filters from params
-            business_units = params.get("businessUnits", [])
+            # Get BU/Environment/Zone filters from params (if not set by firewall)
+            if not business_units:
+                business_units = params.get("businessUnits", [])
             environments = params.get("environments", [])
             zones = params.get("zones", [])
             
@@ -121,41 +241,61 @@ class K8sClusterAgent(BaseResourceAgent):
             user_query = context.get("user_query", "").lower()
             wants_all = "all" in user_query or "every" in user_query or "all endpoints" in user_query
             
-            # Check if user wants to filter by BU/Environment/Zone
-            filter_request = self._detect_filter_request(user_query)
-            if filter_request and not (business_units or environments or zones):
-                # User asked to filter but hasn't selected options yet - show them the list
-                logger.info(f"🔍 Filter request detected: {filter_request}")
-                filter_options = await self._get_filter_options(filter_request, context)
-                if filter_options and filter_options.get("needs_selection"):
-                    # Store options in response metadata for orchestrator to save to state
-                    filter_options["set_filter_state"] = True
-                    filter_options["filter_options_for_state"] = filter_options.get("options", [])
-                    filter_options["filter_type_for_state"] = filter_request
-                    return filter_options  # Returns formatted response with selectable options
-            if not endpoint_ids and not wants_all:
-                # This is a fallback; ideally ValidationAgent should have asked for endpoint selection
+            # When filtering by firewall, we should query ALL endpoints (clusters can be in any endpoint for that BU)
+            # Unless user explicitly specified endpoints
+            if firewall_name and firewall_info:
+                if not endpoint_ids:
+                    # Get all endpoints to search across all locations for clusters with matching BU
+                    logger.info("📍 Firewall filter active - querying all endpoints to find clusters with matching BU")
+                    datacenters = await self.get_datacenters(
+                        engagement_id=engagement_id,
+                        user_type=user_type,
+                        auth_token=auth_token
+                    )
+                    endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
+                    logger.info(f"📍 Will search across {len(endpoint_ids)} endpoints for clusters with BU IDs: {business_units}")
+                else:
+                    logger.info(f"📍 User specified endpoints, but filtering by firewall BU: {business_units}")
+            
+            # Check if user wants to filter by BU/Environment/Zone (only if not already filtering by firewall)
+            if not firewall_name:
+                filter_request = self._detect_filter_request(user_query)
+                if filter_request and not (business_units or environments or zones):
+                    # User asked to filter but hasn't selected options yet - show them the list
+                    logger.info(f"🔍 Filter request detected: {filter_request}")
+                    filter_options = await self._get_filter_options(filter_request, context)
+                    if filter_options and filter_options.get("needs_selection"):
+                        # Store options in response metadata for orchestrator to save to state
+                        filter_options["set_filter_state"] = True
+                        filter_options["filter_options_for_state"] = filter_options.get("options", [])
+                        filter_options["filter_type_for_state"] = filter_request
+                        return filter_options  # Returns formatted response with selectable options
+            
+            # Fallback: get endpoints if not provided and not filtering by firewall
+            if not endpoint_ids and not firewall_name and not wants_all:
                 logger.info("📍 No specific endpoints provided, fetching all available endpoints")
                 datacenters = await self.get_datacenters(
                     engagement_id=engagement_id,
-                    user_roles=context.get("user_roles"),
+                    user_type=user_type,
                     auth_token=auth_token
                 )
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
-            elif not endpoint_ids and wants_all:
+            elif not endpoint_ids and wants_all and not firewall_name:
                 # User explicitly wants all endpoints
                 logger.info("📍 User requested all endpoints, fetching all")
                 datacenters = await self.get_datacenters(
                     engagement_id=engagement_id,
-                    user_roles=context.get("user_roles"),
+                    user_type=user_type,
                     auth_token=auth_token
                 )
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
+            
             if not endpoint_ids:
                 return {
                     "success": True,
                     "data": [],
                     "response": "No datacenters found for your engagement."}
+            
             logger.info(f"🔍 Listing clusters for endpoints: {endpoint_ids}")
             if business_units:
                 logger.info(f"🏢 Filtering by BU IDs: {business_units}")
@@ -184,7 +324,7 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="list",
                 params=api_payload,
-                user_roles=context.get("user_roles", []),
+                user_type=context.get("user_type"),
                 auth_token=context.get("auth_token")
             )
             if not result.get("success"):
@@ -196,28 +336,63 @@ class K8sClusterAgent(BaseResourceAgent):
             
             clusters = result.get("data", [])
             logger.info(f"✅ Found {len(clusters)} clusters")
-            # Apply intelligent filtering if user specified criteria
-            user_query = context.get("user_query", "")
-            filter_criteria = self._extract_filter_criteria(user_query)
             
-            if filter_criteria and clusters:
-                logger.info(f"🔍 Applying filter: {filter_criteria}")
-                clusters = await self.filter_with_llm(clusters, filter_criteria, user_query)
-                logger.info(f"✅ After filtering: {len(clusters)} clusters")
+            # If filtering by firewall, add context info for formatting
+            firewall_context = {}
+            if firewall_name and firewall_info:
+                firewall_context = {
+                    "filtered_by_firewall": True,
+                    "firewall_name": firewall_info["firewall"]["display_name"],
+                    "firewall_departments": firewall_info.get("department_names", [])
+                }
+            
+            # Client-side (post-fetch) LLM filtering based on available data
+            user_query = context.get("user_query", "")
+            filter_result = await self.apply_client_side_llm_filter(
+                items=clusters,
+                user_query=user_query,
+                params=params
+            )
+            if filter_result.get("filter_applied"):
+                clusters = filter_result["items"]
+                logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
+            
             # Format response with agentic formatter (prevents hallucination)
+            format_context = {
+                "query_type": "general",
+                "endpoint_names": params.get("endpoint_names", []),
+                **firewall_context
+            }
+            
             formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=clusters,
                 user_query=user_query,
-                context={"query_type": "general", "endpoint_names": params.get("endpoint_names", [])})
+                context=format_context
+            )
+            
+            # If filtering by firewall, prepend firewall info to response
+            if firewall_name and firewall_context:
+                firewall_display_name = firewall_context.get("firewall_name", firewall_name)
+                firewall_depts = firewall_context.get("firewall_departments", [])
+                dept_info = f" ({', '.join(firewall_depts)})" if firewall_depts else ""
+                formatted_response = (
+                    f"🔥 **Clusters associated with firewall: {firewall_display_name}{dept_info}**\n\n"
+                    + formatted_response
+                )
+            
             return {
                 "success": True,
                 "data": clusters,
                 "response": formatted_response,
                 "metadata": {
                     "count": len(clusters),
+                    "original_count": filter_result.get("original_count", len(clusters)) if isinstance(filter_result, dict) else len(clusters),
+                    "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
                     "endpoints_queried": len(endpoint_ids),
-                    "resource_type": "k8s_cluster"}}
+                    "resource_type": "k8s_cluster",
+                    "filtered_by_firewall": firewall_name if firewall_name else None
+                }}
         except Exception as e:
             logger.error(f"❌ Error listing clusters: {str(e)}", exc_info=True)
             raise
@@ -305,7 +480,7 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="list",
                 params=api_payload,
-                user_roles=context.get("user_roles", []),
+                user_type=context.get("user_type"),
                 auth_token=context.get("auth_token")
             )
             
@@ -337,14 +512,43 @@ class K8sClusterAgent(BaseResourceAgent):
             target_cluster = exact_match[0] if exact_match else matching_clusters[0]
             
             logger.info(f"✅ Found cluster: {target_cluster.get('clusterName')}")
+            logger.info(f"📋 Starting hierarchy lookup for cluster: {target_cluster.get('clusterName')}, engagement_id: {engagement_id}")
             
-            # Step 4: Get department details for hierarchy lookup
-            dept_result = await api_executor_service.get_department_details(
-                user_id=user_id,
-                auth_token=auth_token
-            )
+            # Step 4: Get IPC engagement ID for department details API
+            logger.info(f"🔄 Step 4: Converting PAAS engagement {engagement_id} to IPC engagement ID...")
+            try:
+                ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                    engagement_id=engagement_id,
+                    user_id=user_id,
+                    auth_token=auth_token
+                )
+                logger.info(f"📋 IPC engagement ID result: {ipc_engagement_id}")
+            except Exception as e:
+                logger.error(f"❌ Error getting IPC engagement ID: {str(e)}", exc_info=True)
+                ipc_engagement_id = None
+            
+            if not ipc_engagement_id:
+                logger.warning(f"⚠️ Failed to get IPC engagement ID (engagement_id={engagement_id}), cannot fetch hierarchy")
+                return self._format_cluster_info_response(target_cluster, None, None)
+            
+            logger.info(f"✅ Got IPC engagement ID: {ipc_engagement_id}")
+            
+            # Step 5: Get department details for hierarchy lookup
+            logger.info(f"🏢 Step 5: Fetching department details for IPC engagement: {ipc_engagement_id}")
+            try:
+                dept_result = await api_executor_service.get_department_details(
+                    ipc_engagement_id=ipc_engagement_id,
+                    user_id=user_id,
+                    auth_token=auth_token
+                )
+                logger.info(f"📋 Department details result: success={dept_result.get('success') if dept_result else False}, has_data={bool(dept_result)}")
+            except Exception as e:
+                logger.error(f"❌ Error getting department details: {str(e)}", exc_info=True)
+                dept_result = None
             
             if not dept_result or not dept_result.get("success"):
+                error_msg = dept_result.get('error') if dept_result else 'No result'
+                logger.warning(f"⚠️ Failed to get department details: {error_msg}")
                 # Return basic cluster info without hierarchy
                 return self._format_cluster_info_response(target_cluster, None, None)
             
@@ -352,9 +556,12 @@ class K8sClusterAgent(BaseResourceAgent):
             dept_list = dept_result.get("departmentList", [])
             
             if not dept_list:
+                logger.warning(f"⚠️ Department details returned empty list")
                 return self._format_cluster_info_response(target_cluster, None, None)
             
-            # Step 5: Find the zone/env/BU hierarchy by filtering
+            logger.info(f"✅ Retrieved {len(dept_list)} departments with hierarchy data")
+            
+            # Step 6: Find the zone/env/BU hierarchy by filtering
             hierarchy = await self._find_cluster_hierarchy(
                 target_cluster, 
                 dept_list,  # Pass the list, not the full response dict
@@ -362,7 +569,10 @@ class K8sClusterAgent(BaseResourceAgent):
                 context
             )
             
-            # Step 6: Find firewall for this cluster's BU - ONLY if user asked for it
+            if not hierarchy:
+                logger.warning(f"⚠️ Could not determine hierarchy for cluster {target_cluster.get('clusterName')}")
+            
+            # Step 7: Find firewall for this cluster's BU - ONLY if user asked for it
             firewall_info = None
             if wants_firewall and hierarchy:
                 logger.info(f"🔥 User requested firewall info, looking up for BU {hierarchy.get('bu_id')}")
@@ -500,7 +710,8 @@ class K8sClusterAgent(BaseResourceAgent):
                     resource_type="k8s_cluster",
                     operation="list",
                     params=api_payload,
-                    user_roles=context.get("user_roles", [])
+                    user_type=context.get("user_type"),
+                    auth_token=context.get("auth_token")
                 )
                 
                 if result.get("success"):
@@ -708,7 +919,7 @@ class K8sClusterAgent(BaseResourceAgent):
                 resource_type="k8s_cluster",
                 operation="create",
                 params=api_payload,
-                user_roles=context.get("user_roles", []),
+                user_type=context.get("user_type"),
                 auth_token=context.get("auth_token"))
             if not result.get("success"):
                 return {

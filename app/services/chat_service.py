@@ -124,8 +124,13 @@ class ChatService:
         db: Session = None
     ) -> Optional[ChatModel]:
         """
-        Create a chat with a specific ID (upsert behavior).
+        Create or update a chat with a specific ID (true upsert behavior).
         Used when OpenWebUI frontend generates its own chat IDs.
+        
+        This function:
+        1. Checks if chat exists for this user
+        2. Updates if exists, creates if not
+        3. Handles race conditions gracefully
         """
         try:
             now = int(time.time())
@@ -138,28 +143,73 @@ class ChatService:
                     title = auto_title
                     chat_data["title"] = title
             
-            chat = Chat(
-                id=chat_id,  # Use the provided ID instead of generating UUID
-                user_id=user_id,
-                title=title,
-                chat=chat_data,
-                folder_id=folder_id,
-                created_at=now,
-                updated_at=now,
-                meta={},
-                archived=False,
-                pinned=False,
-            )
+            # Check if chat already exists (for this user)
+            existing_chat = db.query(Chat).filter(
+                Chat.id == chat_id,
+                Chat.user_id == user_id
+            ).first()
             
-            db.add(chat)
-            db.commit()
-            db.refresh(chat)
-            
-            log.info(f"Created chat with custom ID: {chat_id}")
-            return ChatModel.model_validate(chat)
+            if existing_chat:
+                # Update existing chat - merge chat data
+                log.debug(f"Chat {chat_id} exists, updating...")
+                existing_chat.chat = {**existing_chat.chat, **chat_data}
+                existing_chat.updated_at = now
+                if title != "New Chat":
+                    existing_chat.title = title
+                if folder_id is not None:
+                    existing_chat.folder_id = folder_id
+                
+                db.commit()
+                db.refresh(existing_chat)
+                
+                log.info(f"Updated existing chat with ID: {chat_id}")
+                return ChatModel.model_validate(existing_chat)
+            else:
+                # Create new chat
+                log.debug(f"Chat {chat_id} does not exist, creating...")
+                chat = Chat(
+                    id=chat_id,  # Use the provided ID instead of generating UUID
+                    user_id=user_id,
+                    title=title,
+                    chat=chat_data,
+                    folder_id=folder_id,
+                    created_at=now,
+                    updated_at=now,
+                    meta={},
+                    archived=False,
+                    pinned=False,
+                )
+                
+                db.add(chat)
+                db.commit()
+                db.refresh(chat)
+                
+                log.info(f"Created chat with custom ID: {chat_id}")
+                return ChatModel.model_validate(chat)
+                
         except Exception as e:
-            log.exception(f"Error creating chat with ID {chat_id}: {e}")
+            log.exception(f"Error upserting chat with ID {chat_id}: {e}")
             db.rollback()
+            
+            # If it's a duplicate key error, try to fetch and return the existing chat
+            if "UniqueViolation" in str(e) or "duplicate key" in str(e).lower():
+                log.warning(f"Duplicate key detected for chat {chat_id}, fetching existing chat...")
+                try:
+                    existing_chat = db.query(Chat).filter(
+                        Chat.id == chat_id,
+                        Chat.user_id == user_id
+                    ).first()
+                    if existing_chat:
+                        # Update it with the new data
+                        existing_chat.chat = {**existing_chat.chat, **chat_data}
+                        existing_chat.updated_at = int(time.time())
+                        db.commit()
+                        db.refresh(existing_chat)
+                        log.info(f"Recovered from duplicate key error, updated chat {chat_id}")
+                        return ChatModel.model_validate(existing_chat)
+                except Exception as recovery_error:
+                    log.error(f"Failed to recover from duplicate key error: {recovery_error}")
+            
             return None
 
     def import_chats(

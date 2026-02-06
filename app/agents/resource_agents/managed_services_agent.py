@@ -200,9 +200,19 @@ class ManagedServicesAgent(BaseResourceAgent):
                 services = services.get("data", [])
             
             logger.info(f"✅ Found {len(services)} {service_display_name} service(s)")
+
+            # Client-side (post-fetch) LLM filtering based on available data
+            user_query = context.get("user_query", "")
+            filter_result = await self.apply_client_side_llm_filter(
+                items=services if isinstance(services, list) else [],
+                user_query=user_query,
+                params=params
+            )
+            if filter_result.get("filter_applied"):
+                services = filter_result["items"]
+                logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
             
             # Format response with agentic formatter (prevents hallucination)
-            user_query = context.get("user_query", "")
             formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=services,
@@ -221,6 +231,8 @@ class ManagedServicesAgent(BaseResourceAgent):
                 "response": formatted_response,
                 "metadata": {
                     "count": len(services),
+                    "original_count": filter_result.get("original_count", len(services)) if isinstance(filter_result, dict) else len(services),
+                    "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
                     "service_type": service_type,
                     "service_display_name": service_display_name,
                     "endpoints_queried": len(endpoint_ids)

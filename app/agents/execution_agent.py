@@ -115,6 +115,29 @@ All operations are routed through specialized resource agents for proper handlin
                 func=self._tool_get_endpoints,
                 description="Get available data center endpoints. Input: empty dict {}"
             )]
+
+    def _should_use_previous_list_cache(self, user_query: str) -> bool:
+        if not user_query:
+            return False
+        q = user_query.lower()
+        return any(
+            phrase in q
+            for phrase in [
+                "from above response",
+                "from above",
+                "above response",
+                "previous response",
+                "from the above",
+                "from the previous",
+                "from earlier",
+                "based on above",
+                # Common follow-up filtering phrasing (no refetch; filter last list)
+                "show only",
+                "only show",
+                "now show",
+                "filter",
+            ]
+        )
     
     def _tool_execute_operation(self, input_json: str) -> str:
         """Tool wrapper for execute_operation."""
@@ -274,7 +297,97 @@ All operations are routed through specialized resource agents for proper handlin
             user_id = context.get("user_id") if context else None
             user_query = context.get("user_query", state.user_query) if context else state.user_query
             auth_token = context.get("auth_token") if context else state.auth_token
+
+            # If user asked to filter "from above response", reuse last list data (no refetch)
+            if (
+                state.operation == "list"
+                and self._should_use_previous_list_cache(user_query)
+                and state.collected_params.get("_last_list_cache") is not None
+                and state.collected_params.get("_last_list_resource_type") == state.resource_type
+            ):
+                logger.info("♻️ Using cached previous list response (no API refetch)")
+                cached_items = state.collected_params.get("_last_list_cache") or []
+                resource_agent = self.resource_agent_map.get(state.resource_type, self.generic_agent)
+                # Apply client-side filtering on cached data
+                filter_result = await resource_agent.apply_client_side_llm_filter(
+                    items=cached_items if isinstance(cached_items, list) else [],
+                    user_query=user_query,
+                    params=state.collected_params,
+                )
+                filtered_items = filter_result.get("items", cached_items)
+                formatted = await resource_agent.format_response_agentic(
+                    operation="list",
+                    raw_data=filtered_items,
+                    user_query=user_query,
+                    context={
+                        "query_type": "cached_followup",
+                        "original_count": filter_result.get("original_count", len(cached_items) if isinstance(cached_items, list) else 0),
+                        "filtered_count": filter_result.get("filtered_count", len(filtered_items) if isinstance(filtered_items, list) else 0),
+                        "client_side_filter_applied": bool(filter_result.get("filter_applied")),
+                        "cached": True,
+                    },
+                )
+                execution_result = {
+                    "success": True,
+                    "data": filtered_items,
+                    "response": formatted,
+                    "metadata": {
+                        "query_type": "cached_followup",
+                        "cached": True,
+                        "client_side_filter_applied": bool(filter_result.get("filter_applied")),
+                        "original_count": filter_result.get("original_count"),
+                        "count": filter_result.get("filtered_count"),
+                    },
+                }
+                state.set_execution_result(execution_result)
+                state.status = ConversationStatus.COMPLETED
+                conversation_state_manager.update_session(state)
+                return {
+                    "agent_name": self.agent_name,
+                    "success": True,
+                    "output": formatted,
+                    "execution_result": execution_result,
+                    "metadata": execution_result.get("metadata", {}),
+                }
             
+            # IPC ENGAGEMENT DERIVATION (per-chat): BU/Env/Zone lists require ipc_engagement_id.
+            # Never prompt the user for it; derive from selected_engagement_id and persist in session.
+            if state.operation == "list" and state.resource_type in ["business_unit", "environment", "zone"]:
+                if not state.collected_params.get("ipc_engagement_id"):
+                    if state.selected_engagement_id:
+                        try:
+                            ipc_id = await api_executor_service.get_ipc_engagement_id(
+                                engagement_id=state.selected_engagement_id,
+                                user_id=user_id,
+                                auth_token=auth_token,
+                                force_refresh=False,
+                            )
+                            if ipc_id:
+                                state.collected_params["ipc_engagement_id"] = ipc_id
+                                conversation_state_manager.update_session(state)
+                                logger.info(f"✅ Derived & persisted ipc_engagement_id={ipc_id} for {state.resource_type} list")
+                            else:
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": False,
+                                    "error": "Failed to derive IPC engagement ID",
+                                    "output": (
+                                        "I couldn't derive the internal IPC engagement context from your selected engagement.\n\n"
+                                        "Please retry. If it still fails, re-select the engagement (or refresh your login token)."
+                                    ),
+                                }
+                        except Exception as e:
+                            logger.error(f"❌ IPC derivation failed: {e}")
+                            return {
+                                "agent_name": self.agent_name,
+                                "success": False,
+                                "error": "IPC engagement derivation error",
+                                "output": (
+                                    "I hit an error while deriving IPC engagement context needed for this request.\n\n"
+                                    "Please retry, or re-select the engagement."
+                                ),
+                            }
+
             # ENGAGEMENT CHECK: For operations that need IPC engagement ID, ensure we have a selected engagement
             # This applies to ALL resource operations that call APIs
             # - CUS users: Auto-select their engagement (they typically have one)
@@ -365,6 +478,19 @@ All operations are routed through specialized resource agents for proper handlin
                     "selected_engagement_id": state.selected_engagement_id
                 }
             )
+
+            # Cache last successful list data for "from above response" follow-ups
+            if execution_result.get("success") and state.operation == "list":
+                data = execution_result.get("data")
+                if isinstance(data, list):
+                    # Prevent DB bloat: cap cache size
+                    capped = data[:200]
+                    state.collected_params["_last_list_cache"] = capped
+                    state.collected_params["_last_list_resource_type"] = state.resource_type
+                    state.collected_params["_last_list_endpoints"] = state.collected_params.get("endpoints")
+                    state.collected_params["_last_list_engagement_id"] = state.selected_engagement_id
+                    conversation_state_manager.update_session(state)
+                    logger.info(f"💾 Cached last list: resource={state.resource_type}, items={len(capped)} (capped)")
             
             # Check if this is a filter selection response (needs user to select BU/Env/Zone)
             if execution_result.get("set_filter_state"):

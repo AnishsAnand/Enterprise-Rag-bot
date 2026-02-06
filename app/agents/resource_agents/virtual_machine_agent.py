@@ -111,8 +111,23 @@ class VirtualMachineAgent(BaseResourceAgent):
                     vm for vm in simplified_vms
                     if endpoint_filter.lower() in (vm.get("endpoint") or "").lower()
                 ]
-            # Use common LLM formatter
+
+            # Client-side (post-fetch) LLM filtering based on available data
             user_query = context.get("user_query", "") if context else ""
+            filter_result = await self.apply_client_side_llm_filter(
+                items=simplified_vms,
+                user_query=user_query,
+                params=params
+            )
+            if filter_result.get("filter_applied"):
+                filtered_simplified = filter_result["items"]
+                logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
+                # Map filtered simplified VMs back to original raw VM items using vmuuid
+                allowed = {vm.get("vmuuid") for vm in filtered_simplified if vm.get("vmuuid")}
+                if allowed:
+                    vms = [vm_item for vm_item in vms if (vm_item.get("virtualMachine", {}) or {}).get("vmuuid") in allowed]
+                simplified_vms = filtered_simplified
+            # Use common LLM formatter
             formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=simplified_vms,
@@ -122,7 +137,12 @@ class VirtualMachineAgent(BaseResourceAgent):
                 "success": True,
                 "data": vms,
                 "response": formatted_response,
-                "metadata": {"count": len(vms), "endpoints": endpoint_names}}
+                "metadata": {
+                    "count": len(vms),
+                    "original_count": filter_result.get("original_count", len(vms)) if isinstance(filter_result, dict) else len(vms),
+                    "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
+                    "endpoints": endpoint_names
+                }}
         except Exception as e:
             logger.error(f"❌ Error listing VMs: {str(e)}", exc_info=True)
             raise

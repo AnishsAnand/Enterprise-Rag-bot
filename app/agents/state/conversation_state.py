@@ -9,6 +9,11 @@ from enum import Enum
 import logging
 logger = logging.getLogger(__name__)
 
+# NOTE: User-level context service is NOT used here.
+# Context (engagement_id, datacenter, etc.) is persisted PER-CHAT/SESSION, not per-user.
+# Each new chat starts fresh and prompts for required context.
+# Context is stored in the session's collected_params and persisted via MemoriSessionManager.
+
 class ConversationStatus(Enum):
     """Status of the conversation flow."""
     INITIATED = "initiated"
@@ -90,12 +95,21 @@ class ConversationState:
         self.intent = f"{operation}_{resource_type}"
         self.required_params = set(required_params)
         self.optional_params = set(optional_params or [])
-        self.missing_params = self.required_params.copy()
+        
+        # Calculate missing params, accounting for already-collected params (e.g., preserved endpoints)
+        self.missing_params = set()
+        for param in self.required_params:
+            if param not in self.collected_params:
+                self.missing_params.add(param)
+            else:
+                logger.info(f"♻️ Using preserved param: {param} = {self.collected_params[param]}")
+        
         self.status = ConversationStatus.COLLECTING_PARAMS
         self.updated_at = datetime.utcnow()
         logger.info(
             f"📋 Intent set: {self.intent} | "
             f"Required: {self.required_params} | "
+            f"Already collected: {set(self.collected_params.keys()) & self.required_params} | "
             f"Missing: {self.missing_params}")
     
     def add_parameter(self, param_name: str, param_value: Any, is_valid: bool = True) -> None:
@@ -349,9 +363,17 @@ class ConversationState:
         # Restore engagement selection state
         state.pending_engagements = data.get("pending_engagements")
         state.selected_engagement_id = data.get("selected_engagement_id")
+        # Fallback restore from metadata (Memori stores these in extra_data)
+        metadata = data.get("metadata", {}) or {}
+        if state.selected_engagement_id is None and metadata.get("selected_engagement_id") is not None:
+            state.selected_engagement_id = metadata.get("selected_engagement_id")
+        if state.user_type is None and metadata.get("user_type") is not None:
+            state.user_type = metadata.get("user_type")
+        if state.pending_engagements is None and metadata.get("pending_engagements") is not None:
+            state.pending_engagements = metadata.get("pending_engagements")
         
         # Restore additional attributes from metadata
-        metadata = data.get("metadata", {})
+        metadata = data.get("metadata", {}) or {}
         if metadata.get("last_asked_param"):
             state.last_asked_param = metadata["last_asked_param"]
         return state
@@ -424,6 +446,8 @@ class ConversationStateManager:
     def create_session(self, session_id: str, user_id: str, auth_token: str = None, user_type: str = None) -> ConversationState:
         """
         Create a new conversation session.
+        Loads user's saved defaults from persistent storage for context inheritance.
+        
         Args:
             session_id: Unique session identifier
             user_id: User identifier
@@ -443,8 +467,28 @@ class ConversationStateManager:
                 self._states[session_id] = existing
                 logger.info(f"📖 Restored session from persistent storage: {session_id}")
                 return existing
-        # Create new session
+        # Create new session - starts fresh with no inherited context
+        # Context (engagement_id, datacenter, etc.) is persisted PER-CHAT, not per-user
+        # User will be prompted for required context in each new chat
+        #
+        # IMPORTANT: also clear per-user APIExecutorService caches here to prevent
+        # cross-chat leakage of engagement/endpoints. ConversationState is the
+        # source of truth for per-chat context.
+        try:
+            from app.services.api_executor_service import api_executor_service
+            # Best-effort: clear only in-memory caches (safe if it fails).
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(api_executor_service._clear_user_session(user_id))
+            else:
+                loop.run_until_complete(api_executor_service._clear_user_session(user_id))
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to clear API executor cache for new chat: {e}")
+
         state = ConversationState(session_id, user_id, auth_token=auth_token, user_type=user_type)
+        logger.info(f"🆕 New chat session created - no inherited context (per-chat persistence)")
+        
         self._states[session_id] = state
         # Persist immediately
         self._save_to_persistent(state)

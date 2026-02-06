@@ -42,6 +42,78 @@ class ValidationAgent(BaseAgent):
         self._current_engagement_id = None
         self.setup_agent()
 
+    async def _extract_firewall_name_with_llm(self, user_query: str) -> Optional[str]:
+        """
+        Determine if the user is requesting firewall-based filtering and extract the firewall name.
+
+        Important:
+        - This MUST NOT trigger on phrases like "for me" / "for us".
+        - Only return a name when the user is clearly referencing a firewall (e.g., "firewall X", "fw X",
+          "clusters for firewall X", "associated to firewall X").
+        """
+        if not user_query or not user_query.strip():
+            return None
+
+        prompt = f"""You are a strict JSON extractor.
+
+User message:
+\"\"\"{user_query}\"\"\"
+
+Decide if the user is asking to list/filter clusters by a specific firewall.
+
+Return ONLY valid JSON:
+{{"is_firewall_filter": true|false, "firewall_name": string|null, "confidence": number}}
+
+Hard rules (MUST follow):
+- If the message contains the word "firewall" or "fw" AND it is followed by an identifier/name, then:
+  - is_firewall_filter MUST be true
+  - firewall_name MUST be that identifier/name
+- "for me/us/you" are NOT firewall names.
+- If the message does not mention firewall/fw at all, is_firewall_filter MUST be false.
+
+Examples:
+- "list clusters for me" -> {{"is_firewall_filter": false, "firewall_name": null, "confidence": 0.95}}
+- "show clusters for firewall Tata_Com222" -> {{"is_firewall_filter": true, "firewall_name": "Tata_Com222", "confidence": 0.95}}
+- "clusters associated to fw vayu-blr-fw01" -> {{"is_firewall_filter": true, "firewall_name": "vayu-blr-fw01", "confidence": 0.9}}
+- "list firewalls in blr" -> {{"is_firewall_filter": false, "firewall_name": null, "confidence": 0.9}}
+"""
+        try:
+            llm_response = await ai_service._call_chat_with_retries(
+                prompt=prompt,
+                max_tokens=120,
+                temperature=0.0,
+            )
+            parsed = ai_service._extract_json_safe(llm_response) or {}
+            is_fw = bool(parsed.get("is_firewall_filter"))
+            fw_name = parsed.get("firewall_name")
+            confidence = parsed.get("confidence", None)
+
+            # Normalize
+            if isinstance(fw_name, str):
+                fw_name = fw_name.strip()
+                if not fw_name:
+                    fw_name = None
+            else:
+                fw_name = None
+
+            # Hard safety guard: never accept common pronouns as firewall names
+            if fw_name and fw_name.lower() in {"me", "us", "you", "him", "her", "them", "my", "our", "your"}:
+                logger.info(f"🛡️ Ignoring extracted firewall_name='{fw_name}' (likely pronoun)")
+                return None
+
+            # Only accept when explicitly firewall-related AND sufficiently confident
+            query_lower = user_query.lower()
+            explicitly_mentions_firewall = ("firewall" in query_lower) or (" fw" in query_lower) or query_lower.startswith("fw ")
+            if not explicitly_mentions_firewall:
+                return None
+
+            if is_fw and fw_name:
+                return fw_name
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Firewall LLM extraction failed: {e}")
+            return None
+
     def get_system_prompt(self) -> str:
         return """You are the Validation Agent, responsible for ensuring all parameters are correct and complete.
 
@@ -663,6 +735,38 @@ If NO location is mentioned in user's response:
                         "success": True,
                         "output": "Fetching available endpoints...",
                         "ready_to_execute": True }
+
+                # SPECIAL HANDLING: ipc_engagement_id is an INTERNAL derived value (from selected engagement)
+                # It should never be collected from user free-text (prevents bugs like ipc_engagement_id="list BUs").
+                if "ipc_engagement_id" in state.missing_params:
+                    try:
+                        if state.selected_engagement_id:
+                            ipc_id = await api_executor_service.get_ipc_engagement_id(
+                                engagement_id=state.selected_engagement_id,
+                                auth_token=auth_token,
+                                user_id=state.user_id
+                            )
+                            if ipc_id:
+                                state.add_parameter("ipc_engagement_id", ipc_id, is_valid=True)
+                                conversation_state_manager.update_session(state)
+                                logger.info(f"✅ Auto-derived ipc_engagement_id={ipc_id} from selected_engagement_id={state.selected_engagement_id}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to auto-derive ipc_engagement_id: {e}")
+
+                    # If we still don't have it, DO NOT try to extract from user free-text.
+                    # This value is internal-only and must come from API.
+                    if "ipc_engagement_id" in state.missing_params:
+                        conversation_state_manager.update_session(state)
+                        return {
+                            "agent_name": self.agent_name,
+                            "success": False,
+                            "output": (
+                                "I couldn't fetch the internal engagement context (IPC engagement ID) needed to continue.\n\n"
+                                "This should be automatic. Please ensure your login/token is valid and try again."
+                            ),
+                            "ready_to_execute": False,
+                            "missing_params": list(state.missing_params),
+                        }
                 # SPECIAL HANDLING FOR OTHER CREATE OPERATIONS
                 elif state.operation == "create":
                     # Check what's missing and prioritize logical order
@@ -728,41 +832,150 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                         }
                 # Check if we need endpoint/datacenter parameter
                 if "endpoints" in state.missing_params or "endpoint_id" in state.missing_params or "endpoint_ids" in state.missing_params:
-                    # SPECIAL CHECK: If user wants to filter by BU/Environment/Zone, 
-                    # skip endpoint prompt and go directly to execution (which will show filter options)
                     # IMPORTANT: Use input_text FIRST (current request), then fall back to state.user_query
                     user_query = input_text or state.user_query or ""
                     query_lower = user_query.lower()
                     
-                    logger.info(f"🔍 Checking for BU/Env/Zone filter in query: '{query_lower}' (resource_type: {state.resource_type})")
+                    # CRITICAL CHECK: If query is about filtering by firewall, skip endpoint extraction
+                    # Firewall-based filtering uses BU IDs, not endpoints
+                    is_firewall_query = False
+                    firewall_name = None
                     
-                    # Check for filter type keywords - these indicate user wants to filter by BU/Env/Zone
-                    # The endpoint will come FROM the filter selection, not from user
-                    bu_keywords = ["bu", "business unit", "business units", "department", "dept"]
-                    env_keywords = ["environment", "environments", "env"]
-                    zone_keywords = ["zone", "zones"]
+                    # Also check if firewall_name is already in collected_params
+                    existing_fw = state.collected_params.get("firewall_name")
+                    if existing_fw:
+                        is_firewall_query = True
+                        firewall_name = existing_fw
+                        logger.info(f"🔥 Firewall query detected from collected_params: firewall={firewall_name}")
+
+                    # If not already set, use LLM to decide/extract firewall name (NO regex matching)
+                    if not is_firewall_query and state.resource_type == "k8s_cluster" and state.operation == "list":
+                        extracted_fw = await self._extract_firewall_name_with_llm(user_query)
+                        if extracted_fw:
+                            is_firewall_query = True
+                            firewall_name = extracted_fw
+                            logger.info(f"🔥 LLM detected firewall-based query: firewall={firewall_name}")
                     
-                    # Check if query mentions filtering by any of these
-                    has_filter_intent = "filter" in query_lower or "by" in query_lower
-                    has_bu = any(kw in query_lower for kw in bu_keywords)
-                    has_env = any(kw in query_lower for kw in env_keywords)
-                    has_zone = any(kw in query_lower for kw in zone_keywords)
-                    
-                    is_filter_request = has_filter_intent and (has_bu or has_env or has_zone)
-                    logger.info(f"🔍 Filter check: has_filter_intent={has_filter_intent}, has_bu={has_bu}, has_env={has_env}, has_zone={has_zone}, is_filter_request={is_filter_request}")
-                    
-                    if is_filter_request and state.resource_type == "k8s_cluster":
-                        # Determine filter type
-                        if has_bu:
-                            filter_type = "bu"
-                        elif has_env:
-                            filter_type = "environment"
-                        else:
-                            filter_type = "zone"
+                    if is_firewall_query:
+                        # For firewall-based queries, endpoints are NOT required
+                        # The K8sClusterAgent will filter by BU IDs from the firewall
+                        logger.info(f"🔥 Skipping endpoint extraction for firewall-based query. Firewall: {firewall_name}")
                         
-                        logger.info(f"🎯 Detected {filter_type} filter request - skipping endpoint prompt, routing to execution")
+                        # Remove endpoints from missing_params since they're not needed for firewall filtering
+                        if "endpoints" in state.missing_params:
+                            state.missing_params.discard("endpoints")
+                        if "endpoint_id" in state.missing_params:
+                            state.missing_params.discard("endpoint_id")
+                        if "endpoint_ids" in state.missing_params:
+                            state.missing_params.discard("endpoint_ids")
                         
-                        # Get all endpoints temporarily (execution agent will show filter options)
+                        # Ensure firewall_name is in collected_params
+                        if firewall_name and not state.collected_params.get("firewall_name"):
+                            state.add_parameter("firewall_name", firewall_name, is_valid=True)
+                            logger.info(f"✅ Added firewall_name to collected_params: {firewall_name}")
+                        
+                        # Persist state changes
+                        conversation_state_manager.update_session(state)
+                        
+                        # If ready to execute, return immediately (skip endpoint extraction)
+                        if state.is_ready_to_execute():
+                            logger.info(f"✅ Firewall query ready to execute. Firewall: {firewall_name}, Missing params: {state.missing_params}")
+                            return {
+                                "agent_name": self.agent_name,
+                                "success": True,
+                                "output": f"Finding clusters associated with firewall {firewall_name}...",
+                                "ready_to_execute": True
+                            }
+                        
+                        # If still missing other params, skip endpoint extraction and check other missing params
+                        logger.info(f"⚠️ Firewall query but still missing params: {state.missing_params}")
+                        # Skip the rest of endpoint extraction logic - endpoints are not needed for firewall filtering
+                        # The code will continue to check other missing_params in the outer loop
+                        # We've already removed endpoints from missing_params, so this if block won't execute again
+                        # But we need to make sure we don't execute the endpoint extraction code below
+                        # So we'll use a flag or restructure - actually, since we removed endpoints from missing_params,
+                        # the outer if condition won't be true anymore, so the endpoint extraction won't run
+                        # But wait, we're still inside the if block, so we need to break out
+                        # Let's restructure: check firewall BEFORE checking missing_params for endpoints
+                        pass  # This will fall through, but endpoints are already removed from missing_params
+                    
+                    # SPECIAL CHECK: If user wants to filter by BU/Environment/Zone,
+                    # Only check this if NOT a firewall query (we already handled firewall above)
+                    if not is_firewall_query:
+                        # skip endpoint prompt and go directly to execution (which will show filter options)
+                        logger.info(f"🔍 Checking for BU/Env/Zone filter in query: '{query_lower}' (resource_type: {state.resource_type})")
+                    
+                        # Check for filter type keywords - these indicate user wants to filter by BU/Env/Zone
+                        # The endpoint will come FROM the filter selection, not from user
+                        bu_keywords = ["bu", "business unit", "business units", "department", "dept"]
+                        env_keywords = ["environment", "environments", "env"]
+                        zone_keywords = ["zone", "zones"]
+                        
+                        # Check if query mentions filtering by any of these
+                        has_filter_intent = "filter" in query_lower or "by" in query_lower
+                        has_bu = any(kw in query_lower for kw in bu_keywords)
+                        has_env = any(kw in query_lower for kw in env_keywords)
+                        has_zone = any(kw in query_lower for kw in zone_keywords)
+                        
+                        is_filter_request = has_filter_intent and (has_bu or has_env or has_zone)
+                        logger.info(f"🔍 Filter check: has_filter_intent={has_filter_intent}, has_bu={has_bu}, has_env={has_env}, has_zone={has_zone}, is_filter_request={is_filter_request}")
+                        
+                        if is_filter_request and state.resource_type == "k8s_cluster":
+                            # Determine filter type
+                            if has_bu:
+                                filter_type = "bu"
+                            elif has_env:
+                                filter_type = "environment"
+                            else:
+                                filter_type = "zone"
+                            
+                            logger.info(f"🎯 Detected {filter_type} filter request - skipping endpoint prompt, routing to execution")
+                            
+                            # Get all endpoints temporarily (execution agent will show filter options)
+                            endpoints_json = await self._fetch_available_options("endpoints")
+                            endpoints_data = json.loads(endpoints_json)
+                            
+                            # CHECK: If engagement selection is required (ENG users with multiple engagements)
+                            if endpoints_data.get("option_type") == "engagement_selection_required":
+                                logger.info("🏢 Engagement selection required - prompting user")
+                                engagements = endpoints_data.get("engagements", [])
+                                
+                                # Store engagements in state for later selection
+                                state.pending_engagements = engagements
+                                state.status = ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
+                                conversation_state_manager.update_session(state)
+                                
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": True,
+                                    "output": endpoints_data.get("prompt_suggestion", "Please select an engagement."),
+                                    "ready_to_execute": False,
+                                    "engagement_selection_required": True
+                                }
+                            
+                            if endpoints_data.get("options"):
+                                all_endpoint_ids = [opt.get("id") for opt in endpoints_data["options"] if opt.get("id")]
+                                all_endpoint_names = [opt.get("name") for opt in endpoints_data["options"] if opt.get("name")]
+                                
+                                # Temporarily mark endpoints as collected (execution will handle filter)
+                                state.add_parameter("endpoints", all_endpoint_ids, is_valid=True)
+                                state.add_parameter("endpoint_names", all_endpoint_names, is_valid=True)
+                                
+                                # Persist state
+                                conversation_state_manager.update_session(state)
+                                
+                                # Mark ready to execute - the K8sClusterAgent will detect the filter request
+                                # and show the BU/Env/Zone options instead of listing clusters
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": True,
+                                    "output": "Let me show you the available filter options...",
+                                    "ready_to_execute": True
+                                }
+                        
+                        # Only extract endpoints if NOT a firewall query
+                        logger.info("🔍 Collecting endpoint parameter using intelligent tools")
+                        # Fetch available endpoints dynamically
                         endpoints_json = await self._fetch_available_options("endpoints")
                         endpoints_data = json.loads(endpoints_json)
                         
@@ -785,77 +998,72 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                             }
                         
                         if endpoints_data.get("options"):
-                            all_endpoint_ids = [opt.get("id") for opt in endpoints_data["options"] if opt.get("id")]
-                            all_endpoint_names = [opt.get("name") for opt in endpoints_data["options"] if opt.get("name")]
+                            available_options = endpoints_data["options"]
+                            # ALWAYS use input_text for NEW requests (not cached state.user_query!)
+                            # Only use state.user_query if this is a follow-up response to "Which endpoint?"
+                            # We detect follow-up by checking if we already asked a question
+                            is_follow_up = len(state.conversation_history) > 1 and any(
+                                "which one would you like" in msg.get("content", "").lower()
+                                for msg in state.conversation_history if msg.get("role") == "assistant")
+                            text_to_analyze = input_text if not is_follow_up else input_text
+                            logger.info(f"🔍 Analyzing query: '{text_to_analyze}' for location extraction (is_follow_up: {is_follow_up})")
+                            # USE LLM FOR INTELLIGENT EXTRACTION (not primitive pattern matching!)
+                            try:
+                                extraction_result_json = await self._extract_location_from_query_json(json.dumps({
+                                    "user_query": text_to_analyze,
+                                    "available_options": available_options
+                                }))
+                                extraction_result = json.loads(extraction_result_json) if extraction_result_json else {}
+                            except Exception as e:
+                                logger.warning(f"⚠️ Location extraction failed: {e}")
+                                extraction_result = {}
+                            if extraction_result.get("extracted"):
+                                # LLM extracted a location!
+                                extracted_location = extraction_result.get("location", "")
+                                logger.info(f"🤖 LLM extracted location: '{extracted_location}'")
+                                # SPECIAL CASE: If location is "all", immediately match all endpoints
+                                if extracted_location.lower().strip() == "all":
+                                    logger.info(f"🌍 User requested ALL data centers!")
+                                    matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
+                                    matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
+                                    # Add to state
+                                    state.add_parameter("endpoints", matched_ids, is_valid=True)
+                                    state.add_parameter("endpoint_names", matched_names, is_valid=True)
+                                    # Persist state after parameter collection
+                                    conversation_state_manager.update_session(state)
+                                    # Check if ready to execute now that we've collected endpoints
+                                    if state.is_ready_to_execute():
+                                        logger.info("✅ All parameters collected, ready to execute")
+                                        return {
+                                            "agent_name": self.agent_name,
+                                            "success": True,
+                                            "output": f"Great! Fetching data from all {len(matched_ids)} data centers...",
+                                            "ready_to_execute": True}
+                                text_to_match = extracted_location
+                            else:
+                                text_to_match = input_text
+                                logger.info(f"🔍 No location in query, using current input: '{text_to_match}'")
                             
-                            # Temporarily mark endpoints as collected (execution will handle filter)
-                            state.add_parameter("endpoints", all_endpoint_ids, is_valid=True)
-                            state.add_parameter("endpoint_names", all_endpoint_names, is_valid=True)
+                            # Try to match user input to available endpoints (LLM-based!)
+                            try:
+                                match_result_json = await self._match_user_selection_json(json.dumps({
+                                    "user_text": text_to_match,
+                                    "available_options": available_options
+                                }))
+                                match_result = json.loads(match_result_json) if match_result_json else {}
+                            except Exception as e:
+                                logger.warning(f"⚠️ LLM matching failed: {e}")
+                                match_result = {}
+                            # FALLBACK: If LLM failed, try simple pattern matching
+                            if not match_result.get("matched"):
+                                logger.info("🔄 LLM matching failed, trying fallback pattern matching...")
+                                match_result = self._fallback_pattern_match(text_to_match, available_options)
                             
-                            # Persist state
-                            conversation_state_manager.update_session(state)
-                            
-                            # Mark ready to execute - the K8sClusterAgent will detect the filter request
-                            # and show the BU/Env/Zone options instead of listing clusters
-                            return {
-                                "agent_name": self.agent_name,
-                                "success": True,
-                                "output": "Let me show you the available filter options...",
-                                "ready_to_execute": True
-                            }
-                    
-                    logger.info("🔍 Collecting endpoint parameter using intelligent tools")
-                    # Fetch available endpoints dynamically
-                    endpoints_json = await self._fetch_available_options("endpoints")
-                    endpoints_data = json.loads(endpoints_json)
-                    
-                    # CHECK: If engagement selection is required (ENG users with multiple engagements)
-                    if endpoints_data.get("option_type") == "engagement_selection_required":
-                        logger.info("🏢 Engagement selection required - prompting user")
-                        engagements = endpoints_data.get("engagements", [])
-                        
-                        # Store engagements in state for later selection
-                        state.pending_engagements = engagements
-                        state.status = ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
-                        conversation_state_manager.update_session(state)
-                        
-                        return {
-                            "agent_name": self.agent_name,
-                            "success": True,
-                            "output": endpoints_data.get("prompt_suggestion", "Please select an engagement."),
-                            "ready_to_execute": False,
-                            "engagement_selection_required": True
-                        }
-                    
-                    if endpoints_data.get("options"):
-                        available_options = endpoints_data["options"]
-                        # ALWAYS use input_text for NEW requests (not cached state.user_query!)
-                        # Only use state.user_query if this is a follow-up response to "Which endpoint?"
-                        # We detect follow-up by checking if we already asked a question
-                        is_follow_up = len(state.conversation_history) > 1 and any(
-                            "which one would you like" in msg.get("content", "").lower()
-                            for msg in state.conversation_history if msg.get("role") == "assistant")
-                        text_to_analyze = input_text if not is_follow_up else input_text
-                        logger.info(f"🔍 Analyzing query: '{text_to_analyze}' for location extraction (is_follow_up: {is_follow_up})")
-                        # USE LLM FOR INTELLIGENT EXTRACTION (not primitive pattern matching!)
-                        try:
-                            extraction_result_json = await self._extract_location_from_query_json(json.dumps({
-                                "user_query": text_to_analyze,
-                                "available_options": available_options
-                            }))
-                            extraction_result = json.loads(extraction_result_json) if extraction_result_json else {}
-                        except Exception as e:
-                            logger.warning(f"⚠️ Location extraction failed: {e}")
-                            extraction_result = {}
-                        if extraction_result.get("extracted"):
-                            # LLM extracted a location!
-                            extracted_location = extraction_result.get("location", "")
-                            logger.info(f"🤖 LLM extracted location: '{extracted_location}'")
-                            # SPECIAL CASE: If location is "all", immediately match all endpoints
-                            if extracted_location.lower().strip() == "all":
-                                logger.info(f"🌍 User requested ALL data centers!")
-                                matched_ids = [opt.get("id") for opt in available_options if opt.get("id")]
-                                matched_names = [opt.get("name") for opt in available_options if opt.get("name")]
+                            if match_result.get("matched"):
+                                # Successfully matched!
+                                matched_ids = match_result.get("matched_ids", [])
+                                matched_names = match_result.get("matched_names", [])
+                                logger.info(f"✅ Matched '{input_text}' to {matched_names} (IDs: {matched_ids})")
                                 # Add to state
                                 state.add_parameter("endpoints", matched_ids, is_valid=True)
                                 state.add_parameter("endpoint_names", matched_names, is_valid=True)
@@ -867,78 +1075,42 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                                     return {
                                         "agent_name": self.agent_name,
                                         "success": True,
-                                        "output": f"Great! Fetching data from all {len(matched_ids)} data centers...",
+                                        "output": f"Great! Fetching clusters from {', '.join(matched_names)}...",
                                         "ready_to_execute": True}
-                            text_to_match = extracted_location
-                        else:
-                            text_to_match = input_text
-                            logger.info(f"🔍 No location in query, using current input: '{text_to_match}'")
-                        # Try to match user input to available endpoints (LLM-based!)
-                        try:
-                            match_result_json = await self._match_user_selection_json(json.dumps({
-                                "user_text": text_to_match,
-                                "available_options": available_options
-                            }))
-                            match_result = json.loads(match_result_json) if match_result_json else {}
-                        except Exception as e:
-                            logger.warning(f"⚠️ LLM matching failed: {e}")
-                            match_result = {}
-                        # FALLBACK: If LLM failed, try simple pattern matching
-                        if not match_result.get("matched"):
-                            logger.info("🔄 LLM matching failed, trying fallback pattern matching...")
-                            match_result = self._fallback_pattern_match(text_to_match, available_options)
-                        if match_result.get("matched"):
-                            # Successfully matched!
-                            matched_ids = match_result.get("matched_ids", [])
-                            matched_names = match_result.get("matched_names", [])
-                            logger.info(f"✅ Matched '{input_text}' to {matched_names} (IDs: {matched_ids})")
-                            # Add to state
-                            state.add_parameter("endpoints", matched_ids, is_valid=True)
-                            state.add_parameter("endpoint_names", matched_names, is_valid=True)
-                            # Persist state after parameter collection
-                            conversation_state_manager.update_session(state)
-                            # Check if ready to execute now that we've collected endpoints
-                            if state.is_ready_to_execute():
-                                logger.info("✅ All parameters collected, ready to execute")
+                                # If still missing params, continue to collect them
+                            elif match_result.get("ambiguous"):
+                                # Multiple matches - ask for clarification
+                                clarification = match_result.get("clarification_needed", "")
+                                # Set status to AWAITING_SELECTION - we need user to pick one
+                                state.status = ConversationStatus.AWAITING_SELECTION
+                                # Persist state so it's available for next request
+                                conversation_state_manager.update_session(state)
+
                                 return {
                                     "agent_name": self.agent_name,
                                     "success": True,
-                                    "output": f"Great! Fetching clusters from {', '.join(matched_names)}...",
-                                    "ready_to_execute": True}
-                            # If still missing params, continue to collect them
-                        elif match_result.get("ambiguous"):
-                            # Multiple matches - ask for clarification
-                            clarification = match_result.get("clarification_needed", "")
-                            # Set status to AWAITING_SELECTION - we need user to pick one
-                            state.status = ConversationStatus.AWAITING_SELECTION
-                            # Persist state so it's available for next request
-                            conversation_state_manager.update_session(state)
+                                    "output": clarification,
+                                    "ready_to_execute": False,
+                                    "missing_params": list(state.missing_params)}
+                            else:
+                                # No match - show available options
+                                prompt = endpoints_data.get("prompt_suggestion", "")
+                                if not prompt:
+                                    options_list = "\n".join([f"- {opt['name']}" for opt in available_options])
+                                    prompt = f"I found {len(available_options)} available data centers:\n{options_list}\n\nWhich one would you like? You can also say 'all'."
 
-                            return {
-                                "agent_name": self.agent_name,
-                                "success": True,
-                                "output": clarification,
-                                "ready_to_execute": False,
-                                "missing_params": list(state.missing_params)}
-                        else:
-                            # No match - show available options
-                            prompt = endpoints_data.get("prompt_suggestion", "")
-                            if not prompt:
-                                options_list = "\n".join([f"- {opt['name']}" for opt in available_options])
-                                prompt = f"I found {len(available_options)} available data centers:\n{options_list}\n\nWhich one would you like? You can also say 'all'."
-
-                            # CRITICAL: Set status to AWAITING_SELECTION so orchestrator knows we're waiting for user selection
-                            state.status = ConversationStatus.AWAITING_SELECTION
-                            logger.info(f"🔄 Set conversation status to AWAITING_SELECTION for session {state.session_id}")
-                            # Persist state so it's available for next request
-                            conversation_state_manager.update_session(state)
-                            return {
-                                "agent_name": self.agent_name,
-                                "success": True,
-                                "output": prompt,
-                                "ready_to_execute": False,
-                                "missing_params": list(state.missing_params),
-                                "available_options": available_options}
+                                # CRITICAL: Set status to AWAITING_SELECTION so orchestrator knows we're waiting for user selection
+                                state.status = ConversationStatus.AWAITING_SELECTION
+                                logger.info(f"🔄 Set conversation status to AWAITING_SELECTION for session {state.session_id}")
+                                # Persist state so it's available for next request
+                                conversation_state_manager.update_session(state)
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": True,
+                                    "output": prompt,
+                                    "ready_to_execute": False,
+                                    "missing_params": list(state.missing_params),
+                                    "available_options": available_options}
                     else:
                         return {
                             "agent_name": self.agent_name,

@@ -23,4 +23,6 @@ __all__ = [
     "Folder",
     # Audit
     "AuditLog",
+    # User Context Preferences
+    "UserContextPreferences",
 ]

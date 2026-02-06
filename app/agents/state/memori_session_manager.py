@@ -62,6 +62,7 @@ class ConversationSessionRecord(SessionBase):
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary for ConversationState reconstruction."""
+        meta = self.extra_data or {}
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -85,7 +86,13 @@ class ConversationSessionRecord(SessionBase):
             "execution_result": self.execution_result,
             "error_message": self.error_message,
             "agent_handoffs": self.agent_handoffs or [],
-            "metadata": self.extra_data or {}}
+            # Restore important per-chat context from metadata
+            "selected_engagement_id": meta.get("selected_engagement_id"),
+            "user_type": meta.get("user_type"),
+            "pending_engagements": meta.get("pending_engagements"),
+            "pending_filter_options": meta.get("pending_filter_options"),
+            "pending_filter_type": meta.get("pending_filter_type"),
+            "metadata": meta}
 
 class MemoriSessionManager:
     """
@@ -184,9 +191,22 @@ class MemoriSessionManager:
                 record.execution_result = state_dict.get("execution_result")
                 record.error_message = state_dict.get("error_message")
                 record.agent_handoffs = state_dict.get("agent_handoffs", [])
-                record.extra_data = state_dict.get("metadata", {})
+                meta = dict(state_dict.get("metadata", {}) or {})
+                # Persist critical per-chat context (NOT per-user defaults)
+                meta["selected_engagement_id"] = state_dict.get("selected_engagement_id")
+                meta["user_type"] = state_dict.get("user_type")
+                meta["pending_engagements"] = state_dict.get("pending_engagements")
+                meta["pending_filter_options"] = state_dict.get("pending_filter_options")
+                meta["pending_filter_type"] = state_dict.get("pending_filter_type")
+                record.extra_data = meta
             else:
                 # Create new record
+                meta = dict(state_dict.get("metadata", {}) or {})
+                meta["selected_engagement_id"] = state_dict.get("selected_engagement_id")
+                meta["user_type"] = state_dict.get("user_type")
+                meta["pending_engagements"] = state_dict.get("pending_engagements")
+                meta["pending_filter_options"] = state_dict.get("pending_filter_options")
+                meta["pending_filter_type"] = state_dict.get("pending_filter_type")
                 record = ConversationSessionRecord(
                     session_id=session_id,
                     user_id=state_dict.get("user_id", "anonymous"),
@@ -210,7 +230,7 @@ class MemoriSessionManager:
                     execution_result=state_dict.get("execution_result"),
                     error_message=state_dict.get("error_message"),
                     agent_handoffs=state_dict.get("agent_handoffs", []),
-                    extra_data=state_dict.get("metadata", {}))
+                    extra_data=meta)
                 db.add(record)
             db.commit()
             # Update cache

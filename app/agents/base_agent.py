@@ -6,11 +6,12 @@ from typing import Any, Dict, List, Optional
 from abc import ABC, abstractmethod
 import logging
 from datetime import datetime
+import json
 from langchain.agents import AgentExecutor, create_openai_functions_agent
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
-from langchain.memory import ConversationBufferMemory
+from langchain.memory import ConversationBufferWindowMemory
 import os
 
 logger = logging.getLogger(__name__)
@@ -70,9 +71,12 @@ class BaseAgent(ABC):
             "last_execution": None,
             "errors": []}
         # Memory for conversation context
-        self.memory = ConversationBufferMemory(
+        # IMPORTANT: keep a small rolling window to prevent unbounded context growth.
+        # We persist real state in ConversationStateManager; LLM memory should stay small.
+        self.memory = ConversationBufferWindowMemory(
             memory_key="chat_history",
             return_messages=True,
+            k=8,
             output_key="output")
         # Tools and executor (to be set by subclasses)
         self.tools: List[Tool] = []
@@ -151,9 +155,20 @@ class BaseAgent(ABC):
         # Prepare input with context
         full_input = input_text
         if context:
-            context_str = "\n\n**Context:**\n" + "\n".join(
-                f"- {k}: {v}" for k, v in context.items()
-            )
+            # Safety guard: prevent accidental context blow-ups (large dicts/lists/caches).
+            lines: List[str] = []
+            for k, v in context.items():
+                try:
+                    if isinstance(v, (dict, list)):
+                        rendered = json.dumps(v, ensure_ascii=False)  # compact enough for logging/prompt
+                    else:
+                        rendered = str(v)
+                except Exception:
+                    rendered = str(v)
+                if len(rendered) > 2000:
+                    rendered = rendered[:2000] + " ...[truncated]"
+                lines.append(f"- {k}: {rendered}")
+            context_str = "\n\n**Context:**\n" + "\n".join(lines)
             full_input = f"{input_text}{context_str}"
         
         logger.info(f"🤖 {self.agent_name} executing with input: {input_text[:100]}...")

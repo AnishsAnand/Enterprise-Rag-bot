@@ -66,7 +66,6 @@ class NetworkAgent(BaseResourceAgent):
             auth_token = context.get("auth_token")
             user_type = context.get("user_type")
             selected_engagement_id = context.get("selected_engagement_id")
-            user_roles = context.get("user_roles", [])
             user_query = context.get("user_query", "")
             endpoint_ids = params.get("endpoints", [])
             
@@ -76,7 +75,6 @@ class NetworkAgent(BaseResourceAgent):
             ipc_engagement_id = params.get("ipc_engagement_id")
             if not ipc_engagement_id:
                 engagement_id = selected_engagement_id or await self.get_engagement_id(
-                    user_roles=user_roles, 
                     auth_token=auth_token, 
                     user_id=user_id, 
                     user_type=user_type,
@@ -119,6 +117,16 @@ class NetworkAgent(BaseResourceAgent):
             enriched_firewalls = self._enrich_firewalls_with_location(
                 firewalls, endpoint_ids, endpoint_names
             )
+
+            # Client-side (post-fetch) LLM filtering based on available data
+            filter_result = await self.apply_client_side_llm_filter(
+                items=enriched_firewalls,
+                user_query=user_query,
+                params=params
+            )
+            if filter_result.get("filter_applied"):
+                enriched_firewalls = filter_result["items"]
+                logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
             
             # Use agentic formatter with chunked validation for all datasets
             # This maintains agentic behavior (adapts to API changes) while preventing hallucination
@@ -141,6 +149,8 @@ class NetworkAgent(BaseResourceAgent):
                 "response": formatted_response,
                 "metadata": {
                     "count": len(enriched_firewalls),
+                    "original_count": filter_result.get("original_count", len(enriched_firewalls)) if isinstance(filter_result, dict) else len(enriched_firewalls),
+                    "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
                     "resource_type": "firewall"
                 }
             }
@@ -267,3 +277,134 @@ class NetworkAgent(BaseResourceAgent):
         lines.append(f"\n💡 **Tip:** Ask about a specific firewall by name for more details (e.g., 'show details for TataCo_113').")
         
         return "\n".join(lines)
+    
+    async def find_firewall_by_name(
+        self,
+        firewall_name: str,
+        context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find a firewall by name and extract its department/BU IDs.
+        
+        Args:
+            firewall_name: Name of the firewall to find (e.g., "Tata_Com222")
+            context: Context with auth_token, user_id, etc.
+            
+        Returns:
+            Dict with firewall info and department IDs, or None if not found
+        """
+        try:
+            # Extract auth info from context
+            user_id = context.get("user_id")
+            auth_token = context.get("auth_token")
+            user_type = context.get("user_type")
+            selected_engagement_id = context.get("selected_engagement_id")
+            
+            logger.info(f"🔍 Searching for firewall: {firewall_name}")
+            
+            # Get IPC engagement ID
+            engagement_id = selected_engagement_id or await self.get_engagement_id(
+                auth_token=auth_token,
+                user_id=user_id,
+                user_type=user_type,
+                selected_engagement_id=selected_engagement_id
+            )
+            if not engagement_id:
+                logger.warning("⚠️ Failed to get engagement ID")
+                return None
+            
+            ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                engagement_id=engagement_id,
+                user_id=user_id,
+                auth_token=auth_token
+            )
+            if not ipc_engagement_id:
+                logger.warning("⚠️ Failed to get IPC engagement ID")
+                return None
+            
+            # Get all endpoints
+            logger.info(f"🔐 Fetching endpoints for user_type: {user_type}")
+            
+            datacenters = await self.get_datacenters(
+                engagement_id=engagement_id,
+                auth_token=auth_token,
+                user_id=user_id,
+                user_type=user_type
+            )
+            endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
+            
+            if not endpoint_ids:
+                logger.warning("⚠️ No endpoints found - this may be due to permission issues or no endpoints available")
+                return None
+            
+            # List all firewalls
+            result = await api_executor_service.list_firewalls(
+                endpoint_ids=endpoint_ids,
+                ipc_engagement_id=ipc_engagement_id,
+                auth_token=auth_token,
+                user_id=user_id
+            )
+            
+            if not result.get("success"):
+                logger.warning(f"⚠️ Failed to list firewalls: {result.get('error')}")
+                return None
+            
+            firewalls = result.get("data", [])
+            firewall_name_lower = firewall_name.lower().strip()
+            
+            # Search for firewall by name (check displayName, technicalName, name)
+            for fw in firewalls:
+                if not isinstance(fw, dict):
+                    continue
+                
+                display_name = (fw.get("displayName") or "").lower().strip()
+                technical_name = (fw.get("technicalName") or "").lower().strip()
+                name = (fw.get("name") or "").lower().strip()
+                
+                # Check if any name matches (exact or partial)
+                if (firewall_name_lower == display_name or
+                    firewall_name_lower == technical_name or
+                    firewall_name_lower == name or
+                    firewall_name_lower in display_name or
+                    firewall_name_lower in technical_name or
+                    firewall_name_lower in name):
+                    
+                    # Extract department IDs
+                    departments = fw.get("department", [])
+                    department_ids = []
+                    department_names = []
+                    
+                    for dept in departments:
+                        if isinstance(dept, dict):
+                            dept_id = dept.get("id")
+                            dept_name = dept.get("name")
+                            if dept_id:
+                                department_ids.append(dept_id)
+                                if dept_name:
+                                    department_names.append(dept_name)
+                    
+                    logger.info(
+                        f"✅ Found firewall '{fw.get('displayName')}' with {len(department_ids)} department(s): {department_names}"
+                    )
+                    
+                    return {
+                        "firewall": {
+                            "id": fw.get("id"),
+                            "display_name": fw.get("displayName"),
+                            "technical_name": fw.get("technicalName"),
+                            "name": fw.get("name"),
+                            "ip": fw.get("ip"),
+                            "component": fw.get("component"),
+                            "component_type": fw.get("componentType"),
+                        },
+                        "department_ids": department_ids,
+                        "department_names": department_names,
+                        "endpoint_id": fw.get("_queried_endpoint_id") or endpoint_ids[0]  # Use queried endpoint or first
+                    }
+            
+            logger.warning(f"⚠️ Firewall '{firewall_name}' not found")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error finding firewall by name: {str(e)}", exc_info=True)
+            return None

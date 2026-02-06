@@ -8,6 +8,7 @@ import logging
 from app.services.llm_formatter_service import llm_formatter
 logger = logging.getLogger(__name__)
 from app.services.ai_service import ai_service
+import os
 
 class BaseResourceAgent(ABC):
     """
@@ -61,11 +62,10 @@ class BaseResourceAgent(ABC):
         """
         pass
     
-    async def get_engagement_id(self, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
+    async def get_engagement_id(self, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
         """
         Common utility: Get engagement ID.
         Args:
-            user_roles: User roles for permission checking
             auth_token: Bearer token from UI (Keycloak)
             user_id: User ID for session lookup
             user_type: User type (ENG/CUS) for selection logic
@@ -95,7 +95,7 @@ class BaseResourceAgent(ABC):
                 resource_type="engagement",
                 operation="get",
                 params={},
-                user_roles=user_roles or [],
+                user_type=user_type,
                 auth_token=auth_token)
             if not result.get("success"):
                 logger.error(f"Failed to fetch engagement ID: {result.get('error')}")
@@ -111,21 +111,20 @@ class BaseResourceAgent(ABC):
             logger.error(f"Error fetching engagement ID: {str(e)}")
             return None
 
-    async def maybe_get_engagement_id(self, operation: str, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
+    async def maybe_get_engagement_id(self, operation: str, auth_token: str = None, user_id: str = None, user_type: str = None, selected_engagement_id: int = None) -> Optional[int]:
         """
         Engagement is required ONLY for mutating operations.
         LIST / READ operations must work without engagement.
         """
         if operation in ("list", "get", "describe"):
             return None
-        return await self.get_engagement_id(user_roles=user_roles, auth_token=auth_token, user_id=user_id, user_type=user_type, selected_engagement_id=selected_engagement_id)
+        return await self.get_engagement_id(auth_token=auth_token, user_id=user_id, user_type=user_type, selected_engagement_id=selected_engagement_id)
     
-    async def get_datacenters(self, operation: str = "list", engagement_id: int = None, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None) -> List[Dict[str, Any]]:
+    async def get_datacenters(self, operation: str = "list", engagement_id: int = None, auth_token: str = None, user_id: str = None, user_type: str = None) -> List[Dict[str, Any]]:
         """
         Common utility: Get available datacenters.
         Args:
             engagement_id: Optional engagement ID (fetches if not provided)
-            user_roles: User roles for permission checking
             auth_token: Bearer token from UI (Keycloak)
             user_id: User ID for session lookup
             user_type: User type (ENG/CUS) for selection logic
@@ -137,7 +136,6 @@ class BaseResourceAgent(ABC):
             if not engagement_id:
                 engagement_id = await self.maybe_get_engagement_id(
                     operation=operation,
-                    user_roles=user_roles,
                     auth_token=auth_token,
                     user_id=user_id,
                     user_type=user_type)
@@ -148,7 +146,7 @@ class BaseResourceAgent(ABC):
                 resource_type="endpoint",
                 operation="list",
                 params={"engagement_id": engagement_id},
-                user_roles=user_roles or [],
+                user_type=user_type,
                 auth_token=auth_token)
             if not result.get("success"):
                 logger.error(f"Failed to fetch datacenters: {result.get('error')}")
@@ -267,6 +265,10 @@ class BaseResourceAgent(ABC):
 
 **Instructions:**
 1. Analyze each item against the filter criteria
+1.1. Ignore polite phrases like "for me/us" and any chat/meta wording.
+1.2. Unless explicitly requested, ignore datacenter/endpoint/engagement scoping (those are handled elsewhere); focus on fields within each item (status/state, version, size, nodes, tags, etc.).
+1.3. Status matching: treat "status" and "state" as equivalent; match values like running/active/healthy/failed/pending when present under either key (or close variants).
+1.4. Numeric matching: if the criteria implies comparisons (e.g., "nodes > 3", "more than 2"), interpret common numeric fields (nodes, nodeCount, nodescount, cpu, memory, size) and apply the comparison when possible.
 2. Return ONLY a JSON array of matching indices (0-based)
 3. Example output: [0, 2, 5] (means items at index 0, 2, and 5 match)
 4. If no items match, return: []
@@ -274,11 +276,15 @@ class BaseResourceAgent(ABC):
 
 **Output format (JSON array only):**"""
 
+            # Optional model override for filtering quality (e.g., openai/gpt-oss-120b)
+            filter_model = os.getenv("FILTER_CHAT_MODEL")
             response = await ai_service._call_chat_with_retries(
                 prompt=prompt,
                 max_tokens=500,
                 temperature=0.1,
-                timeout=10)
+                timeout=10,
+                model=filter_model.strip() if isinstance(filter_model, str) and filter_model.strip() else None,
+            )
             # Parse response
             import json
             import re
@@ -293,3 +299,135 @@ class BaseResourceAgent(ABC):
             logger.error(f"Error filtering with LLM: {str(e)}")
             return data  # Fallback: return all data
 
+    # =========================================================================
+    # Shared client-side (post-fetch) filtering for ALL list operations
+    # =========================================================================
+    def _should_apply_client_side_llm_filter(self, user_query: str, params: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Lightweight gate to avoid extra LLM calls on plain 'list/show' requests.
+        We still use the LLM to do the actual filtering when this returns True.
+        """
+        if not user_query or not isinstance(user_query, str):
+            return False
+
+        q = user_query.lower()
+
+        # Common signals that user is applying constraints on the returned data
+        filter_signals = [
+            "with", "where", "having", "only", "except", "excluding", "include", "including",
+            "status", "state", "health", "healthy", "unhealthy",
+            "running", "active", "inactive", "failed", "pending", "stopped",
+            "version", "k8s", "kubernetes", "node", "nodes",
+            "greater than", "less than", "at least", "at most",
+        ]
+        if any(s in q for s in filter_signals):
+            return True
+
+        if any(op in q for op in [">", "<", ">=", "<=", "==", "!="]):
+            return True
+
+        # If upstream intent extraction already provided extra params (beyond endpoints paging),
+        # treat that as a filter intent.
+        if params:
+            ignore = {"endpoints", "endpoint_names", "endpoint_ids", "businessUnits", "environments", "zones", "page", "size", "limit", "offset"}
+            for k, v in params.items():
+                if k in ignore:
+                    continue
+                if v is None or v == "" or v == [] or v == {}:
+                    continue
+                return True
+
+        return False    def _build_client_side_filter_criteria(self, user_query: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Build a concise, model-friendly criteria string.
+        Uses extracted params (state/status/version/etc.) when available, plus the raw user query.
+        """
+        q = (user_query or "").strip()
+        # Strip common conversational references to prior messages (we handle "reuse previous data" elsewhere)
+        for phrase in [
+            "from above response",
+            "from above",
+            "above response",
+            "previous response",
+            "from the above",
+            "from the previous",
+            "from earlier",
+        ]:
+            q = q.replace(phrase, "")
+        q = " ".join(q.split())
+
+        parts: List[str] = []
+        if params:
+            ignore = {
+                "endpoints", "endpoint_names", "endpoint_ids",
+                "businessUnits", "environments", "zones",
+                "page", "size", "limit", "offset",
+                "force_refresh",
+            }
+            for k, v in params.items():
+                if k in ignore:
+                    continue
+                if v is None or v == "" or v == [] or v == {}:
+                    continue
+                parts.append(f"{k}={v}")
+
+        if parts and q:
+            return f"{', '.join(parts)}; query={q}"
+        if parts:
+            return ", ".join(parts)
+        return q
+
+    async def apply_client_side_llm_filter(
+        self,
+        items: List[Dict[str, Any]],
+        user_query: str,
+        params: Optional[Dict[str, Any]] = None,
+        chunk_size: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Apply LLM filtering to already-fetched list data based on the user's query.
+
+        Returns a dict:
+          {
+            "items": <filtered_items>,
+            "filter_applied": bool,
+            "original_count": int,
+            "filtered_count": int
+          }
+        """
+        original_count = len(items or [])
+        if not items or not user_query:
+            return {
+                "items": items,
+                "filter_applied": False,
+                "original_count": original_count,
+                "filtered_count": original_count,
+            }
+
+        if not self._should_apply_client_side_llm_filter(user_query=user_query, params=params):
+            return {
+                "items": items,
+                "filter_applied": False,
+                "original_count": original_count,
+                "filtered_count": original_count,
+            }
+
+        # Build criteria from extracted params + user query.
+        criteria = self._build_client_side_filter_criteria(user_query=user_query, params=params)
+
+        # Chunk large datasets to avoid huge prompts/timeouts
+        if len(items) <= chunk_size:
+            filtered = await self.filter_with_llm(items, criteria, user_query)
+        else:
+            filtered = []
+            for i in range(0, len(items), chunk_size):
+                chunk = items[i : i + chunk_size]
+                filtered_chunk = await self.filter_with_llm(chunk, criteria, user_query)
+                filtered.extend(filtered_chunk)
+
+        return {
+            "items": filtered,
+            "filter_applied": True,
+            "original_count": original_count,
+            "filtered_count": len(filtered),
+        }

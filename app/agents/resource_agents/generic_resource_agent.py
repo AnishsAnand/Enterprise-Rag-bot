@@ -111,20 +111,48 @@ class GenericResourceAgent(BaseResourceAgent):
                     user_id=user_id
                 )
             elif method_name == "get_business_units_list":
+                # Derive ipc_engagement_id from selected engagement (per-chat context) if available
+                ipc_engagement_id = params.get("ipc_engagement_id")
+                if not ipc_engagement_id and selected_engagement_id:
+                    ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                        engagement_id=selected_engagement_id,
+                        user_id=user_id,
+                        auth_token=auth_token
+                    )
+                    if ipc_engagement_id:
+                        params["ipc_engagement_id"] = ipc_engagement_id
                 result = await api_executor_service.get_business_units_list(
-                    ipc_engagement_id=None,
+                    ipc_engagement_id=ipc_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
             elif method_name == "get_environments_list":
+                ipc_engagement_id = params.get("ipc_engagement_id")
+                if not ipc_engagement_id and selected_engagement_id:
+                    ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                        engagement_id=selected_engagement_id,
+                        user_id=user_id,
+                        auth_token=auth_token
+                    )
+                    if ipc_engagement_id:
+                        params["ipc_engagement_id"] = ipc_engagement_id
                 result = await api_executor_service.get_environments_list(
-                    ipc_engagement_id=None,
+                    ipc_engagement_id=ipc_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
             elif method_name == "get_zones_list":
+                ipc_engagement_id = params.get("ipc_engagement_id")
+                if not ipc_engagement_id and selected_engagement_id:
+                    ipc_engagement_id = await api_executor_service.get_ipc_engagement_id(
+                        engagement_id=selected_engagement_id,
+                        user_id=user_id,
+                        auth_token=auth_token
+                    )
+                    if ipc_engagement_id:
+                        params["ipc_engagement_id"] = ipc_engagement_id
                 result = await api_executor_service.get_zones_list(
-                    ipc_engagement_id=None,
+                    ipc_engagement_id=ipc_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
@@ -133,7 +161,6 @@ class GenericResourceAgent(BaseResourceAgent):
                     resource_type=resource_type,
                     operation="list",
                     params=params,
-                    user_roles=user_roles,
                     auth_token=auth_token
                 )
         else:
@@ -143,7 +170,6 @@ class GenericResourceAgent(BaseResourceAgent):
                 resource_type=resource_type,
                 operation="list",
                 params=params,
-                user_roles=user_roles,
                 auth_token=auth_token)
         if not result.get("success"):
             return {
@@ -152,6 +178,17 @@ class GenericResourceAgent(BaseResourceAgent):
                 "response": f"Failed to list {display_name}: {result.get('error')}"}
         # Extract data
         raw_data = result.get("data", result.get(resource_type + "s", []))
+
+        # Client-side (post-fetch) LLM filtering based on available data
+        filter_result = await self.apply_client_side_llm_filter(
+            items=raw_data if isinstance(raw_data, list) else [],
+            user_query=user_query,
+            params=params
+        )
+        if filter_result.get("filter_applied") and isinstance(raw_data, list):
+            raw_data = filter_result["items"]
+            logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
+
         # Format response with LLM
         formatted_response = await llm_formatter.format_response(
             resource_type=resource_type,
@@ -164,7 +201,10 @@ class GenericResourceAgent(BaseResourceAgent):
             "response": formatted_response,
             "metadata": {
                 "resource_type": resource_type,
-                "count": len(raw_data) if isinstance(raw_data, list) else 1} }
+                "count": len(raw_data) if isinstance(raw_data, list) else 1,
+                "original_count": filter_result.get("original_count", len(raw_data)) if isinstance(filter_result, dict) and isinstance(raw_data, list) else (len(raw_data) if isinstance(raw_data, list) else 1),
+                "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
+            } }
     
     async def _execute_generic_crud(self,resource_type: str,operation: str,params: Dict[str, Any],context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -183,7 +223,6 @@ class GenericResourceAgent(BaseResourceAgent):
             resource_type=resource_type,
             operation=operation,
             params=params,
-            user_roles=user_roles,
             user_id=user_id,
             auth_token=context.get("auth_token"))
         if not result.get("success"):

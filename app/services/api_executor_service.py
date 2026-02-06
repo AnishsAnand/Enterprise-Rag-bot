@@ -13,6 +13,12 @@ import asyncio
 logger = logging.getLogger(__name__)
 # Auth is now handled by UI - tokens passed via Authorization header from Keycloak
 
+# NOTE: User-level context service is NOT used.
+# Context (engagement_id, datacenter, etc.) is persisted PER-CHAT/SESSION via ConversationState.
+# Each new chat starts fresh and prompts for required context.
+# The session-level context is managed by ConversationStateManager -> MemoriSessionManager.
+USER_CONTEXT_SERVICE_AVAILABLE = False  # Disabled - using per-chat persistence instead
+
 class APIExecutorService:
     """
     Service for executing CRUD operations via API calls.
@@ -143,6 +149,177 @@ class APIExecutorService:
             else:
                 self.user_sessions.clear()
                 logger.info("🗑️ Cleared all user sessions")
+    
+    async def load_user_defaults_from_persistent_storage(self, user_id: str) -> Dict[str, Any]:
+        """
+        Load user's default context from persistent storage (PostgreSQL).
+        Called when starting a new session to inherit saved preferences.
+        
+        Args:
+            user_id: User ID (email)
+            
+        Returns:
+            Dictionary with loaded defaults (empty if none found)
+        """
+        if not USER_CONTEXT_SERVICE_AVAILABLE:
+            logger.debug("UserContextService not available - skipping persistent load")
+            return {}
+        
+        try:
+            context = user_context_service.get_user_context(user_id)
+            if not context:
+                logger.debug(f"ℹ️ No persistent context found for user: {user_id}")
+                return {}
+            
+            # Map persistent context to session format
+            loaded_defaults = {}
+            
+            # Engagement
+            engagement = context.get("engagement", {})
+            if engagement.get("id"):
+                loaded_defaults["paas_engagement_id"] = engagement["id"]
+                loaded_defaults["ipc_engagement_id"] = engagement.get("ipc_id")
+                loaded_defaults["engagement_data"] = {
+                    "id": engagement["id"],
+                    "engagementName": engagement.get("name")
+                }
+            
+            # Datacenter/Endpoints
+            datacenter = context.get("datacenter", {})
+            if datacenter.get("id"):
+                loaded_defaults["default_datacenter_id"] = datacenter["id"]
+                loaded_defaults["default_datacenter_name"] = datacenter.get("name")
+            if datacenter.get("endpoint_ids"):
+                loaded_defaults["default_endpoint_ids"] = datacenter["endpoint_ids"]
+            
+            # Business Unit
+            bu = context.get("business_unit", {})
+            if bu.get("id"):
+                loaded_defaults["default_business_unit_id"] = bu["id"]
+                loaded_defaults["default_business_unit_name"] = bu.get("name")
+            
+            # Environment
+            env = context.get("environment", {})
+            if env.get("id"):
+                loaded_defaults["default_environment_id"] = env["id"]
+                loaded_defaults["default_environment_name"] = env.get("name")
+            
+            # Zone
+            zone = context.get("zone", {})
+            if zone.get("id"):
+                loaded_defaults["default_zone_id"] = zone["id"]
+                loaded_defaults["default_zone_name"] = zone.get("name")
+            
+            if loaded_defaults:
+                logger.info(f"✅ Loaded persistent defaults for user {user_id}: {list(loaded_defaults.keys())}")
+                # Update in-memory session with loaded defaults
+                await self._update_user_session(user_id=user_id, **loaded_defaults)
+            
+            return loaded_defaults
+            
+        except Exception as e:
+            logger.error(f"❌ Error loading persistent context: {str(e)}")
+            return {}
+    
+    async def save_context_to_persistent_storage(
+        self,
+        user_id: str,
+        context_type: str,
+        save_as_default: bool = True,
+        **kwargs
+    ) -> bool:
+        """
+        Save user's context to persistent storage.
+        
+        Args:
+            user_id: User ID (email)
+            context_type: Type of context (engagement, datacenter, cluster, etc.)
+            save_as_default: Whether to persist (if False, only session-level)
+            **kwargs: Context-specific parameters
+            
+        Returns:
+            True if saved successfully
+        """
+        if not save_as_default or not USER_CONTEXT_SERVICE_AVAILABLE:
+            return False
+        
+        try:
+            if context_type == "engagement":
+                user_context_service.set_engagement(
+                    user_id=user_id,
+                    engagement_id=kwargs.get("engagement_id"),
+                    engagement_name=kwargs.get("engagement_name"),
+                    ipc_engagement_id=kwargs.get("ipc_engagement_id"),
+                    save_as_default=True
+                )
+            elif context_type == "datacenter":
+                user_context_service.set_datacenter(
+                    user_id=user_id,
+                    datacenter_id=kwargs.get("datacenter_id"),
+                    datacenter_name=kwargs.get("datacenter_name"),
+                    endpoint_ids=kwargs.get("endpoint_ids"),
+                    save_as_default=True
+                )
+            elif context_type == "business_unit":
+                user_context_service.set_business_unit(
+                    user_id=user_id,
+                    bu_id=kwargs.get("bu_id"),
+                    bu_name=kwargs.get("bu_name"),
+                    save_as_default=True
+                )
+            elif context_type == "environment":
+                user_context_service.set_environment(
+                    user_id=user_id,
+                    env_id=kwargs.get("env_id"),
+                    env_name=kwargs.get("env_name"),
+                    save_as_default=True
+                )
+            elif context_type == "zone":
+                user_context_service.set_zone(
+                    user_id=user_id,
+                    zone_id=kwargs.get("zone_id"),
+                    zone_name=kwargs.get("zone_name"),
+                    save_as_default=True
+                )
+            elif context_type == "cluster":
+                user_context_service.set_cluster(
+                    user_id=user_id,
+                    cluster_id=kwargs.get("cluster_id"),
+                    cluster_name=kwargs.get("cluster_name"),
+                    save_as_default=True
+                )
+            elif context_type == "firewall":
+                user_context_service.set_firewall(
+                    user_id=user_id,
+                    firewall_id=kwargs.get("firewall_id"),
+                    firewall_name=kwargs.get("firewall_name"),
+                    save_as_default=True
+                )
+            else:
+                logger.warning(f"⚠️ Unknown context type: {context_type}")
+                return False
+            
+            logger.info(f"💾 Saved {context_type} context to persistent storage for user: {user_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving context to persistent storage: {str(e)}")
+            return False
+    
+    def get_user_context_summary(self, user_id: str) -> str:
+        """
+        Get a human-readable summary of user's current context.
+        
+        Args:
+            user_id: User ID (email)
+            
+        Returns:
+            Summary string
+        """
+        if not USER_CONTEXT_SERVICE_AVAILABLE:
+            return "Context service not available"
+        
+        return user_context_service.get_context_summary(user_id)
     
     async def _fetch_auth_token(self,auth_email: str = None,auth_password: str = None) -> Optional[str]:
         """
@@ -353,7 +530,7 @@ class APIExecutorService:
             resource_type="engagement",
             operation="get",
             params={},
-            user_roles=None,
+            user_type=None,
             auth_token=auth_token)
         
         if result.get("success") and result.get("data"):
@@ -366,7 +543,13 @@ class APIExecutorService:
         logger.error("❌ Failed to fetch engagements list")
         return None
     
-    async def set_engagement_id(self, user_id: str, engagement_id: int, engagement_data: Dict = None) -> bool:
+    async def set_engagement_id(
+        self, 
+        user_id: str, 
+        engagement_id: int, 
+        engagement_data: Dict = None,
+        save_as_default: bool = True
+    ) -> bool:
         """
         Set/update the selected engagement ID for a user session.
         Called when ENG user selects an engagement.
@@ -375,22 +558,54 @@ class APIExecutorService:
             user_id: User ID for session
             engagement_id: Selected engagement ID
             engagement_data: Full engagement data dict (optional)
+            save_as_default: Whether to persist as user's default (survives restarts)
             
         Returns:
             True if successful
         """
+        # If engagement changes, clear dependent per-user caches (endpoints + IPC engagement).
+        # These are engagement-scoped; leaking them across engagements causes wrong datacenter matching.
+        async with self.session_lock:
+            existing = self.user_sessions.get(user_id)
+            old_engagement_id = existing.get("paas_engagement_id") if existing else None
+            if old_engagement_id is not None and old_engagement_id != engagement_id:
+                for key in ("endpoints", "ipc_engagement_id"):
+                    if existing and key in existing:
+                        existing.pop(key, None)
+                # Also drop engagement_data since it's tied to the old engagement
+                if existing and "engagement_data" in existing:
+                    existing.pop("engagement_data", None)
+                if existing is not None:
+                    existing["cached_at"] = datetime.utcnow()
+                logger.info(
+                    f"🧹 Engagement changed {old_engagement_id} -> {engagement_id}; cleared cached endpoints & IPC engagement ID"
+                )
+
         await self._update_user_session(
             user_id=user_id,
             paas_engagement_id=engagement_id,
             engagement_data=engagement_data
         )
-        logger.info(f"✅ Set engagement ID {engagement_id} for user {user_id}")
+        
+        # Persist to database if requested
+        if save_as_default:
+            engagement_name = engagement_data.get("engagementName") if engagement_data else None
+            await self.save_context_to_persistent_storage(
+                user_id=user_id,
+                context_type="engagement",
+                save_as_default=True,
+                engagement_id=engagement_id,
+                engagement_name=engagement_name
+            )
+        
+        logger.info(f"✅ Set engagement ID {engagement_id} for user {user_id} (persisted: {save_as_default})")
         return True
     
     async def get_engagement_id(self, force_refresh: bool = False, user_id: str = None, auth_token: str = None, user_type: str = None) -> Optional[int]:
         """
         Get engagement ID for the authenticated user.
         Uses per-user session storage to avoid repeated API calls.
+        Also checks persistent storage for saved defaults.
         
         For CUS (Customer): Auto-selects the single engagement returned by API
         For ENG (Engineer): Checks session for selected engagement, returns None if not selected
@@ -413,6 +628,15 @@ class APIExecutorService:
                 paas_id = session["paas_engagement_id"]
                 logger.debug(f"✅ Using cached PAAS engagement ID from session: {paas_id}")
                 return paas_id
+            
+            # Check persistent storage for saved default (new feature)
+            if USER_CONTEXT_SERVICE_AVAILABLE:
+                default_engagement_id = user_context_service.get_default_engagement_id(user_id)
+                if default_engagement_id:
+                    logger.info(f"✅ Using saved default engagement ID from persistent storage: {default_engagement_id}")
+                    # Load into session cache for faster subsequent access
+                    await self._update_user_session(user_id=user_id, paas_engagement_id=default_engagement_id)
+                    return default_engagement_id
         
         # Fetch engagements from API
         logger.info(f"🔍 Fetching engagement details from API (user_type: {user_type})...")
@@ -531,7 +755,7 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="get_ipc_engagement",
             params={"engagement_id": engagement_id},
-            user_roles=None,
+            user_type=None,  # Not needed for this operation
             auth_token=auth_token
         )
         if result.get("success") and result.get("data"):
@@ -592,7 +816,7 @@ class APIExecutorService:
             resource_type="endpoint",
             operation="list",
             params={"engagement_id": engagement_id},
-            user_roles=None,
+            user_type=None,
             auth_token=auth_token)
         if result.get("success") and result.get("data"):
             data = result["data"]
@@ -711,7 +935,7 @@ class APIExecutorService:
                     "engagement_id": engagement_id,
                     "endpoints": endpoint_ids
                 },
-                user_roles=None
+                user_type=None
             )
             
             return result
@@ -1562,33 +1786,30 @@ class APIExecutorService:
             errors.append(f"{param_name} must be one of: {', '.join(map(str, rules['values']))}")
         return errors
     
-    def check_permissions(self,resource_type: str,operation: str,user_roles: List[str]) -> bool:
+    def check_permissions(self,resource_type: str,operation: str,user_type: str = None) -> bool:
         """
-        Check if user has permission to perform operation.
+        Check if user has permission to perform operation based on user_type.
         Args:
             resource_type: Type of resource
             operation: Operation name
-            user_roles: List of user's roles
+            user_type: User type - "ENG" (Engineer) or "CUS" (Customer)
         Returns:
             True if user has permission, False otherwise
+        Note:
+            Both ENG and CUS users have full access to all operations.
+            Permission checking is now based on authentication (auth_token) only.
         """
-        operation_config = self.get_operation_config(resource_type, operation)
-        if not operation_config:
-            return False
-
-        required_permissions = operation_config.get("permissions", [])
-        # Check if user has any of the required roles
-        has_permission = any(role in required_permissions for role in user_roles)
-        if not has_permission:
-            logger.warning(
-                f"⚠️ Permission denied: user roles {user_roles} do not match "
-                f"required permissions {required_permissions} for {resource_type}.{operation}")
-        return has_permission
+        # Both ENG and CUS users have full access - permission is based on authentication
+        # If user_type is provided, log it for debugging
+        if user_type:
+            logger.debug(f"✅ Permission check: user_type={user_type}, resource={resource_type}, operation={operation}")
+        # Always return True - authentication is handled by auth_token validation
+        return True
     
     async def execute_operation(self,
         resource_type: str,operation: str,
         params: Dict[str, Any],
-        user_roles: List[str] = None,
+        user_type: str = None,
         dry_run: bool = False,
         user_id: str = None,
         auth_email: str = None,
@@ -1600,7 +1821,7 @@ class APIExecutorService:
             resource_type: Type of resource
             operation: Operation name (create, read, update, delete, list)
             params: Operation parameters
-            user_roles: User's roles for permission checking
+            user_type: User type - "ENG" (Engineer) or "CUS" (Customer)
             dry_run: If True, validate but don't execute
             user_id: User identifier
             auth_email: Email for authentication (legacy)
@@ -1627,33 +1848,11 @@ class APIExecutorService:
                     "error": f"Unknown resource type or operation: {resource_type}.{operation}",
                     "timestamp": start_time.isoformat()}
             
-            if user_roles is not None:
-                if not self.check_permissions(resource_type, operation, user_roles):
-                    is_read_only = user_roles == ["viewer"]
-                    is_write_operation = operation in ["create", "update", "delete", "provision"]
-                    if is_read_only and is_write_operation:
-                        # Provide enrollment information for unauthorized users
-                        return {
-                            "success": False,
-                            "error": "Unauthorized",
-                            "message": "You don't have permission to perform this action.",
-                            "enrollment_info": {
-                                "title": "Want to perform actions?",
-                                "description": "Enroll for full access to create and manage cloud resources.",
-                                "enrollment_url": "https://cloud.tatacommunications.com/enroll",
-                                "contact": "support@tatacommunications.com",
-                                "sso_login": "Sign in with Tata Communications for full access"
-                            },
-                            "required_permissions": operation_config.get("permissions", []),
-                            "your_permissions": user_roles,
-                            "timestamp": start_time.isoformat()}
-                    else:
-                        return {
-                            "success": False,
-                            "error": f"Permission denied for {operation} on {resource_type}",
-                            "required_permissions": operation_config.get("permissions", []),
-                            "your_permissions": user_roles,
-                            "timestamp": start_time.isoformat()}
+            # Permission checking is now based on authentication (auth_token) only
+            # Both ENG and CUS users have full access once authenticated
+            # If auth_token is missing, the API call will fail at the authentication layer
+            if user_type:
+                logger.debug(f"🔐 Executing {operation} on {resource_type} for user_type: {user_type}")
             # Validate parameters
             validation_result = self.validate_parameters(resource_type, operation, params)
             if not validation_result["valid"]:
@@ -1944,7 +2143,7 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="check_cluster_name",
             params={"clusterName": cluster_name},
-            user_roles=None)
+            user_type=None)
         if result.get("success"):
             # The API response is wrapped: result["data"] contains the full API response
             api_response = result.get("data", {})
@@ -1998,7 +2197,7 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="get_iks_images",
             params={"ipc_engagement_id": ipc_engagement_id},
-            user_roles=None)
+            user_type=None)
         if result.get("success") and result.get("data"):
             api_data = result["data"]
             # Parse API response
@@ -2078,7 +2277,7 @@ class APIExecutorService:
                 "endpointId": endpoint_id,
                 "k8sVersion": k8s_version
             },
-            user_roles=None
+            user_type=None
         )
         
         if result.get("success") and result.get("data"):
@@ -2113,7 +2312,7 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="get_environments",
             params={"engagement_id": engagement_id},
-            user_roles=None)
+            user_type=None)
         if result.get("success") and result.get("data"):
             api_data = result["data"]
             # Parse response
@@ -2153,7 +2352,7 @@ class APIExecutorService:
             resource_type="k8s_cluster",
             operation="get_zones",
             params={"engagement_id": engagement_id},
-            user_roles=None)
+            user_type=None)
         if result.get("success") and result.get("data"):
             api_data = result["data"]
             # Parse response

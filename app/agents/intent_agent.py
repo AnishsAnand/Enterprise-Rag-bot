@@ -403,6 +403,26 @@ User: "Where can I deploy?" or "What data centers can I use?"
 User: "List all available data centers" or "Show available locations"
 → intent_detected: true, resource_type: endpoint, operation: list, extracted_params: empty
 
+**Context Switching Examples (IMPORTANT - for changing user's default settings):**
+
+User: "Switch to Mumbai datacenter" or "Change datacenter to Chennai"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "datacenter", target_value: "Mumbai" or "Chennai"
+
+User: "Switch engagement" or "Change engagement" or "Use different engagement"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "engagement", target_value: null
+
+User: "Set default datacenter to Delhi" or "Use Delhi as default"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "datacenter", target_value: "Delhi"
+
+User: "Switch to business unit XYZ" or "Change BU to ABC"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "business_unit", target_value: "XYZ" or "ABC"
+
+User: "Use production environment" or "Switch to staging env"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "environment", target_value: "production" or "staging"
+
+User: "Change zone to XYZ" or "Switch zone"
+→ intent_detected: true, resource_type: context_switch, operation: switch, extracted_params: entity_type: "zone", target_value: "XYZ" or null
+
 **Important Notes:**
 - For "list" operation on k8s_cluster, kafka, gitlab, container_registry, jenkins, postgres, documentdb, firewall: "endpoints" parameter is required (data center selection)
 - For "list" operation on vm: NO parameters required (lists all VMs), but can optionally extract endpoint, zone, or department for filtering
@@ -429,6 +449,7 @@ User: "List all available data centers" or "Show available locations"
 - Just detect the intent and operation; ValidationAgent will intelligently match locations
 - ANY query asking about viewing/counting/listing load balancers should be detected as a list operation
 - Reports aliases: report, reports, common cluster report, common cluster, cluster inventory report, cluster report, cluster inventory, cluster compute report, compute report, cluster compute, storage inventory report, storage report, pvc report
+- Context switch keywords: switch, change, use, set default, update default, select (when used with entity types like datacenter, engagement, cluster, etc.)
 
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
     
@@ -550,26 +571,31 @@ Be precise in detecting intent and operation. Only extract parameters that you c
 
     def _detect_deterministic_intent(self, text: str) -> Optional[Dict[str, Any]]:
         """
-        Detect deterministic intents that must NOT go to the LLM.
-        Returns intent dict if detected else None.
+        Detect ONLY highly unambiguous deterministic intents that should skip LLM.
+        
+        PHILOSOPHY: Trust the LLM for natural language understanding. Only use patterns
+        for very specific, unambiguous cases (like structured IDs, exact keywords).
+        
+        Returns intent dict if detected else None (which triggers LLM path).
         """
         text = (text or "").strip()
 
-        # 1) Explicit LB name (contains _LB_) - use module-level pattern
+        # 1) Explicit LB name with structured format (EG_*_LB_SEG_* or LB_*_*) - VERY unambiguous
+        # These are technical identifiers, not natural language
         lb_match = LB_NAME_PATTERN.search(text)
         if lb_match:
             return {
                 "intent_detected": True,
                 "resource_type": "load_balancer",
                 "operation": "list",
-                "extracted_params": {},  # per spec: don't extract LB name here
+                "extracted_params": {},
                 "confidence": 0.99,
                 "ambiguities": [],
                 "clarification_needed": None,
                 "meta": {"detection": "lb_name_pattern", "matched_text": lb_match.group(0)}
             }
 
-        # 2) LBCI 5-6 digit number in context -> assume load_balancer
+        # 2) LBCI 5-6 digit number - structured identifier
         if self.LBCI_DIGIT_PATTERN.search(text):
             return {
                 "intent_detected": True,
@@ -582,7 +608,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "meta": {"detection": "lbci_digits"}
             }
 
-        # 3) Explicit "list load balancers" style phrasing
+        # 3) Explicit "list load balancers" - simple, unambiguous keyword match
         if self.LIST_LB_KEYWORDS.search(text):
             return {
                 "intent_detected": True,
@@ -595,9 +621,12 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "meta": {"detection": "list_lb_keywords"}
             }
 
-        # 4) Add other deterministic rules here (endpoints, datacenters)
-        # Example: "list endpoints" -> endpoint:list
-        if re.search(r'\b(list|show|get)\b.*\b(endpoints|datacenters|locations|dcs|data centers)\b', text, re.I):
+        # 4) Explicit "list endpoints/datacenters" - only when it's clearly the primary intent
+        # Must NOT be part of another resource query (e.g., "list firewalls in all dcs")
+        endpoint_pattern = r'\b(list|show|get|what|which|how many)\s+(?:are\s+)?(?:the\s+)?(?:available\s+)?(?:all\s+)?\b(endpoints|datacenters|locations|dcs|data\s+centers)\b'
+        other_resources = r'\b(firewall|cluster|vm|kafka|gitlab|jenkins|postgres|documentdb|container|registry|load\s+balancer|lb)\b'
+        
+        if re.search(endpoint_pattern, text, re.I) and not re.search(other_resources, text, re.I):
             return {
                 "intent_detected": True,
                 "resource_type": "endpoint",
@@ -609,14 +638,106 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "meta": {"detection": "list_endpoints"}
             }
 
+        # NOTE: Removed complex firewall/cluster pattern matching.
+        # These patterns were causing false positives (e.g., matching "for" as firewall name).
+        # The LLM is much better at understanding natural language queries like:
+        # - "firewall for cluster X" → k8s_cluster read
+        # - "clusters for firewall X" → k8s_cluster list with firewall filter
+        # - "list firewalls" → firewall list
+        #
+        # The LLM system prompt already has comprehensive examples for these cases.
+        # Let the LLM handle natural language - it understands context and intent better.
+
+        # 5) Context switching patterns - "switch to X", "change datacenter", "use different engagement"
+        context_switch_result = self._detect_context_switch_intent(text)
+        if context_switch_result:
+            return context_switch_result
+
+        return None  # No deterministic match → use LLM
+    
+    def _detect_context_switch_intent(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Detect context switching intents like:
+        - "switch to Mumbai datacenter"
+        - "change engagement"
+        - "use Chennai instead"
+        - "set default datacenter to Delhi"
+        - "switch engagement"
+        
+        Returns intent dict if detected, else None.
+        """
+        text_lower = text.lower().strip()
+        
+        # Context switch keywords
+        switch_keywords = ["switch", "change", "use", "set default", "update default", "select"]
+        
+        # Entity types that can be switched
+        entity_patterns = {
+            "engagement": r"\b(engagement|engagements)\b",
+            "datacenter": r"\b(datacenter|data\s*center|dc|location|endpoint)\b",
+            "cluster": r"\b(cluster|k8s\s*cluster)\b",
+            "firewall": r"\b(firewall|fw)\b",
+            "business_unit": r"\b(business\s*unit|bu|department)\b",
+            "environment": r"\b(environment|env)\b",
+            "zone": r"\b(zone)\b",
+        }
+        
+        # Check for switch intent
+        has_switch_intent = any(kw in text_lower for kw in switch_keywords)
+        
+        # Also check for "to X" pattern after entity mention
+        to_pattern = r"\bto\s+(\w+(?:\s*-\s*\w+)?)"
+        
+        if not has_switch_intent:
+            return None
+        
+        # Detect which entity type is being switched
+        detected_entity = None
+        for entity_type, pattern in entity_patterns.items():
+            if re.search(pattern, text_lower):
+                detected_entity = entity_type
+                break
+        
+        if not detected_entity:
+            # Check for generic "switch to X" without entity type
+            # e.g., "switch to Mumbai" - assume datacenter
+            if re.search(r"\bswitch\s+to\s+\w+", text_lower):
+                detected_entity = "datacenter"
+        
+        if detected_entity:
+            # Extract the target value (e.g., "Mumbai" from "switch to Mumbai")
+            target_value = None
+            to_match = re.search(to_pattern, text_lower)
+            if to_match:
+                target_value = to_match.group(1).strip()
+            
+            return {
+                "intent_detected": True,
+                "resource_type": "context_switch",
+                "operation": "switch",
+                "extracted_params": {
+                    "entity_type": detected_entity,
+                    "target_value": target_value
+                },
+                "confidence": 0.95,
+                "ambiguities": [],
+                "clarification_needed": None,
+                "meta": {"detection": "context_switch_pattern", "entity_type": detected_entity}
+            }
+        
         return None
 
     async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-    Execute intent detection on user input with deterministic short-circuits.
+    Execute intent detection on user input with minimal deterministic short-circuits.
+    
+    PHILOSOPHY: Trust the LLM for natural language understanding. Pattern matching is only
+    used for highly unambiguous cases (structured IDs, exact keyword matches). For natural
+    language queries, the LLM understands context and intent much better than regex patterns.
+    
     Behavior:
-    - If deterministic rules match (LB name / LBCI / other rules) return intent immediately
-      and skip the LLM.
+    - If highly unambiguous deterministic rules match (LB name / LBCI / exact keywords) 
+      return intent immediately and skip the LLM.
     - Otherwise call the LLM via parent, parse output robustly, enrich with schema info.
     - On internal error, return a SAFE fallback that does NOT auto-run potentially destructive operations.
     """
@@ -656,7 +777,9 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "output": "No input provided"
             }
 
-        # 1) Deterministic short-circuit rules (run BEFORE any LLM call)
+        # 1) Minimal deterministic short-circuit rules (run BEFORE any LLM call)
+        #    Only matches highly unambiguous cases (structured IDs, exact keywords).
+        #    For natural language, we trust the LLM to understand intent better.
         #    _detect_deterministic_intent should return a dict when a rule applies.
             deterministic = None
             try:
@@ -679,7 +802,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "meta": deterministic.get("meta", {"detection": "rule"})
             }
 
-                logger.info("🔒 Deterministic intent detected (rule): %s", intent_data.get("meta"))
+                logger.info("🔒 Deterministic intent detected (pattern): %s", intent_data.get("meta"))
                 return {
                 "agent_name": self.agent_name,
                 "success": True,
@@ -688,8 +811,11 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "output": "Deterministic intent detection applied"
             }
 
-        # 2) Otherwise call LLM via parent agent
+        # 2) Call LLM via parent agent for natural language understanding
+        #    The LLM has comprehensive examples in the system prompt and understands
+        #    context and intent much better than regex patterns for natural language queries.
         #    (Do not assume the parent accepts model arg; BaseAgent should manage model selection.)
+            logger.info("🤖 Using LLM for intent detection (no unambiguous pattern match)")
             result = await super().execute(input_text, context)
 
         # Support common possible keys for text output

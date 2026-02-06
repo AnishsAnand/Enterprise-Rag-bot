@@ -449,6 +449,141 @@ class AuditLog(Base):
         return f"<AuditLog(id={self.id}, action='{self.action}', status='{self.status}')>"
 
 
+# ===================== User Context Preferences =====================
+
+class UserContextPreferences(Base):
+    """
+    User context preferences for persistent entity selections.
+    
+    Stores user's default selections for:
+    - Engagement ID (PAAS/IPC)
+    - Datacenter/Endpoint
+    - Cluster
+    - Firewall
+    - Business Unit
+    - Environment
+    - Zone
+    
+    These defaults are loaded when a user starts a new session,
+    allowing context to persist across conversations.
+    """
+    __tablename__ = "user_context_preferences"
+
+    # Primary Key - user_id (email)
+    user_id = Column(String(255), primary_key=True, index=True)
+    
+    # Engagement context
+    default_engagement_id = Column(Integer, nullable=True)
+    default_engagement_name = Column(String(255), nullable=True)
+    default_ipc_engagement_id = Column(Integer, nullable=True)
+    
+    # Datacenter/Endpoint context
+    default_datacenter_id = Column(Integer, nullable=True)
+    default_datacenter_name = Column(String(255), nullable=True)
+    default_endpoint_ids = Column(JSON, nullable=True)  # List of endpoint IDs
+    
+    # Cluster context
+    default_cluster_id = Column(Integer, nullable=True)
+    default_cluster_name = Column(String(255), nullable=True)
+    
+    # Firewall context
+    default_firewall_id = Column(Integer, nullable=True)
+    default_firewall_name = Column(String(255), nullable=True)
+    
+    # Business Unit context
+    default_business_unit_id = Column(Integer, nullable=True)
+    default_business_unit_name = Column(String(255), nullable=True)
+    
+    # Environment context
+    default_environment_id = Column(Integer, nullable=True)
+    default_environment_name = Column(String(255), nullable=True)
+    
+    # Zone context
+    default_zone_id = Column(Integer, nullable=True)
+    default_zone_name = Column(String(255), nullable=True)
+    
+    # Flexible storage for additional preferences
+    preferences = Column(JSON, nullable=True, default=dict)
+    
+    # Timestamps
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
+    
+    # Indexes for common queries
+    __table_args__ = (
+        Index("idx_user_context_engagement", "default_engagement_id"),
+        Index("idx_user_context_datacenter", "default_datacenter_id"),
+    )
+    
+    def __repr__(self):
+        return f"<UserContextPreferences(user_id='{self.user_id}', engagement={self.default_engagement_id})>"
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for easy access."""
+        return {
+            "user_id": self.user_id,
+            "engagement": {
+                "id": self.default_engagement_id,
+                "name": self.default_engagement_name,
+                "ipc_id": self.default_ipc_engagement_id,
+            },
+            "datacenter": {
+                "id": self.default_datacenter_id,
+                "name": self.default_datacenter_name,
+                "endpoint_ids": self.default_endpoint_ids or [],
+            },
+            "cluster": {
+                "id": self.default_cluster_id,
+                "name": self.default_cluster_name,
+            },
+            "firewall": {
+                "id": self.default_firewall_id,
+                "name": self.default_firewall_name,
+            },
+            "business_unit": {
+                "id": self.default_business_unit_id,
+                "name": self.default_business_unit_name,
+            },
+            "environment": {
+                "id": self.default_environment_id,
+                "name": self.default_environment_name,
+            },
+            "zone": {
+                "id": self.default_zone_id,
+                "name": self.default_zone_name,
+            },
+            "preferences": self.preferences or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+    
+    def get_context_summary(self) -> str:
+        """Get a human-readable summary of current context."""
+        parts = []
+        if self.default_engagement_name:
+            parts.append(f"Engagement: {self.default_engagement_name}")
+        if self.default_datacenter_name:
+            parts.append(f"Datacenter: {self.default_datacenter_name}")
+        if self.default_cluster_name:
+            parts.append(f"Cluster: {self.default_cluster_name}")
+        if self.default_business_unit_name:
+            parts.append(f"BU: {self.default_business_unit_name}")
+        if self.default_environment_name:
+            parts.append(f"Env: {self.default_environment_name}")
+        if self.default_zone_name:
+            parts.append(f"Zone: {self.default_zone_name}")
+        return " | ".join(parts) if parts else "No defaults set"
+
+
 # ===================== Backwards Compatibility Alias =====================
 
 # This alias ensures your auth.py doesn't break

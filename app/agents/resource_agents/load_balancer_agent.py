@@ -312,6 +312,16 @@ class LoadBalancerAgent(BaseResourceAgent):
                         filter_reasons.append(f"feature: {feature}")
                         logger.info(f"   → {len(filtered_lbs)} LBs matched")
                 
+                # Client-side (post-fetch) LLM filtering based on available data
+                filter_result = await self.apply_client_side_llm_filter(
+                    items=filtered_lbs,
+                    user_query=user_query,
+                    params=params
+                )
+                if filter_result.get("filter_applied"):
+                    filtered_lbs = filter_result["items"]
+                    logger.info(f"🔎 Client-side filter applied: {filter_result['original_count']} -> {filter_result['filtered_count']}")
+
                 total_count = len(filtered_lbs)
                 filter_reason = " + ".join(filter_reasons) if filter_reasons else None
                 
@@ -365,6 +375,7 @@ class LoadBalancerAgent(BaseResourceAgent):
                         "query_type": "general",
                         "count": total_count,
                         "original_count": original_count,
+                        "client_side_filter_applied": bool(filter_result.get("filter_applied")) if isinstance(filter_result, dict) else False,
                         "filter_applied": filter_reason is not None,
                         "filter_reason": filter_reason,
                         "cached": is_cached

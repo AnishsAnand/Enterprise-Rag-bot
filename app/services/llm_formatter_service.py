@@ -434,7 +434,8 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
         self,
         resource_type: str,
         operation: str,
-        raw_data: Any
+        raw_data: Any,
+        query_type: str = "general",
     ) -> str:
         """
         Fallback formatting if LLM fails.
