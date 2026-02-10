@@ -18,7 +18,7 @@ from app.api.routes import (
     agent_chat,
     health,
     # chat_persistence,  # REMOVED: Using PostgreSQL-backed webui_chats instead
-    orchestrator,
+    # orchestrator,  # REMOVED: Orchestrator functionality deprecated
     # Auth routes removed - auth handled by UI via Keycloak tokens
 )
 from app.api.routes.user_chat import router as user_chat_router
@@ -223,7 +223,7 @@ app.include_router(rag_widget.router, prefix="/api/rag-widget", tags=["rag-widge
 app.include_router(agent_chat.router, tags=["agent-chat"])
 # REMOVED: chat_persistence.router (in-memory) - replaced with PostgreSQL-backed webui_chats
 app.include_router(user_chat_router)
-app.include_router(orchestrator.router)
+# REMOVED: orchestrator.router - orchestrator functionality deprecated
 # Auth routes removed - auth handled by UI via Keycloak tokens passed in Authorization header
 # OpenAI-compatible API for Open WebUI integration
 app.include_router(openai_compatible.router)

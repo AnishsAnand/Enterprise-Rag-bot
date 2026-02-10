@@ -22,12 +22,12 @@ from app.core.database import SessionLocal
 from app.models.database_models import RAGQuery
 
 # ============================================================================
-# PRODUCTION FIX: Import OpenWebUI Formatter
+# PRODUCTION FIX: Import WebUI Formatter
 # ============================================================================
-from app.services.openwebui_formatter import (
-    format_for_openwebui,
-    format_agent_response_for_openwebui,
-    format_error_for_openwebui
+from app.services.webui_formatter import (
+    format_for_webui as format_for_openwebui,
+    format_agent_response_for_webui as format_agent_response_for_openwebui,
+    format_error_for_webui as format_error_for_openwebui
 )
 
 logger = logging.getLogger(__name__)
