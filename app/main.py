@@ -22,7 +22,7 @@ from app.api.routes import (
     # Auth routes removed - auth handled by UI via Keycloak tokens
 )
 from app.api.routes.user_chat import router as user_chat_router
-from app.api.routes.webui_chats import router as webui_chats_router
+from app.api.routes.webui_chats import router as webui_chats_router, models_router
 from app.api.routes.webui_config import router as webui_config_router
 from app.api.routes.webui_tasks import router as webui_tasks_router
 from app.routers import openai_compatible
@@ -230,6 +230,7 @@ app.include_router(openai_compatible.router)
 
 # WebUI-compatible APIs (OpenWebUI replacement) - PostgreSQL backed
 app.include_router(webui_chats_router)  # /api/v1/chats endpoints (persistent storage)
+app.include_router(models_router)       # /api/models endpoint (model information)
 app.include_router(webui_config_router)  # /api/config endpoint
 app.include_router(webui_tasks_router)   # /api/task endpoints (title generation)
 

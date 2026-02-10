@@ -326,3 +326,47 @@ async def update_chat_folder(chat_id: str,form_data: FolderForm,request: Request
     if chat:
         return ChatResponse(**chat.model_dump())
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail="Chat not found")
+
+# ==================== Model Information Endpoint ====================
+
+class ModelInfo(BaseModel):
+    """Model information for WebUI compatibility"""
+    id: str
+    object: str = "model"
+    created: int
+    owned_by: str = "Tata Communications"
+    name: Optional[str] = None
+
+class ModelListResponse(BaseModel):
+    """List of available models"""
+    object: str = "list"
+    data: List[ModelInfo]
+
+# Create a separate router for /api/models (without /v1 prefix)
+models_router = APIRouter(tags=["models"])
+
+@models_router.get("/api/models", response_model=ModelListResponse)
+async def list_models():
+    """
+    List available models for WebUI compatibility.
+    Returns Vayu Maya as the available model.
+    """
+    from datetime import datetime
+    now = int(datetime.utcnow().timestamp())
+    return ModelListResponse(
+        object="list",
+        data=[
+            ModelInfo(
+                id="Vayu Maya",
+                created=now,
+                owned_by="Tata Communications",
+                name="Vayu Maya RAG"
+            ),
+            ModelInfo(
+                id="Vayu Maya-v1",
+                created=now,
+                owned_by="Tata Communications",
+                name="Vayu Maya RAG v1"
+            )
+        ]
+    )
