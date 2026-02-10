@@ -30,18 +30,22 @@ MAX_CHUNKS_RETURN = int(os.getenv("MAX_CHUNKS_RETURN", "12"))
 REQUIRED_EMBEDDING_DIM = 4096
 EMBEDDING_SIZE_FALLBACK = REQUIRED_EMBEDDING_DIM
 PRIMARY_CHAT_MODEL = os.getenv("CHAT_MODEL", "meta/Llama-3.1-8B-Instruct")
-# Fallback order (updated based on API availability testing):
-# 1. Qwen/Qwen2.5-Coder-14B-Instruct - Fast (0.230s), most token-efficient (43 tokens), coding-focused
-# 2. meta/Llama-3.3-70B-Instruct - Quality fallback (70B model, fast 0.297s, good efficiency)
-# 3. openai/gpt-oss-120b - Complex reasoning fallback (120B model, slower but highest quality)
+# Fallback order (updated based on Feb 2026 API availability testing):
+# All models tested and verified working - ordered by speed and reliability
+# 1. Qwen/Qwen2.5-Coder-14B-Instruct - Fastest (0.230s), most token-efficient (43 tokens), coding-focused
+# 2. meta/Llama-3.3-70B-Instruct - Fast (0.297s), quality 70B model, good efficiency (50 tokens)
+# 3. openai/gpt-oss-20b - Reliable (0.345s), good token efficiency (125 tokens)
+# 4. meta/Llama-4-Scout-17B-16E-Instruct - Reliable (0.466s), efficient (25 tokens)
 FALLBACK_CHAT_MODELS = [
-    "Qwen/Qwen2.5-Coder-14B-Instruct",  # Fast, efficient, coding-focused
-    "meta/Llama-3.3-70B-Instruct",      # Quality fallback for complex reasoning
-    "openai/gpt-oss-120b",              # Last resort for maximum quality/complexity
+    "Qwen/Qwen2.5-Coder-14B-Instruct",       # Fastest, most efficient
+    "meta/Llama-3.3-70B-Instruct",           # Fast 70B model, high quality
+    "openai/gpt-oss-20b",                    # Reliable 20B model
+    "meta/Llama-4-Scout-17B-16E-Instruct",   # Reliable Scout model
 ]
-# Removed unavailable models:
-# - meta/llama-3.1-70b-instruct (not available - returns error)
-# - openai/gpt-4o-mini (not available - returns error)
+# Removed unreliable/unavailable models:
+# - openai/gpt-oss-120b (unreliable - returns empty responses intermittently)
+# - meta/llama-3.1-70b-instruct (not available - no healthy deployments)
+# - openai/gpt-4o-mini (not available - invalid model name)
 # Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
 
 GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")

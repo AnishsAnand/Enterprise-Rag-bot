@@ -573,28 +573,16 @@ If NO location is mentioned in user's response:
         parts = [p.strip() for p in parts if p.strip()]
         matched_ids = []
         matched_names = []
-        aliases = {
-            "blr": ["bengaluru", "bangalore"],
-            "del": ["delhi"],
-            "mum": ["mumbai"],
-            "chennai": ["chennai"],
-            "amb": ["chennai-amb"],
-            "bkc": ["mumbai-bkc"],
-            "cressex": ["cressex"],
-            "gcc": ["gcc"]
-        }
-        
+        # Match against available options only - no hardcoded location names
         for part in parts:
             part_clean = re.sub(r'[^\w\s-]', '', part).strip()
             if not part_clean:
                 continue
-            # Try direct match first
             for opt in available_options:
                 opt_name = (opt.get("name") or "").lower()
                 opt_id = opt.get("id")
-                # Exact or partial match
-                if (part_clean in opt_name or opt_name in part_clean or 
-                    any(alias in opt_name for key, values in aliases.items() if part_clean.startswith(key) for alias in values)):
+                # Substring match: user input in option name or option name in user input
+                if part_clean in opt_name or opt_name in part_clean:
                     if opt_id and opt_id not in matched_ids:
                         matched_ids.append(opt_id)
                         matched_names.append(opt.get("name"))
@@ -808,6 +796,30 @@ User response: "what should I name it?" → UNCLEAR: User is asking a question
                     # Fetch available endpoints dynamically
                     endpoints_json = await self._fetch_available_options("endpoints")
                     endpoints_data = json.loads(endpoints_json)
+                    
+                    # REUSE: If we have saved_endpoints and user input doesn't match any endpoint name, reuse
+                    available_options = endpoints_data.get("options", [])
+                    saved_eps = getattr(state, "saved_endpoints", None)
+                    user_input = (input_text or state.user_query or "").strip().lower()
+                    if saved_eps and available_options and state.resource_type in ("k8s_cluster", "vm", "firewall", "load_balancer", "lb"):
+                        endpoint_names = [str(o.get("name", "")).lower() for o in available_options if o.get("name")]
+                        input_looks_like_endpoint = user_input and (
+                            user_input in endpoint_names or
+                            any(user_input in en for en in endpoint_names) or
+                            any(en in user_input for en in endpoint_names if len(user_input) >= 2)
+                        )
+                        if not input_looks_like_endpoint:
+                            logger.info(f"♻️ Reusing saved endpoints: {getattr(state, 'saved_endpoint_names', saved_eps)} (input doesn't match endpoint names)")
+                            state.add_parameter("endpoints", saved_eps, is_valid=True)
+                            state.add_parameter("endpoint_names", getattr(state, "saved_endpoint_names", []), is_valid=True)
+                            conversation_state_manager.update_session(state)
+                            if state.is_ready_to_execute():
+                                return {
+                                    "agent_name": self.agent_name,
+                                    "success": True,
+                                    "output": f"Using {state.saved_endpoint_names or 'saved'} data center(s)...",
+                                    "ready_to_execute": True
+                                }
                     
                     # CHECK: If engagement selection is required (ENG users with multiple engagements)
                     if endpoints_data.get("option_type") == "engagement_selection_required":

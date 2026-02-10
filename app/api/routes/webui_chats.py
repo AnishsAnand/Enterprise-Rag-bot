@@ -360,13 +360,7 @@ async def list_models():
                 id="Vayu Maya",
                 created=now,
                 owned_by="Tata Communications",
-                name="Vayu Maya RAG"
-            ),
-            ModelInfo(
-                id="Vayu Maya-v1",
-                created=now,
-                owned_by="Tata Communications",
-                name="Vayu Maya RAG v1"
+                name="Vayu Maya"
             )
         ]
     )

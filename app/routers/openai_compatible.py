@@ -22,13 +22,14 @@ from app.core.database import SessionLocal
 from app.models.database_models import RAGQuery
 
 # ============================================================================
-# PRODUCTION FIX: Import WebUI Formatter
+# PRODUCTION FIX: Import WebUI Formatter and Models
 # ============================================================================
 from app.services.webui_formatter import (
     format_for_webui as format_for_openwebui,
     format_agent_response_for_webui as format_agent_response_for_openwebui,
     format_error_for_webui as format_error_for_openwebui
 )
+from app.api.routes.webui_chats import ModelInfo, ModelListResponse
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +76,7 @@ class ChatCompletionResponse(BaseModel):
     usage: Optional[Usage] = None
     followUps: Optional[List[str]] = None  # Follow-up suggestions for the UI
 
-class ModelInfo(BaseModel):
-    id: str
-    object: str = "model"
-    created: int
-    owned_by: str = "Tata Communications"
-
-class ModelListResponse(BaseModel):
-    object: str = "list"
-    data: List[ModelInfo]
+# ModelInfo and ModelListResponse are now imported from webui_chats.py to avoid duplication
 
 # ============================================================================
 # Helper Functions
@@ -139,7 +132,9 @@ def create_stream_chunk(
 async def get_rich_content_from_widget(
     query: str,
     user_id: Optional[str],
-    session_id: str
+    session_id: str,
+    auth_token: Optional[str] = None,
+    user_type: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Call the widget endpoint to get rich content with steps and images.
@@ -171,6 +166,13 @@ async def get_rich_content_from_widget(
             "store_interaction": False,  
             "session_id": session_id,
             "user_id": user_id or "webui_user"}
+        
+        # Prepare headers for widget call
+        headers = {}
+        if auth_token:
+            headers["Authorization"] = auth_token
+        if user_type:
+            headers["X-User-Type"] = user_type
         
         logger.info(f"[OpenWebUI] Calling widget endpoint for rich content: {query[:50]}")
         
@@ -248,7 +250,7 @@ async def build_rich_response(
         routed_to = widget_response.get("routed_to", "")
         if routed_to == "agent_manager":
             logger.info(f"[WebUI] Agent response detected, using specialized formatting")
-            formatted_answer = format_agent_response_for_webui(
+            formatted_answer = format_agent_response_for_openwebui(
                 response_text=answer,
                 execution_result=widget_response.get("execution_result"),
                 session_id=session_id,
@@ -260,7 +262,7 @@ async def build_rich_response(
                 f"[WebUI] Formatting RAG response: "
                 f"{len(steps)} steps, {len(images)} images"
             )
-            formatted_answer = format_for_webui(
+            formatted_answer = format_for_openwebui(
                 answer=answer,
                 steps=steps,
                 images=images,
@@ -302,7 +304,7 @@ async def build_rich_response(
         # No results found - return formatted error
         logger.warning(f"[WebUI] No RAG results found for: {query}")
         
-        formatted_answer = format_error_for_webui(
+        formatted_answer = format_error_for_openwebui(
             error_message=(
                 "I couldn't find relevant information in the knowledge base for your query."
             ),
@@ -402,7 +404,7 @@ async def build_rich_response(
         summary = (answer[:600] + "...") if answer and len(answer) > 600 else answer
     
     # Format everything for WebUI
-    formatted_answer = format_for_webui(
+    formatted_answer = format_for_openwebui(
         answer=answer or "Unable to generate response from available context.",
         steps=steps,
         images=images,
@@ -477,6 +479,10 @@ async def chat_completions(
         
         user_id = request_data.user or "openwebui_user"
         
+        # Extract authentication token and user type from headers
+        auth_token = request.headers.get("Authorization", "")
+        user_type = request.headers.get("X-User-Type", "CUS")  # Default to CUS if not provided
+        
         # Create stable session ID for conversation continuity
         # Use the FIRST user message as the anchor for session ID (not the changing history)
         # This ensures "list clusters" → "all" stays in the same session
@@ -534,7 +540,7 @@ async def chat_completions(
             logger.error(
                 f"[WebUI] Response too short or empty for query: {query}"
             )
-            formatted_answer = format_error_for_webui(
+            formatted_answer = format_error_for_openwebui(
                 error_message=(
                     "Unable to generate a comprehensive response. "
                     "Please try rephrasing your question or contact support."
@@ -585,7 +591,7 @@ async def chat_completions(
                 _stream_response(
                     completion_id, 
                     request_data.model, 
-                    streaming_content
+                    formatted_answer
                 ),
                 media_type="text/event-stream; charset=utf-8"
             )
@@ -620,7 +626,7 @@ async def chat_completions(
         logger.exception(f"[WebUI] Unhandled error: {e}")
         
         # Return formatted error response
-        error_response = format_error_for_webui(
+        error_response = format_error_for_openwebui(
             error_message=f"An unexpected error occurred: {str(e)[:100]}",
             suggestions=[
                 "Please try again in a moment",

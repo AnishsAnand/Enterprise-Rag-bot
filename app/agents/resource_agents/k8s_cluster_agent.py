@@ -204,7 +204,7 @@ class K8sClusterAgent(BaseResourceAgent):
                 logger.info(f"🔍 Applying filter: {filter_criteria}")
                 clusters = await self.filter_with_llm(clusters, filter_criteria, user_query)
                 logger.info(f"✅ After filtering: {len(clusters)} clusters")
-            # Format response with agentic formatter (prevents hallucination)
+            # Format response with agentic LLM formatter
             formatted_response = await self.format_response_agentic(
                 operation="list",
                 raw_data=clusters,
@@ -500,7 +500,9 @@ class K8sClusterAgent(BaseResourceAgent):
                     resource_type="k8s_cluster",
                     operation="list",
                     params=api_payload,
-                    user_roles=context.get("user_roles", [])
+                    user_roles=context.get("user_roles", []),
+                    auth_token=context.get("auth_token"),
+                    user_id=context.get("user_id")
                 )
                 
                 if result.get("success"):

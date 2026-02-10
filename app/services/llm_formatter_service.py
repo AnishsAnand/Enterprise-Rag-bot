@@ -393,15 +393,9 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
                     return len(raw_data[key])
         return 0
     
-    def _fallback_format(self,resource_type: str,operation: str,raw_data: Any) -> str:
+    def _fallback_format(self, resource_type: str, operation: str, raw_data: Any, query_type: str = "general") -> str:
         """
-        Fallback formatting if LLM fails.
-        Args:
-            resource_type: Resource type
-            operation: Operation performed
-            raw_data: Raw data  
-        Returns:
-            Simple formatted string
+        Fallback formatting if LLM fails. NO TRUNCATION - outputs ALL data as markdown table.
         """
         try:
             emoji_map = {
@@ -414,26 +408,91 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
                 "firewall": "🔥",
                 "endpoint": "📍"}
             emoji = emoji_map.get(resource_type, "✅")
+            items = []
             if isinstance(raw_data, list):
-                count = len(raw_data)
-                return f"{emoji} Found **{count} {resource_type}(s)**"
+                items = raw_data
             elif isinstance(raw_data, dict):
-                # Try to extract count from common response structures
-                if "department" in raw_data:
-                    items = raw_data.get("department", [])
-                    if isinstance(items, list):
-                        count = len(items)
-                        return f"{emoji} Found **{count} business unit(s)**"
-                elif "data" in raw_data:
-                    items = raw_data.get("data", [])
-                    if isinstance(items, list):
-                        count = len(items)
-                        return f"{emoji} Found **{count} {resource_type}(s)**"
-                return f"{emoji} Successfully retrieved {resource_type} data"
-            else:
-                return f"{emoji} Operation '{operation}' completed successfully"  
+                for key in ["department", "data", "clusters", "vms", "services", "environments", "zones"]:
+                    if key in raw_data and isinstance(raw_data[key], list):
+                        items = raw_data[key]
+                        break
+            if items and isinstance(items[0], dict):
+                # Output FULL table - NO truncation
+                table = self._format_items_as_markdown_table(items, resource_type)
+                return f"{emoji} Found **{len(items)} {resource_type}(s)**\n\n{table}"
+            elif items:
+                # Simple list
+                lines = [f"- {item}" for item in items[:100]]  # cap at 100 for non-dict
+                if len(items) > 100:
+                    lines.append(f"... and {len(items) - 100} more")
+                return f"{emoji} Found **{len(items)} {resource_type}(s)**\n\n" + "\n".join(lines)
+            return f"{emoji} Operation '{operation}' completed successfully"
         except Exception as e:
+            logger.error(f"Fallback format error: {e}", exc_info=True)
             return f"✅ Operation completed. (Formatting note: {str(e)})"
+    
+    def _format_items_as_markdown_table(self, items: list, resource_type: str) -> str:
+        """Format ALL items as markdown table - NO truncation."""
+        if not items:
+            return ""
+        # Resource-specific column extraction
+        if resource_type == "business_unit":
+            rows = []
+            for i, m in enumerate(items, 1):
+                loc = "N/A"
+                if isinstance(m.get("endpoint"), dict):
+                    loc = m["endpoint"].get("location", m["endpoint"].get("name", "N/A"))
+                elif isinstance(m.get("endpoint"), str):
+                    loc = m["endpoint"]
+                rows.append(f"| {i} | {m.get('name', 'N/A')} | {m.get('id', 'N/A')} | {loc} |")
+            return "| # | Name | ID | Location |\n|---|---:|---:|---|\n" + "\n".join(rows)
+        if resource_type == "k8s_cluster":
+            rows = []
+            for i, m in enumerate(items, 1):
+                name = m.get("clusterName") or m.get("name") or "N/A"
+                loc = m.get("displayNameEndpoint") or m.get("endpointName") or m.get("location") or "N/A"
+                status = m.get("status") or "N/A"
+                k8s = m.get("kubernetesVersion") or m.get("k8sVersion") or "N/A"
+                nodes = m.get("nodescount") or m.get("nodesCount") or m.get("nodes") or 0
+                rows.append(f"| {i} | {name} | {status} | {loc} | {k8s} | {nodes} |")
+            return "| # | Name | Status | Location | K8s Version | Nodes |\n|---|---:|---:|---:|---:|---:|\n" + "\n".join(rows)
+        if resource_type == "environment":
+            rows = []
+            for i, m in enumerate(items, 1):
+                name = m.get("name") or m.get("environmentName") or "N/A"
+                zone = m.get("zoneName") or m.get("zone") or "N/A"
+                status = m.get("status") or "N/A"
+                rows.append(f"| {i} | {name} | {zone} | {status} |")
+            return "| # | Name | Zone | Status |\n|---|---:|---:|---|\n" + "\n".join(rows)
+        if resource_type == "zone":
+            rows = []
+            for i, m in enumerate(items, 1):
+                name = m.get("name") or m.get("zoneName") or "N/A"
+                cidr = m.get("cidr") or m.get("network") or "N/A"
+                status = m.get("status") or "N/A"
+                rows.append(f"| {i} | {name} | {cidr} | {status} |")
+            return "| # | Name | CIDR | Status |\n|---|---:|---:|---|\n" + "\n".join(rows)
+        # Generic: extract name, id, status, location from first item
+        keys = set()
+        for m in items:
+            if isinstance(m, dict):
+                keys.update(k for k, v in m.items() if v is not None and k not in ("endpoint",))
+        # Prefer common display columns
+        cols = ["name", "id", "status", "location", "type"]
+        ordered = [c for c in cols if c in keys]
+        ordered += [k for k in sorted(keys) if k not in ordered][:6]  # up to 6 extra
+        header = "| # | " + " | ".join(c.replace("_", " ").title() for c in ordered) + " |"
+        sep = "|" + "|---|" * (len(ordered) + 1)
+        rows = []
+        for i, m in enumerate(items, 1):
+            cells = [str(i)]
+            for c in ordered:
+                v = m.get(c)
+                if isinstance(v, dict):
+                    v = v.get("name") or v.get("location") or str(v)
+                cells.append(str(v) if v is not None else "N/A")
+            rows.append("| " + " | ".join(cells) + " |")
+        return header + "\n" + sep + "\n" + "\n".join(rows)
     
     async def format_response_agentic(
         self,
@@ -896,11 +955,13 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
 **Output:**"""
         
         try:
+            # 60s timeout for chunk formatting - 70B models need more time for structured output
+            chunk_timeout = float(os.getenv("LLM_CHUNK_TIMEOUT_SECONDS", "60"))
             response = await ai_service._call_chat_with_retries(
                 prompt=prompt,
                 max_tokens=5000,  # Increased for clusters with many fields
                 temperature=0.1,  # Low temperature for accuracy
-                timeout=self.timeout * 2
+                timeout=chunk_timeout
             )
             
             if response:
@@ -1090,7 +1151,7 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
                 prompt=structured_prompt,
                 max_tokens=self.max_tokens * 2,  # More tokens for structured output
                 temperature=0.1,  # Lower temperature for accuracy
-                timeout=self.timeout * 2
+                timeout=float(os.getenv("LLM_CHUNK_TIMEOUT_SECONDS", "60"))
             )
             
             if response:

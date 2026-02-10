@@ -273,7 +273,7 @@
           },
           "list": {
             "method": "POST",
-            "url": "https://ipcloud.tatacommunications.com/uat-paasservice/paas/{engagement_id}/clusterlist/stream",
+            "url": "https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/clusterlist/stream",
             "description": "List all clusters for given endpoints using SSE streaming. Requires engagement_id in URL and endpoints array in payload.",
             "streaming": true
           },
@@ -319,12 +319,12 @@
           },
           "get_os_images": {
             "method": "GET",
-            "url": "https://ipcloud.tatacommunications.com/uat-portalservice/configservice/templates/{zoneId}?type=Container",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/configservice/templates/{zoneId}?type=Container",
             "description": "Get OS images (templates) for zone, filtered by k8s version"
           },
           "get_flavors": {
             "method": "GET",
-            "url": "https://ipcloud.tatacommunications.com/uat-portalservice/configservice/flavordetails/{zoneId}",
+            "url": "https://ipcloud.tatacommunications.com/portalservice/configservice/flavordetails/{zoneId}",
             "description": "Get compute flavors with node types for zone"
           }
         },

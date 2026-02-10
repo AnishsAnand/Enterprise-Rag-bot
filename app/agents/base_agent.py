@@ -15,15 +15,18 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Fallback models to try when primary model fails (updated based on API availability testing)
+# Fallback models to try when primary model fails (updated based on Feb 2026 API availability testing)
+# All models tested and verified working - ordered by speed and reliability
 FALLBACK_MODELS = [
-    "Qwen/Qwen2.5-Coder-14B-Instruct",  # Fast (0.230s), most token-efficient (43 tokens), coding-focused
-    "meta/Llama-3.3-70B-Instruct",      # Quality fallback (70B model, fast 0.297s, good efficiency)
-    "openai/gpt-oss-120b",              # Complex reasoning fallback (120B model, slower but highest quality)
+    "Qwen/Qwen2.5-Coder-14B-Instruct",       # Fastest (0.230s), most token-efficient (43 tokens), coding-focused
+    "meta/Llama-3.3-70B-Instruct",           # Fast (0.297s), quality 70B model, good efficiency (50 tokens)
+    "openai/gpt-oss-20b",                    # Reliable (0.345s), good token efficiency (125 tokens)
+    "meta/Llama-4-Scout-17B-16E-Instruct",   # Reliable (0.466s), efficient (25 tokens)
 ]
-# Removed unavailable models:
-# - meta/llama-3.1-70b-instruct (not available - returns error)
-# - openai/gpt-4o-mini (not available - returns error)
+# Removed unreliable/unavailable models:
+# - openai/gpt-oss-120b (unreliable - returns empty responses intermittently)
+# - meta/llama-3.1-70b-instruct (not available - no healthy deployments)
+# - openai/gpt-4o-mini (not available - invalid model name)
 
 class BaseAgent(ABC):
     """

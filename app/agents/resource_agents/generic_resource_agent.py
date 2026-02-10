@@ -113,18 +113,21 @@ class GenericResourceAgent(BaseResourceAgent):
             elif method_name == "get_business_units_list":
                 result = await api_executor_service.get_business_units_list(
                     ipc_engagement_id=None,
+                    paas_engagement_id=selected_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
             elif method_name == "get_environments_list":
                 result = await api_executor_service.get_environments_list(
                     ipc_engagement_id=None,
+                    paas_engagement_id=selected_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
             elif method_name == "get_zones_list":
                 result = await api_executor_service.get_zones_list(
                     ipc_engagement_id=None,
+                    paas_engagement_id=selected_engagement_id,
                     user_id=user_id,
                     auth_token=auth_token
                 )
@@ -157,7 +160,8 @@ class GenericResourceAgent(BaseResourceAgent):
             resource_type=resource_type,
             operation="list",
             raw_data=raw_data,
-            user_query=user_query)
+            user_query=user_query,
+            context={"query_type": "general"})
         return {
             "success": True,
             "data": raw_data,

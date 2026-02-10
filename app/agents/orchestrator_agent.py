@@ -440,10 +440,12 @@ Return ONLY a JSON array of strings, like:
                 if is_metadata_request:
                     logger.info(f"📋 Metadata request detected, preserving session state")
                 else:
-                    # Preserve engagement ID before resetting
+                    # Preserve engagement ID and saved endpoints before resetting
                     preserved_engagement_id = state.selected_engagement_id
                     preserved_user_type = state.user_type
-                    logger.info(f"🔄 Previous conversation {state.status.value}, resetting for new operation (preserving engagement: {preserved_engagement_id})")
+                    preserved_endpoints = getattr(state, "saved_endpoints", None)
+                    preserved_endpoint_names = getattr(state, "saved_endpoint_names", None)
+                    logger.info(f"🔄 Previous conversation {state.status.value}, resetting for new operation (preserving engagement: {preserved_engagement_id}, endpoints: {preserved_endpoints})")
                     
                     # Reset operation-specific state but keep session
                     state.status = ConversationStatus.INITIATED
@@ -460,9 +462,11 @@ Return ONLY a JSON array of strings, like:
                     state.pending_filter_options = None
                     state.pending_filter_type = None
                     state.pending_engagements = None
-                    # Keep the engagement ID!
+                    # Keep engagement ID and saved endpoints (user may do follow-up like "filter running")
                     state.selected_engagement_id = preserved_engagement_id
                     state.user_type = preserved_user_type
+                    state.saved_endpoints = preserved_endpoints
+                    state.saved_endpoint_names = preserved_endpoint_names
                     state.user_query = user_input
                     
                     # Persist the reset state

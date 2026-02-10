@@ -72,6 +72,9 @@ class ConversationState:
         # Engagement selection tracking (for ENG users with multiple engagements)
         self.pending_engagements: Optional[List[Dict[str, Any]]] = None
         self.selected_engagement_id: Optional[int] = None
+        # Saved endpoint/datacenter - reused for follow-up until user explicitly changes
+        self.saved_endpoints: Optional[List[int]] = None
+        self.saved_endpoint_names: Optional[List[str]] = None
         
         logger.info(f"✅ Created conversation state for session {session_id}, user {user_id}")
     
@@ -294,6 +297,8 @@ class ConversationState:
             "pending_filter_type": self.pending_filter_type,
             "pending_engagements": self.pending_engagements,
             "selected_engagement_id": self.selected_engagement_id,
+            "saved_endpoints": self.saved_endpoints,
+            "saved_endpoint_names": self.saved_endpoint_names,
             "metadata": metadata
         }
     
@@ -347,6 +352,8 @@ class ConversationState:
         # Restore engagement selection state
         state.pending_engagements = data.get("pending_engagements")
         state.selected_engagement_id = data.get("selected_engagement_id")
+        state.saved_endpoints = data.get("saved_endpoints")
+        state.saved_endpoint_names = data.get("saved_endpoint_names")
         
         # Restore additional attributes from metadata
         metadata = data.get("metadata", {})

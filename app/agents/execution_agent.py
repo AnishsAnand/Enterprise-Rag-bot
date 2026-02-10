@@ -309,7 +309,7 @@ All operations are routed through specialized resource agents for proper handlin
                     state.selected_engagement_id = single_eng.get("id")
                     logger.info(f"✅ CUS user - auto-selected engagement: {state.selected_engagement_id}")
                     # Also set in api_executor_service for API calls
-                    api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
+                    await api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
                     conversation_state_manager.update_session(state)
                 
                 # Multiple engagements AND not CUS → Must select (ENG or unknown user_type)
@@ -343,7 +343,7 @@ All operations are routed through specialized resource agents for proper handlin
                     state.selected_engagement_id = single_eng.get("id")
                     logger.info(f"✅ Auto-selected single engagement: {state.selected_engagement_id} (user_type={user_type})")
                     # Also set in api_executor_service for API calls
-                    api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
+                    await api_executor_service.set_engagement_id(session_id, state.selected_engagement_id)
                     conversation_state_manager.update_session(state)
             
             # Check for multi-resource requests (e.g., "gitlab, kafka")
@@ -390,6 +390,14 @@ All operations are routed through specialized resource agents for proper handlin
             # Update status based on result
             if execution_result.get("success"):
                 state.status = ConversationStatus.COMPLETED
+                # Save endpoints for reuse on follow-up (e.g. "filter running") until user explicitly changes
+                ep_ids = state.collected_params.get("endpoints", [])
+                ep_names = state.collected_params.get("endpoint_names", [])
+                if ep_ids and state.resource_type in ("k8s_cluster", "vm", "firewall", "load_balancer", "lb", "endpoint"):
+                    state.saved_endpoints = ep_ids if isinstance(ep_ids, list) else [ep_ids]
+                    state.saved_endpoint_names = ep_names if isinstance(ep_names, list) else []
+                    logger.info(f"💾 Saved endpoints for reuse: {state.saved_endpoint_names or state.saved_endpoints}")
+                    conversation_state_manager.update_session(state)
                 logger.info(f"✅ Execution successful: {state.operation} {state.resource_type}")
             else:
                 state.status = ConversationStatus.FAILED

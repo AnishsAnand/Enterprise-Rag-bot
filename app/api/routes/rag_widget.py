@@ -1869,9 +1869,9 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
             )
 
         # Format response
-        from app.services.webui_formatter import format_for_openwebui
+        from app.services.webui_formatter import format_for_webui
         
-        formatted_answer = format_for_openwebui(
+        formatted_answer = format_for_webui(
             answer=answer or "I was unable to generate a comprehensive answer.",
             steps=steps_with_images,
             images=selected_images,
@@ -2045,7 +2045,7 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
                                 background_tasks: BackgroundTasks, auth_token: str = None,
                                 user_type: str = None) -> dict:
     """Handle routing to agent manager and process response."""
-    from app.services.webui_formatter import format_agent_response_for_openwebui
+    from app.services.webui_formatter import format_agent_response_for_webui
     
     agent_manager = get_agent_manager(
         vector_service=postgres_service,
@@ -2104,7 +2104,7 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
             resp["followUps"] = follow_ups
             return resp
 
-    formatted_answer = format_agent_response_for_openwebui(
+    formatted_answer = format_agent_response_for_webui(
         response_text=response_text,
         execution_result=execution_result,
         session_id=session_id,

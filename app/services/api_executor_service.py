@@ -2403,12 +2403,13 @@ class APIExecutorService:
         logger.info(f"🔌 Fetching circuit ID for engagement {engagement_id}")
         return "E-IPCTEAM-1602"
     
-    async def get_business_units_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
+    async def get_business_units_list(self, ipc_engagement_id: int = None, paas_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get business units (departments) listing for engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            paas_engagement_id: PAAS Engagement ID (e.g. from user selection) - used when ipc_engagement_id not provided
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
             auth_token: Bearer token from UI for API authentication
@@ -2433,9 +2434,13 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
             else:
                 logger.info(f"🔄 Force refresh requested, bypassing cache")
-            # Get IPC engagement ID if not provided
+            # Get IPC engagement ID if not provided - prefer paas_engagement_id from context (user selection)
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
+                ipc_engagement_id = await self.get_ipc_engagement_id(
+                    engagement_id=paas_engagement_id if paas_engagement_id else None,
+                    user_id=user_id,
+                    auth_token=auth_token
+                )
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2587,12 +2592,13 @@ class APIExecutorService:
                 "error": str(e),
                 "data": None}
     
-    async def get_environments_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
+    async def get_environments_list(self, ipc_engagement_id: int = None, paas_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get environments listing per engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            paas_engagement_id: PAAS Engagement ID (e.g. from user selection) - used when ipc_engagement_id not provided
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
             auth_token: Bearer token from UI for API authentication
@@ -2614,7 +2620,11 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
             
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
+                ipc_engagement_id = await self.get_ipc_engagement_id(
+                    engagement_id=paas_engagement_id if paas_engagement_id else None,
+                    user_id=user_id,
+                    auth_token=auth_token
+                )
                 if not ipc_engagement_id:
                     return {
                         "success": False,
@@ -2664,12 +2674,13 @@ class APIExecutorService:
                 "error": str(e),
                 "data": None}
         
-    async def get_zones_list(self, ipc_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
+    async def get_zones_list(self, ipc_engagement_id: int = None, paas_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
         """
         Get zones (network segments/VLANs) listing for engagement.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             ipc_engagement_id: IPC Engagement ID (will be fetched if not provided)
+            paas_engagement_id: PAAS Engagement ID (e.g. from user selection) - used when ipc_engagement_id not provided
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
             auth_token: Bearer token from UI for API authentication
@@ -2691,7 +2702,11 @@ class APIExecutorService:
                         "ipc_engagement_id": session.get("ipc_engagement_id")}
 
             if not ipc_engagement_id:
-                ipc_engagement_id = await self.get_ipc_engagement_id(user_id=user_id, auth_token=auth_token)
+                ipc_engagement_id = await self.get_ipc_engagement_id(
+                    engagement_id=paas_engagement_id if paas_engagement_id else None,
+                    user_id=user_id,
+                    auth_token=auth_token
+                )
                 if not ipc_engagement_id:
                     return {
                         "success": False,

@@ -60,6 +60,7 @@ class ConversationSessionRecord(SessionBase):
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary for ConversationState reconstruction."""
+        extra = self.extra_data or {}
         return {
             "session_id": self.session_id,
             "user_id": self.user_id,
@@ -83,7 +84,9 @@ class ConversationSessionRecord(SessionBase):
             "execution_result": self.execution_result,
             "error_message": self.error_message,
             "agent_handoffs": self.agent_handoffs or [],
-            "metadata": self.extra_data or {}}
+            "saved_endpoints": extra.get("saved_endpoints"),
+            "saved_endpoint_names": extra.get("saved_endpoint_names"),
+            "metadata": extra}
 
 class MemoriSessionManager:
     """
@@ -182,7 +185,10 @@ class MemoriSessionManager:
                 record.execution_result = state_dict.get("execution_result")
                 record.error_message = state_dict.get("error_message")
                 record.agent_handoffs = state_dict.get("agent_handoffs", [])
-                record.extra_data = state_dict.get("metadata", {})
+                extra = state_dict.get("metadata", {})
+                extra["saved_endpoints"] = state_dict.get("saved_endpoints")
+                extra["saved_endpoint_names"] = state_dict.get("saved_endpoint_names")
+                record.extra_data = extra
             else:
                 # Create new record
                 record = ConversationSessionRecord(
@@ -208,7 +214,11 @@ class MemoriSessionManager:
                     execution_result=state_dict.get("execution_result"),
                     error_message=state_dict.get("error_message"),
                     agent_handoffs=state_dict.get("agent_handoffs", []),
-                    extra_data=state_dict.get("metadata", {}))
+                    extra_data={
+                        **dict(state_dict.get("metadata", {})),
+                        "saved_endpoints": state_dict.get("saved_endpoints"),
+                        "saved_endpoint_names": state_dict.get("saved_endpoint_names")
+                    })
                 db.add(record)
             db.commit()
             # Update cache
