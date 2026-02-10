@@ -6,48 +6,36 @@ import logging
 import json
 import re
 from typing import List, Dict, Any, Optional
-
 from app.services.ai_service import ai_service
 
 logger = logging.getLogger(__name__)
-
 
 class ParameterExtractor:
     """
     Tools for extracting and matching parameters from user input using LLM.
     """
     
-    async def match_user_selection(
-        self,
-        user_input: str,
-        available_options: List[Dict[str, Any]]
-    ) -> str:
+    async def match_user_selection(self,user_input: str,available_options: List[Dict[str, Any]]) -> str:
         """
         Use LLM to intelligently match user's input to available options.
-        
         Handles:
         - Exact matches
         - Partial matches  
         - Aliases and typos
         - "all" selection
         - Multiple selections (comma-separated)
-        
         Args:
             user_input: User's response
-            available_options: List of dicts with 'id' and 'name' keys
-            
+            available_options: List of dicts with 'id' and 'name' keys   
         Returns:
             JSON string with match result
         """
         try:
             logger.info(f"🔍 Matching user input: '{user_input}' against {len(available_options)} options")
-            
             # Format options for LLM - INCLUDE IDs so LLM knows the correct ID to return
             formatted_options = "\n".join([
                 f"- ID: {opt.get('id')}, Name: {opt.get('name', opt.get('itemName', str(opt)))}" 
-                for opt in available_options
-            ])
-            
+                for opt in available_options])
             prompt = f"""You are an intelligent matching system. Match the user's input to the best option from the list.
 
 Available Options:
@@ -106,17 +94,12 @@ Respond with ONLY valid JSON (no markdown, no explanation):
 OR if truly no match:
 {{"matched": false}}
 """
-            
             # Use slightly higher temperature for more creative/intelligent matching
             llm_response = await ai_service._call_chat_with_retries(
                 prompt=prompt,
-                temperature=0.2,  # Slightly higher for better abbreviation handling
-                max_tokens=500
-            )
-            
-            # Clean response (remove markdown, code blocks, explanations)
+                temperature=0.2,  
+                max_tokens=500)
             response_text = llm_response.strip()
-            
             # Remove markdown code blocks
             if response_text.startswith("```json"):
                 response_text = response_text.replace("```json", "").replace("```", "").strip()
@@ -124,12 +107,10 @@ OR if truly no match:
                 response_text = response_text.split("```")[1].strip()
                 if response_text.startswith("json"):
                     response_text = response_text[4:].strip()
-            
             # Extract JSON if there's extra text
             json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
             if json_match:
                 response_text = json_match.group(0)
-            
             # Parse JSON with retry logic
             result = None
             try:
@@ -152,7 +133,6 @@ OR if truly no match:
             if result is None:
                 logger.error(f"❌ Failed to parse JSON: {llm_response[:200]}")
                 return json.dumps({"matched": False, "error": "Failed to parse LLM response"}, indent=2)
-            
             if result.get("matched"):
                 if result.get("all"):
                     logger.info(f"✅ Matched ALL options")
@@ -177,34 +157,25 @@ OR if truly no match:
                         "matched": True,
                         "matched_item": matched_item
                     }, indent=2)
-            
             # No match
             logger.info("❌ No match found")
             return json.dumps({"matched": False, "no_match": True}, indent=2)
-            
         except Exception as e:
             logger.error(f"Error matching selection: {e}")
             return json.dumps({"matched": False, "error": str(e)}, indent=2)
     
-    async def extract_location_from_query(
-        self,
-        user_query: str,
-        available_endpoints: List[Dict[str, Any]]
-    ) -> Optional[str]:
+    async def extract_location_from_query( self,user_query: str, available_endpoints: List[Dict[str, Any]] ) -> Optional[str]:
         """
         Extract location/endpoint names from user query using LLM.
-        
         Args:
             user_query: User's query
-            available_endpoints: List of available endpoints
-            
+            available_endpoints: List of available endpoints 
         Returns:
             Extracted location string or None
         """
         try:
             endpoint_names = [ep.get("endpointDisplayName", ep.get("name", "")) for ep in available_endpoints]
             endpoints_str = ", ".join(endpoint_names)
-            
             prompt = f"""User query: "{user_query}"
 
 Available locations: {endpoints_str}
@@ -228,21 +199,13 @@ Examples:
 "what are the clusters?" → LOCATION: all
 """
             
-            llm_response = await ai_service._call_chat_with_retries(
-                prompt=prompt,
-                temperature=0.0,
-                max_tokens=100
-            )
-            
+            llm_response = await ai_service._call_chat_with_retries( prompt=prompt, temperature=0.0, max_tokens=100 )
             result = llm_response.strip()
-            
             if result.startswith("LOCATION:"):
                 location = result.replace("LOCATION:", "").strip()
                 logger.info(f"🌍 Extracted location: {location}")
                 return location
-            
             return None
-            
         except Exception as e:
             logger.error(f"Error extracting location: {e}")
             return None

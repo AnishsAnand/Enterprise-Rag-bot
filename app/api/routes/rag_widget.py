@@ -26,7 +26,8 @@ from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.agents import get_agent_manager  
-from app.services.enhanced_bulk_scraper import ProductionBulkScraperService
+import numpy as np
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ class EnhancedBulkScraperService:
     # URL DISCOVERY
     # ============================================================
 
-    async def discover_urls_intelligent(
+    async def discover_url(
         self,
         base_url: str,
         max_depth: int = 15,
@@ -378,6 +379,907 @@ class TaskExecutionRequest(BaseModel):
     store_result: bool = Field(default=True)
 
 
+# ===================== Scraping Service =====================
+from app.services.scraper_service import scraper_service
+class ProductionBulkScraperService:
+    """
+    ✅ PRODUCTION-READY: Enhanced bulk scraper with intelligent discovery.
+    
+    NEW FEATURES:
+    - Priority-based URL discovery (docs > products > blogs)
+    - Parallel scraping with adaptive batch sizing
+    - Content quality filtering
+    - Duplicate detection via simhash
+    - Comprehensive error handling
+    """
+
+    def __init__(self, scraper_service, max_concurrent: int = 10):
+        self.scraper_service = scraper_service
+        self.max_concurrent = max_concurrent
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+
+        # Crawl state
+        self.discovered_urls: Set[str] = set()
+        self.visited_urls: Set[str] = set()
+        self.failed_urls: Set[str] = set()
+        self.content_hashes: Set[str] = set()
+
+        # Priority queue: (priority, depth, url)
+        self.url_queue: deque = deque()
+
+        # Statistics
+        self.stats = {
+            "total_discovered": 0,
+            "total_scraped": 0,
+            "total_documents": 0,
+            "total_images": 0,
+            "start_time": None,
+            "end_time": None,
+        }
+
+    async def discover_url(
+        self,
+        base_url: str,
+        max_depth: int = 15,
+        max_urls: int = 5000,
+        follow_external: bool = False,
+        url_patterns: Optional[List[str]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        ✅ Priority-based URL discovery with intelligent scoring.
+        
+        Priority Tiers:
+        - 90-100: Documentation, guides, APIs, SDKs
+        - 70-89: Product pages, features, integrations
+        - 50-69: Blog posts, articles, news
+        - <50: Navigation pages, tags, categories
+        """
+        self.stats["start_time"] = datetime.now()
+        base_domain = urlparse(base_url).netloc
+
+        # Initialize queue with base URL
+        self.url_queue.append((100, 0, base_url))
+        self.discovered_urls.add(base_url)
+
+        logger.info(
+            f"🔍 Starting intelligent URL discovery\n"
+            f"   Base: {base_url}\n"
+            f"   Max depth: {max_depth}\n"
+            f"   Max URLs: {max_urls}\n"
+            f"   Follow external: {follow_external}"
+        )
+
+        while self.url_queue and len(self.discovered_urls) < max_urls:
+            # Get highest priority URL
+            priority, depth, current_url = self.url_queue.popleft()
+
+            # Skip if already visited or too deep
+            if current_url in self.visited_urls or depth > max_depth:
+                continue
+
+            self.visited_urls.add(current_url)
+
+            # Fetch page with retry logic
+            html = await self._fetch_page_safe(current_url)
+            if not html:
+                self.failed_urls.add(current_url)
+                continue
+
+            # Extract links
+            soup = BeautifulSoup(html, "html.parser")
+            links = self._extract_links_enhanced(soup, current_url)
+
+            # Process each discovered link
+            for link_url, link_text in links:
+                parsed = urlparse(link_url)
+
+                # Domain filtering
+                if not follow_external and parsed.netloc != base_domain:
+                    continue
+
+                # Skip if already discovered
+                if link_url in self.discovered_urls:
+                    continue
+
+                # Pattern filtering
+                if url_patterns and not self._matches_patterns(link_url, url_patterns):
+                    continue
+
+                if exclude_patterns and self._matches_patterns(link_url, exclude_patterns):
+                    continue
+
+                # Calculate priority score
+                score = self._calculate_url_priority(link_url, link_text, depth + 1)
+                
+                # Add to queue
+                self.url_queue.append((score, depth + 1, link_url))
+                self.discovered_urls.add(link_url)
+
+            # Re-sort queue by priority (keep highest priority first)
+            self.url_queue = deque(
+                sorted(self.url_queue, key=lambda x: x[0], reverse=True)
+            )
+
+            # Progress logging
+            if len(self.discovered_urls) % 100 == 0:
+                logger.info(
+                    f"📊 Discovery progress: {len(self.discovered_urls)} URLs found, "
+                    f"{len(self.visited_urls)} visited, "
+                    f"{len(self.url_queue)} queued"
+                )
+
+            # Small delay to avoid overwhelming the server
+            await asyncio.sleep(0.1)
+
+        self.stats["total_discovered"] = len(self.discovered_urls)
+        
+        logger.info(
+            f"✅ URL discovery complete\n"
+            f"   Total discovered: {len(self.discovered_urls)}\n"
+            f"   Total visited: {len(self.visited_urls)}\n"
+            f"   Failed: {len(self.failed_urls)}"
+        )
+
+        return list(self.discovered_urls)
+
+    async def bulk_scrape_parallel(
+        self,
+        urls: List[str],
+        extract_images: bool = True,
+        extract_tables: bool = True,
+        chunk_size: int = 2000,
+        chunk_overlap: int = 300,
+    ) -> List[Dict[str, Any]]:
+        """
+        ✅ Parallel bulk scraping with quality filtering and intelligent chunking.
+        """
+        documents: List[Dict[str, Any]] = []
+        batch_size = 50
+
+        logger.info(
+            f"🚀 Starting parallel bulk scrape\n"
+            f"   Total URLs: {len(urls)}\n"
+            f"   Batch size: {batch_size}\n"
+            f"   Extract images: {extract_images}"
+        )
+
+        for i in range(0, len(urls), batch_size):
+            batch = urls[i : i + batch_size]
+            
+            logger.info(
+                f"📦 Processing batch {i//batch_size + 1}/{(len(urls)-1)//batch_size + 1} "
+                f"({len(batch)} URLs)"
+            )
+
+            # Create scraping tasks
+            tasks = [
+                self._scrape_url_enhanced(url, extract_images, extract_tables)
+                for url in batch
+            ]
+
+            # Execute batch with exception handling
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for url, result in zip(batch, results):
+                # Skip exceptions
+                if isinstance(result, Exception):
+                    logger.warning(f"⚠️ Scraping failed for {url}: {result}")
+                    continue
+
+                if not result:
+                    continue
+
+                # Extract content
+                text = result["content"].get("text", "")
+                images = result["content"].get("images", [])
+
+                # Quality filtering
+                if not self._is_quality_content(text, url):
+                    logger.debug(f"Skipping low-quality content: {url[:60]}")
+                    continue
+
+                # Duplicate detection via content hashing
+                fingerprint = self._simhash(text)
+                if fingerprint in self.content_hashes:
+                    logger.debug(f"Skipping duplicate content: {url[:60]}")
+                    continue
+
+                self.content_hashes.add(fingerprint)
+
+                # Intelligent chunking
+                chunks = self._chunk_text_intelligent(text, chunk_size, chunk_overlap)
+
+                # Create document entries
+                for idx, chunk in enumerate(chunks):
+                    documents.append({
+                        "content": chunk,
+                        "url": f"{url}#chunk-{idx}" if idx else url,
+                        "title": result["content"].get("title", ""),
+                        "timestamp": datetime.now().isoformat(),
+                        "images": images if idx == 0 else [],  # Only first chunk gets images
+                        "metadata": {
+                            "chunk_index": idx,
+                            "total_chunks": len(chunks),
+                            "quality": self._calculate_content_quality(text),
+                            "word_count": len(chunk.split()),
+                        },
+                    })
+
+                self.stats["total_scraped"] += 1
+                self.stats["total_documents"] += len(chunks)
+                self.stats["total_images"] += len(images)
+
+            # Delay between batches
+            await asyncio.sleep(1)
+
+        self.stats["end_time"] = datetime.now()
+        
+        logger.info(
+            f"✅ Bulk scrape complete\n"
+            f"   Scraped: {self.stats['total_scraped']} pages\n"
+            f"   Documents: {self.stats['total_documents']}\n"
+            f"   Images: {self.stats['total_images']}"
+        )
+
+        return documents
+
+    # ========================================================================
+    # HELPER METHODS
+    # ========================================================================
+
+    async def _fetch_page_safe(self, url: str) -> Optional[str]:
+        """Fetch page with retry logic and error handling."""
+        for attempt in range(3):
+            try:
+                async with self.semaphore:
+                    r = self.scraper_service.session.get(
+                        url, timeout=self.scraper_service.request_timeout
+                    )
+                    r.raise_for_status()
+                    if "text/html" in r.headers.get("Content-Type", ""):
+                        return r.text
+            except Exception as e:
+                if attempt == 2:
+                    logger.debug(f"Failed to fetch {url} after 3 attempts: {e}")
+                await asyncio.sleep(2**attempt)
+        return None
+
+    def _extract_links_enhanced(
+        self, soup: BeautifulSoup, base_url: str
+    ) -> List[tuple]:
+        """Extract and normalize links from HTML."""
+        links = []
+        
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            
+            # Skip invalid links
+            if href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            # Resolve relative URLs
+            url = urljoin(base_url, href)
+            parsed = urlparse(url)._replace(fragment="")
+            clean = parsed.geturl()
+
+            # Skip file downloads
+            if clean.lower().endswith((
+                ".pdf", ".jpg", ".png", ".gif", ".css", ".js", 
+                ".zip", ".tar", ".gz", ".svg", ".ico"
+            )):
+                continue
+
+            # Get link text for priority calculation
+            link_text = a.get_text(strip=True)
+            
+            links.append((clean, link_text))
+        
+        return links
+
+    def _calculate_url_priority(self, url: str, text: str, depth: int) -> int:
+        """
+        Calculate URL priority score (0-100).
+        
+        Priority factors:
+        - High-value keywords (docs, api, guide) → +40
+        - Medium-value keywords (product, feature) → +20
+        - Low-value keywords (tag, category) → -30
+        - Depth penalty → -5 per level
+        """
+        score = 50  # Base score
+        
+        # High-value keywords
+        high_value = ["doc", "guide", "tutorial", "api", "sdk", "reference", "manual"]
+        medium_value = ["feature", "product", "integration", "solution"]
+        low_value = ["tag", "category", "login", "search", "archive"]
+
+        url_lower = url.lower()
+        text_lower = text.lower()
+
+        # Check keywords in URL and text
+        if any(k in url_lower or k in text_lower for k in high_value):
+            score += 40
+        elif any(k in url_lower or k in text_lower for k in medium_value):
+            score += 20
+
+        if any(k in url_lower for k in low_value):
+            score -= 30
+
+        # Depth penalty (prioritize shallower pages)
+        score -= depth * 5
+
+        return max(0, min(100, score))
+
+    def _matches_patterns(self, url: str, patterns: List[str]) -> bool:
+        """Check if URL matches any of the provided regex patterns."""
+        return any(re.search(p, url, re.IGNORECASE) for p in patterns)
+
+    def _simhash(self, text: str) -> str:
+        """Generate content fingerprint for duplicate detection."""
+        words = re.findall(r"\w+", text.lower())
+        return hashlib.md5(" ".join(words[:1000]).encode()).hexdigest()[:16]
+
+    def _is_quality_content(self, text: str, url: str) -> bool:
+        """Check if content meets quality threshold."""
+        # Minimum word count
+        if len(text.split()) < 50:
+            return False
+        
+        # Check for boilerplate content
+        boilerplate_indicators = [
+            "403 forbidden",
+            "404 not found",
+            "access denied",
+            "javascript required",
+            "cookies required"
+        ]
+        
+        text_lower = text.lower()
+        if any(indicator in text_lower for indicator in boilerplate_indicators):
+            return False
+        
+        return True
+
+    def _chunk_text_intelligent(
+        self, text: str, size: int, overlap: int
+    ) -> List[str]:
+        """
+        Intelligent text chunking that respects paragraph boundaries.
+        """
+        # Split into paragraphs
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        
+        chunks = []
+        current = ""
+
+        for p in paragraphs:
+            # If adding this paragraph exceeds size, start new chunk
+            if len(current) + len(p) > size and current:
+                chunks.append(current.strip())
+                # Keep overlap from end of previous chunk
+                current = current[-overlap:] + "\n\n" + p
+            else:
+                current += "\n\n" + p if current else p
+
+        # Add final chunk
+        if current.strip():
+            chunks.append(current.strip())
+        
+        return chunks if chunks else [text]
+
+    def _calculate_content_quality(self, text: str) -> float:
+        """Calculate content quality score (0-1)."""
+        word_count = len(text.split())
+        unique_words = len(set(text.lower().split()))
+        
+        # Lexical diversity
+        diversity = unique_words / max(word_count, 1)
+        
+        # Base quality score
+        quality = min(1.0, 0.4 + diversity)
+        
+        return round(quality, 2)
+
+    async def _scrape_url_enhanced(
+        self,
+        url: str,
+        extract_images: bool,
+        extract_tables: bool
+    ) -> Optional[Dict]:
+        """
+        Enhanced single URL scraping with comprehensive extraction.
+        """
+        try:
+            scrape_params = {
+                "extract_text": True,
+                "extract_links": True,
+                "extract_images": extract_images,
+                "extract_tables": extract_tables,
+                "scroll_page": True,
+                "wait_for_element": "body",
+                "output_format": "json",
+            }
+            
+            result = await call_maybe_async(
+                self.scraper_service.scrape_url,
+                url,
+                scrape_params
+            )
+            
+            return result
+        
+        except Exception as e:
+            logger.debug(f"Scraping failed for {url}: {e}")
+            return None
+
+# Global instance
+enhanced_bulk_scraper = ProductionBulkScraperService(scraper_service)
+
+async def call_maybe_async(fn, *args, **kwargs):
+    """Call a function that might be sync or async."""
+    import inspect
+    
+    if not callable(fn):
+        raise RuntimeError("Provided object is not callable")
+    
+    result = fn(*args, **kwargs)
+    
+    if inspect.isawaitable(result):
+        return await result
+    
+    return result
+
+# ===================== RAG SEARCH Service =====================
+
+class EnhancedRAGSearchService:
+    
+
+    def __init__(self, postgres_service, ai_service):
+        """Initialize with service dependencies."""
+        self.postgres_service = postgres_service
+        self.ai_service = ai_service
+        
+        # Base configuration
+        self.base_threshold = 0.35  # Base relevance threshold
+        self.enable_query_expansion = True
+        self.enable_reranking = True
+        self.max_chunks_return = 10
+        
+        logger.info("✅ EnhancedRAGSearchService initialized")
+        logger.info(f"   - Base threshold: {self.base_threshold}")
+        logger.info(f"   - Query expansion: {self.enable_query_expansion}")
+        logger.info(f"   - Semantic reranking: {self.enable_reranking}")
+
+    def _analyze_query_complexity(self, query: str) -> Dict:
+        """
+        ✅ Analyze query complexity for adaptive thresholding.
+        
+        Returns:
+            {
+                "word_count": int,
+                "has_technical_terms": bool,
+                "has_specific_entities": bool,
+                "question_type": "specific" | "general" | "vague",
+                "specificity_score": float  # 0.0-1.0
+            }
+        """
+        query_lower = query.lower()
+        words = query.split()
+        
+        # Detect technical terms
+        has_acronyms = bool(re.search(r'\b[A-Z]{2,}\b', query))
+        has_versions = bool(re.search(r'\d+\.\d+(?:\.\d+)?', query))
+        has_technical_terms = has_acronyms or has_versions
+        
+        # Detect specific entities
+        has_proper_nouns = bool(re.search(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', query))
+        has_specific_numbers = bool(re.search(r'\b\d+\b', query))
+        has_specific_entities = has_proper_nouns or has_specific_numbers or has_versions
+        
+        # Determine question type
+        if any(word in query_lower for word in ['what is', 'define', 'explain', 'how does']):
+            if len(words) > 8 or has_specific_entities:
+                question_type = "specific"
+            else:
+                question_type = "general"
+        elif any(word in query_lower for word in ['how to', 'steps', 'guide', 'tutorial']):
+            question_type = "specific"
+        elif len(words) <= 3 and not has_specific_entities:
+            question_type = "vague"
+        elif has_specific_entities or has_technical_terms:
+            question_type = "specific"
+        else:
+            question_type = "general"
+        
+        # Calculate specificity score
+        specificity_score = 0.0
+        
+        if len(words) > 10:
+            specificity_score += 0.3
+        elif len(words) > 5:
+            specificity_score += 0.15
+        
+        if has_specific_entities:
+            specificity_score += 0.3
+        
+        if has_technical_terms:
+            specificity_score += 0.2
+        
+        if question_type == "specific":
+            specificity_score += 0.2
+        elif question_type == "general":
+            specificity_score += 0.1
+        
+        specificity_score = min(1.0, specificity_score)
+        
+        return {
+            "word_count": len(words),
+            "has_technical_terms": has_technical_terms,
+            "has_specific_entities": has_specific_entities,
+            "question_type": question_type,
+            "specificity_score": specificity_score
+        }
+
+    def _calculate_adaptive_threshold(self, query_complexity: Dict) -> float:
+        """
+        ✅ Calculate adaptive relevance threshold.
+        
+        Strategy:
+        - Specific queries → HIGH threshold (0.50-0.75)
+        - General queries → MEDIUM threshold (0.35-0.50)
+        - Vague queries → LOWER threshold (0.30-0.40)
+        
+        Returns:
+            float: Adaptive threshold between 0.30 and 0.75
+        """
+        base = self.base_threshold  # 0.35
+        
+        # Adjust based on specificity
+        if query_complexity["has_specific_entities"]:
+            base += 0.15
+        
+        if query_complexity["has_technical_terms"]:
+            base += 0.10
+        
+        if query_complexity["question_type"] == "specific":
+            base += 0.10
+        elif query_complexity["question_type"] == "vague":
+            base -= 0.05
+        
+        # Apply specificity score
+        specificity_bonus = query_complexity["specificity_score"] * 0.15
+        base += specificity_bonus
+        
+        # Clamp to range
+        adaptive_threshold = max(0.30, min(0.75, base))
+        
+        logger.info(
+            f"[Adaptive Threshold] {adaptive_threshold:.2f} "
+            f"(base: {self.base_threshold}, "
+            f"specificity: {query_complexity['specificity_score']:.2f}, "
+            f"type: {query_complexity['question_type']})"
+        )
+        
+        return adaptive_threshold
+
+    def _cross_reference_validate(
+        self, 
+        query: str, 
+        chunks: List[Dict]
+    ) -> List[Dict]:
+        """
+        ✅ Cross-reference validation for accuracy.
+        
+        Strategy:
+        - Extract key terms from query
+        - Check term coverage in each chunk
+        - Count peer support (how many chunks agree)
+        - Boost confidence for supported claims
+        - Penalize isolated claims
+        """
+        if len(chunks) <= 1:
+            return chunks
+        
+        # Extract query terms (filter stopwords)
+        stopwords = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were'
+        }
+        
+        query_terms = [
+            word for word in re.findall(r'\b\w+\b', query.lower())
+            if word not in stopwords and len(word) > 2
+        ]
+        
+        validated_chunks = []
+        
+        for i, chunk in enumerate(chunks):
+            chunk_text = chunk.get("content", "").lower()
+            chunk_copy = chunk.copy()
+            
+            # Calculate term coverage
+            terms_found = sum(1 for term in query_terms if term in chunk_text)
+            term_coverage = terms_found / len(query_terms) if query_terms else 0
+            
+            # Calculate peer support
+            peer_support_count = 0
+            for j, other_chunk in enumerate(chunks):
+                if i == j:
+                    continue
+                
+                other_text = other_chunk.get("content", "").lower()
+                
+                # Check for shared key terms
+                shared_terms = sum(
+                    1 for term in query_terms 
+                    if term in chunk_text and term in other_text
+                )
+                
+                if shared_terms >= max(1, len(query_terms) * 0.3):
+                    peer_support_count += 1
+            
+            # Adjust confidence
+            original_confidence = chunk.get("relevance_score", 0.5)
+            
+            # Boost for high term coverage
+            if term_coverage >= 0.7:
+                original_confidence *= 1.1
+            elif term_coverage >= 0.4:
+                original_confidence *= 1.05
+            
+            # Boost for peer support
+            if peer_support_count >= 2:
+                original_confidence *= 1.1
+            elif peer_support_count >= 1:
+                original_confidence *= 1.05
+            
+            # Penalize for low coverage and no peer support
+            if term_coverage < 0.2 and peer_support_count == 0:
+                original_confidence *= 0.9
+            
+            chunk_copy["relevance_score"] = min(1.0, original_confidence)
+            chunk_copy["validation_metadata"] = {
+                "term_coverage": term_coverage,
+                "peer_support_count": peer_support_count,
+                "terms_found": terms_found,
+                "total_terms": len(query_terms)
+            }
+            
+            validated_chunks.append(chunk_copy)
+        
+        logger.info(
+            f"[Cross-Reference] Validated {len(validated_chunks)} chunks "
+            f"(avg peer support: {np.mean([c.get('validation_metadata', {}).get('peer_support_count', 0) for c in validated_chunks]):.1f})"
+        )
+        
+        return validated_chunks
+    
+    async def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        user_id: Optional[int] = None
+    ) -> Dict:
+        """
+        ✅ Comprehensive RAG search with adaptive intelligence.
+        
+        Flow:
+        1. Analyze query complexity
+        2. Calculate adaptive threshold
+        3. Search PostgreSQL (hybrid vector + FTS)
+        4. Cross-reference validate results
+        5. Apply semantic reranking
+        6. Filter by adaptive threshold (two-pass)
+        7. Return top-k results
+        
+        Returns:
+            {
+                "chunks": [...],
+                "total_results": int,
+                "search_quality": "high" | "medium" | "low",
+                "query_complexity": {...},
+                "adaptive_threshold": float,
+                "execution_time_ms": float
+            }
+        """
+        start_time = datetime.utcnow()
+        
+        # Step 1: Analyze query complexity
+        query_complexity = self._analyze_query_complexity(query)
+        adaptive_threshold = self._calculate_adaptive_threshold(query_complexity)
+        
+        logger.info(
+            f"[RAG Search] Query: '{query[:100]}'\n"
+            f"   Complexity: {query_complexity['question_type']} "
+            f"(specificity: {query_complexity['specificity_score']:.2f})\n"
+            f"   Adaptive threshold: {adaptive_threshold:.2f}"
+        )
+        
+        try:
+            # Step 2: Query expansion (optional)
+            if self.enable_query_expansion:
+                expanded_query = await self._expand_query(query)
+            else:
+                expanded_query = query
+            
+            # Step 3: Search PostgreSQL
+            initial_results = await self.postgres_service.search_documents(
+                query=expanded_query,
+                n_results=top_k * 5  # Get more for filtering
+            )
+            
+            if not initial_results:
+                logger.warning(f"[RAG Search] No results found for query: '{query}'")
+                return self._create_no_results_response(query, start_time)
+            
+            logger.info(f"[RAG Search] Retrieved {len(initial_results)} initial results")
+            
+            # Step 4: Cross-reference validation
+            validated_results = self._cross_reference_validate(query, initial_results)
+            
+            # Step 5: Semantic reranking (if enabled)
+            if self.enable_reranking:
+                reranked_results = await self._semantic_rerank(query, validated_results)
+            else:
+                reranked_results = validated_results
+            
+            # Step 6: Two-pass threshold filtering
+            # Pass 1: Try strict threshold
+            strict_filtered = [
+                chunk for chunk in reranked_results 
+                if chunk.get("relevance_score", 0) >= adaptive_threshold
+            ]
+            
+            # Pass 2: If too few results, relax threshold
+            if len(strict_filtered) < 3:
+                relaxed_threshold = max(0.30, adaptive_threshold - 0.15)
+                final_results = [
+                    chunk for chunk in reranked_results 
+                    if chunk.get("relevance_score", 0) >= relaxed_threshold
+                ][:top_k]
+                logger.info(
+                    f"[RAG Search] Relaxed threshold to {relaxed_threshold:.2f} "
+                    f"(found {len(final_results)} chunks)"
+                )
+            else:
+                final_results = strict_filtered[:top_k]
+                logger.info(
+                    f"[RAG Search] Strict threshold {adaptive_threshold:.2f} "
+                    f"yielded {len(final_results)} chunks"
+                )
+            
+            execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+            
+            logger.info(
+                f"[RAG Search] ✅ Returning {len(final_results)} results "
+                f"in {execution_time:.1f}ms\n"
+                f"   Quality: {self._assess_quality(final_results)}\n"
+                f"   Avg confidence: {np.mean([c.get('relevance_score', 0) for c in final_results]):.2f}"
+            )
+            
+            return {
+                "chunks": final_results,
+                "total_results": len(final_results),
+                "search_quality": self._assess_quality(final_results),
+                "query_complexity": query_complexity,
+                "adaptive_threshold": adaptive_threshold,
+                "execution_time_ms": execution_time,
+                "metadata": {
+                    "initial_results": len(initial_results),
+                    "after_validation": len(validated_results),
+                    "after_reranking": len(reranked_results),
+                    "after_threshold": len(final_results),
+                }
+            }
+        
+        except Exception as e:
+            logger.exception(f"[RAG Search] Error: {e}")
+            raise
+
+    async def _expand_query(self, query: str) -> str:
+        """Expand query with related terms."""
+        try:
+            prompt = f"""Generate 3 alternative search terms for this query (return only terms, comma-separated):
+Query: "{query}"
+
+Terms:"""
+            
+            response = await self.ai_service.generate_response(prompt, [])
+            
+            # Parse response
+            if isinstance(response, str):
+                expanded_terms = [t.strip() for t in response.split(",")]
+                return f"{query} {' '.join(expanded_terms[:3])}"
+            
+            return query
+        
+        except Exception:
+            return query
+
+    async def _semantic_rerank(self,query: str,results: List[Dict]) -> List[Dict]:
+        """Apply semantic reranking using stored embeddings (NO re-embedding)."""
+        if query in self.query_embedding_cache:
+            query_embedding = self.query_embedding_cache[query]
+        else:
+            emb = await self.ai_service.generate_embeddings([query])
+            query_embedding = np.array(emb[0])
+            self.query_embedding_cache[query] = query_embedding
+
+        if not results:
+            return []
+
+        try:
+        # ✅ Generate query embedding ONCE
+            query_embeddings = await self.ai_service.generate_embeddings([query])
+            if not query_embeddings:
+                return results
+
+            query_embedding = np.array(query_embeddings[0])
+            query_norm = np.linalg.norm(query_embedding) + 1e-10
+
+            reranked = []
+
+            for result in results:
+                doc_embedding = result.get("embedding")
+                if not doc_embedding:
+                    reranked.append(result)
+                    continue
+
+                doc_embedding = np.array(doc_embedding)
+                doc_norm = np.linalg.norm(doc_embedding) + 1e-10
+
+            # ✅ Cosine similarity (local, fast)
+                similarity = float(
+                np.dot(query_embedding, doc_embedding) / (query_norm * doc_norm)
+            )
+
+                original_score = result.get("relevance_score", 0.5)
+                final_score = 0.6 * similarity + 0.4 * original_score
+
+                r = result.copy()
+                r["semantic_score"] = similarity
+                r["relevance_score"] = final_score
+                reranked.append(r)
+
+            reranked.sort(key=lambda x: x["relevance_score"], reverse=True)
+            return reranked
+
+        except Exception as e:
+            logger.error(f"Reranking error: {e}")
+            return results
+
+    def _assess_quality(self, chunks: List[Dict]) -> str:
+        """Assess search quality."""
+        if not chunks:
+            return "low"
+        
+        avg_score = np.mean([c.get("relevance_score", 0) for c in chunks])
+        
+        if avg_score >= 0.8:
+            return "high"
+        elif avg_score >= 0.6:
+            return "medium"
+        else:
+            return "low"
+
+    def _create_no_results_response(self, query: str, start_time: datetime) -> Dict:
+        """Create response for no results."""
+        execution_time = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return {
+            "chunks": [],
+            "total_results": 0,
+            "search_quality": "low",
+            "no_results": True,
+            "no_results_message": (
+                f"No relevant information found for '{query}' in knowledge base."
+            ),
+            "execution_time_ms": execution_time,
+            "metadata": {}
+        }
+    
 # ===================== Orchestration Service =====================
 
 class OrchestrationService:
@@ -620,32 +1522,21 @@ class OrchestrationService:
         
         return result
     
-    async def _handle_search_task(
-        self,
-        params: List[str],
-        services: Dict[str, Dict[str, Any]],
-        original_query: str
-    ) -> Dict[str, Any]:
+    async def _handle_search_task(self,params: List[str],services: Dict[str, Dict[str, Any]],original_query: str) -> Dict[str, Any]:
         """Handle search/retrieval task."""
         if not services["postgres"]["available"]:
             return {
                 "error": "Vector database unavailable",
                 "fallback": "Using AI-only response",
-                "result": await self._ai_only_fallback(original_query, services)
-            }
-        
+                "result": await self._ai_only_fallback(original_query, services)}
         search_query = params[0] if params else original_query
-        
         # Perform vector search
         search_results = await call_maybe_async(
             postgres_service.search_documents,
             search_query,
-            n_results=50
-        )
-        
+            n_results=50)
         if not search_results and services["ai_service"]["available"]:
             return await self._ai_only_fallback(search_query, services)
-        
         # Generate enhanced response
         context = [r.get("content", "") for r in search_results[:5]]
         
@@ -728,7 +1619,7 @@ class OrchestrationService:
         
         # Discover URLs
         discovered_urls = await call_maybe_async(
-            scraper_service.discover_urls,
+            scraper_service.discover_url,
             base_url,
             max_depth=8,
             max_urls=500
@@ -822,34 +1713,37 @@ def chunk_text(text: str, chunk_size: int = 1500, overlap: int = 200) -> List[st
             start = next_start
     return chunks
 
-
-def _enhanced_similarity(query: str, text: str) -> float:
-    """Return [0,1] similarity score"""
-    if not query or not text:
-        return 0.0
-    query_norm = " ".join(query.lower().split())
-    text_norm = " ".join(text.lower().split())
-    seq_ratio = difflib.SequenceMatcher(None, query_norm, text_norm).ratio()
-    query_words, text_words = set(query_norm.split()), set(text_norm.split())
-    overlap = len(query_words & text_words) / len(query_words | text_words) if query_words else 0.0
-    substring_bonus = 0.2 if query_norm in text_norm else 0.0
-    score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
-    return min(1.0, max(0.0, score))
-
-
 def _extract_key_concepts(text: str) -> List[str]:
-    """Extract key terms from text"""
+    """Extract key concepts from text for relevance matching."""
     if not text:
         return []
-    patterns = [r"\b[A-Z]{2,}\b", r"\b\w+(?:_\w+)+\b", r"\b\w+(?:-\w+)+\b", r"\b\d+(?:\.\d+)?\w*\b"]
+    
+    # Technical patterns
+    patterns = [
+        r"\b[A-Z]{2,}\b",           # Acronyms (API, AWS, SQL)
+        r"\b\w+(?:_\w+)+\b",        # Snake_case (node_red, python_3)
+        r"\b\w+(?:-\w+)+\b",        # Kebab-case (docker-compose)
+        r"\b\d+(?:\.\d+)?\w*\b"     # Versions (3.14, v2.0)
+    ]
+    
     concepts = []
     for p in patterns:
         concepts.extend(re.findall(p, text))
+    
+    # Extract meaningful words (5+ chars)
     words = re.findall(r"\b[a-zA-Z]{5,}\b", text)
-    stopwords = {"about", "after", "again", "before", "being", "could", "while", "would"}
+    
+    # Filter stopwords
+    stopwords = {
+        "about", "after", "again", "before", "being", "could", 
+        "while", "would", "their", "there", "these", "those"
+    }
     meaningful = [w.lower() for w in words if w.lower() not in stopwords]
-    combined = list(dict.fromkeys(concepts + meaningful)) 
+    
+    # Combine and deduplicate
+    combined = list(dict.fromkeys(concepts + meaningful))
     return combined[:15]
+
 
 
 async def call_maybe_async(fn, *args, **kwargs):
@@ -870,9 +1764,7 @@ async def call_maybe_async(fn, *args, **kwargs):
 @router.post("/widget/query")
 async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks, http_request: Request = None):
     """
-    Enhanced query processing with automatic orchestration.
-    Detects user intent and automatically executes appropriate tasks.
-    Routes to Agent Manager for resource operations with multi-turn conversation support.
+    Query processing with image extraction
     
     User authentication is extracted from the Authorization header (Keycloak token).
     """
@@ -892,18 +1784,13 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
             if request.user_id:
                 logger.info(f"📋 Extracted user_id from token: {request.user_id}")
 
-        logger.info(f"Processing widget query: '{query}' (auto_execute: {request.auto_execute}, force_rag_only: {request.force_rag_only}, user: {request.user_id})")
+        logger.info(f"Processing widget query: '{query}' (force_rag_only: {request.force_rag_only}, user: {request.user_id})")
         
-        # ==================== STEP 1: Session Management ====================
+        # Session management
         session_id = await _get_or_create_session_id(request)
-        logger.info(f"📋 Session ID: {session_id}")
-
-        # ==================== STEP 2: Agent Routing Logic ====================
-        # Skip agent routing if force_rag_only is set (prevents infinite loop)
-        if request.force_rag_only:
-            logger.info(f"🔒 force_rag_only=True: Skipping agent routing, doing pure RAG lookup")
-            should_route_to_agent = False
-        else:
+        
+        # Agent routing (if not force_rag_only)
+        if not request.force_rag_only:
             should_route_to_agent = await _should_route_to_agent(query, session_id)
         
         # ==================== STEP 3: Route to Agent Manager if Applicable ====================
@@ -929,62 +1816,49 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
                 user_type=user_type
             )
         
-        # ==================== STEP 4: Standard RAG Flow ====================
-        intent_analysis = await orchestration_service.detect_task_intent(query)
-        
-        # Auto-execute if enabled and intent is clear
-        if request.auto_execute and intent_analysis.get("primary_task"):
-            execution_result = await _handle_auto_execution(
-                query=query,
-                intent_analysis=intent_analysis,
-                request=request,
-                background_tasks=background_tasks
-            )
-            if execution_result:
-                return execution_result
-
-        # ==================== STEP 5: Search and Retrieve Documents ====================
+        #  Standard RAG flow with fast search
         search_results = await _perform_document_search(query, request)
+        
         if not search_results:
-            return await _handle_no_results(query, intent_analysis, request)
+            return await _handle_no_results(query, {}, request)
 
-        # ==================== STEP 6: Filter and Process Results ====================
+        #  Early filtering
         filtered_results = _filter_search_results(search_results, request)
         base_context = _extract_base_context(filtered_results)
         
         if not base_context:
             base_context = [r.get("content", "")[:1000] for r in filtered_results[:3]]
 
-        # ==================== STEP 7: Generate Enhanced Response ====================
+        # Generate enhanced response
         answer, expanded_context, confidence = await _generate_enhanced_response(
             query, base_context
         )
 
-        # ==================== STEP 8: Generate Steps ====================
+        # Generate steps
         steps_data = await _generate_steps(query, expanded_context, base_context, answer)
 
-        # ==================== STEP 9: Extract and Score Images ====================
+        #  Fast parallel image extraction
         selected_images = _extract_and_score_images(
             query=query,
             answer=answer,
             filtered_results=filtered_results
         )
 
-        # ==================== STEP 10: Build Sources ====================
+        # Build sources
         sources = _build_sources(filtered_results, request)
 
-        # ==================== STEP 11: Generate Summary ====================
+        # Generate summary
         summary = await _generate_summary(answer, expanded_context)
 
-        # ==================== STEP 12: Combine Steps with Images ====================
+        # Combine steps with images
         steps_with_images = _combine_steps_with_images(steps_data, selected_images)
 
-        # ==================== STEP 13: Calculate Final Confidence ====================
+        # Calculate confidence
         final_confidence = _calculate_final_confidence(
             confidence, filtered_results, answer, request
         )
 
-        # ==================== STEP 14: Store Interaction ====================
+        # Store interaction
         if request.store_interaction:
             await _store_interaction(
                 query=query,
@@ -994,11 +1868,11 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
                 background_tasks=background_tasks
             )
 
-        # ==================== STEP 15: Format and Return Response ====================
-        from app.services.openwebui_formatter import format_for_openwebui
+        # Format response
+        from app.services.webui_formatter import format_for_openwebui
         
         formatted_answer = format_for_openwebui(
-            answer=answer or "I was unable to generate a comprehensive answer based on the available information.",
+            answer=answer or "I was unable to generate a comprehensive answer.",
             steps=steps_with_images,
             images=selected_images,
             query=query,
@@ -1014,10 +1888,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         return {
             "query": query,
             "answer": formatted_answer,
-            "intent_detected": intent_analysis,
-            "auto_executed": False,
-            "expanded_context": expanded_context if request.enable_advanced_search else None,
-            "step_count": len(steps_with_images),
             "steps": steps_with_images,
             "images": selected_images,
             "sources": sources,
@@ -1035,7 +1905,6 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
     except Exception as e:
         logger.exception(f"Widget query error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -1176,7 +2045,7 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
                                 background_tasks: BackgroundTasks, auth_token: str = None,
                                 user_type: str = None) -> dict:
     """Handle routing to agent manager and process response."""
-    from app.services.openwebui_formatter import format_agent_response_for_openwebui
+    from app.services.webui_formatter import format_agent_response_for_openwebui
     
     agent_manager = get_agent_manager(
         vector_service=postgres_service,
@@ -1378,16 +2247,19 @@ async def _handle_auto_execution(query: str, intent_analysis: dict, request: Wid
     }
 
 async def _perform_document_search(query: str, request: WidgetQueryRequest) -> list:
-    """Perform document search with configured depth."""
+    """
+     Fast document search with reduced candidates
+    """
     search_params = {
-        "quick": {"max_results": min(request.max_results, 30), "use_reranking": False},
-        "balanced": {"max_results": request.max_results, "use_reranking": True},
-        "deep": {"max_results": min(request.max_results * 2, 100), "use_reranking": True},
+        "quick": {"max_results": min(request.max_results, 20)},      # Reduced from 30
+        "balanced": {"max_results": min(request.max_results, 40)},   # Reduced from 50
+        "deep": {"max_results": min(request.max_results, 60)},       # Reduced from 100
     }
+    
     search_config = search_params.get(request.search_depth, search_params["balanced"])
+    
     try:
-        search_results = await call_maybe_async(
-            postgres_service.search_documents,
+        search_results = await postgres_service.search_documents(
             query,
             n_results=search_config["max_results"]
         )
@@ -1395,7 +2267,7 @@ async def _perform_document_search(query: str, request: WidgetQueryRequest) -> l
     except Exception as e:
         logger.exception(f"Error while searching documents: {e}")
         return []
-
+    
 async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQueryRequest) -> dict:
     """Handle case when no search results are found."""
     try:
@@ -1442,19 +2314,29 @@ async def _handle_no_results(query: str, intent_analysis: dict, request: WidgetQ
     }
 
 def _filter_search_results(search_results: list, request: WidgetQueryRequest) -> list:
-    """Filter search results based on relevance scores."""
-    if request.enable_advanced_search:
-        avg_score = sum(r.get("relevance_score", 0) for r in search_results) / max(1, len(search_results))
-        min_threshold = max(0.3, avg_score * 0.6)
-        filtered_results = [r for r in search_results if r.get("relevance_score", 0) >= min_threshold]
-        
-        if len(filtered_results) < max(3, int(len(search_results) * 0.2)):
-            filtered_results = search_results[:max(5, request.max_results // 2)]
-    else:
-        filtered_results = search_results[:request.max_results]
+    """
+     Early filtering with adaptive thresholds
+    """
+    if not search_results:
+        return []
     
-    return filtered_results
-
+    # Calculate adaptive threshold
+    avg_score = sum(r.get("relevance_score", 0) for r in search_results) / max(1, len(search_results))
+    min_threshold = max(0.15, avg_score * 0.5)  # More permissive threshold
+    
+    # Filter by threshold
+    filtered = [r for r in search_results if r.get("relevance_score", 0) >= min_threshold]
+    
+    # Ensure minimum results
+    if len(filtered) < 3:
+        filtered = search_results[:max(5, request.max_results // 2)]
+    
+    logger.info(
+        f"📊 Filtered {len(search_results)} → {len(filtered)} results "
+        f"(threshold: {min_threshold:.2f})"
+    )
+    
+    return filtered
 def _extract_base_context(filtered_results: list) -> list:
     """Extract base context from filtered results."""
     base_context = []
@@ -1526,90 +2408,119 @@ def _extract_and_score_images(
     filtered_results: list
 ) -> list:
     """
-    Extract and score images from search results.
-    Returns:
-        List of top-scored images with URLs, ready for OpenWebUI display
+     Parallel image extraction with  relevance scoring
     """
-    candidate_images = []
+    import concurrent.futures
+    from collections import defaultdict
+    
+    if not filtered_results:
+        return []
+    
+    # Extract query concepts once
     query_concepts = set(_extract_key_concepts(query.lower()))
     answer_concepts = set(_extract_key_concepts(answer.lower())) if answer else set()
     all_concepts = query_concepts | answer_concepts
+    
+    # Track query keywords for relevance
+    query_keywords = set(re.findall(r'\b\w{4,}\b', query.lower()))
+    
+    logger.info(f"🔍 Extracting images from {len(filtered_results)} results")
+    logger.debug(f"Query concepts: {list(all_concepts)[:10]}")
 
-    logger.info(f"🔍 Extracting images from {len(filtered_results)} search results")
-
-    for result_idx, result in enumerate(filtered_results):
+    def process_result(result_data):
+        """Process single result in parallel."""
+        result_idx, result = result_data
+        images_from_result = []
+        
         meta = result.get("metadata", {}) or {}
         page_url = meta.get("url", "")
         page_title = meta.get("title", "")
         relevance_score = result.get("relevance_score", 0.0)
-
-        # ✅ CRITICAL: Extract images from metadata
+        
+        # Extract images
         images_raw = meta.get("images", [])
-        # Fallback: check images_json field
         if not images_raw:
             images_raw = meta.get("images_json", [])
-        # Ensure it's a list
+        
         if not isinstance(images_raw, list):
             if isinstance(images_raw, str):
                 try:
                     images_raw = json.loads(images_raw)
                 except:
-                    images_raw = []
+                    return images_from_result
             else:
-                images_raw = []
+                return images_from_result
+        
         if not images_raw:
-            logger.debug(f"No images in result {result_idx + 1}")
-            continue
-        logger.info(
-            f"✅ Found {len(images_raw)} images in result {result_idx + 1} "
-            f"from {page_url[:60]}"
-        )
-        for img in enumerate(images_raw):
-            # Validate image format
+            return images_from_result
+        
+        # Process each image
+        for img in images_raw:
             if not isinstance(img, dict):
                 if isinstance(img, str) and img.startswith("http"):
-                    # Convert string URL to dict
-                    img = {"url": img, "alt": "", "caption": ""}
+                    img = {"url": img, "alt": "", "caption": "", "type": "content"}
                 else:
-                    logger.debug(f"Skipping invalid image format: {type(img)}")
                     continue
+            
             img_url = img.get("url", "")
             if not img_url or not isinstance(img_url, str):
-                logger.debug("Skipping image with no URL")
                 continue
-
-            if not img_url.startswith("http://") and not img_url.startswith("https://"):
-                logger.debug(f"Skipping relative/invalid URL: {img_url[:60]}")
+            
+            #  Early URL validation
+            if not img_url.startswith(("http://", "https://")):
                 continue
-
-            if any(skip in img_url.lower() for skip in ["1x1", "pixel", "tracker", "blank"]):
-                logger.debug(f"Skipping tracking pixel: {img_url[:60]}")
+            
+            # Filter low-quality images
+            skip_patterns = [
+                "1x1", "pixel", "tracker", "blank", "spacer",
+                "loading", "spinner", "placeholder", "icon-", 
+                "logo-small", "avatar-", "thumb-"
+            ]
+            if any(skip in img_url.lower() for skip in skip_patterns):
                 continue
+            
+            # Extract metadata
             img_alt = img.get("alt", "")
             img_caption = img.get("caption", "")
             img_type = img.get("type", "content")
             img_text = img.get("text", "")
+            
+            #   relevance calculation
             img_search_text = " ".join([
-                img_alt,
-                img_caption,
-                img_text,
-                page_title
+                img_alt, img_caption, img_text, page_title
             ]).lower()
-
+            
+            # Calculate relevance components
             img_concepts = set(_extract_key_concepts(img_search_text))
             concept_overlap = len(all_concepts & img_concepts) if all_concepts and img_concepts else 0
-            text_similarity = _enhanced_similarity(query, img_search_text)
-            type_bonus = 0.3 if img_type in ["diagram", "screenshot", "illustration"] else 0.1
-            # Combined score
+            
+            # Keyword matching
+            img_keywords = set(re.findall(r'\b\w{4,}\b', img_search_text))
+            keyword_overlap = len(query_keywords & img_keywords) if query_keywords else 0
+            
+            # Type-based scoring
+            type_bonus = 0.0
+            if img_type in ["diagram", "screenshot", "illustration", "chart"]:
+                type_bonus = 0.3
+            elif img_type in ["photo", "image"]:
+                type_bonus = 0.1
+            
+            # Quality score from existing metadata
+            quality_score = float(img.get("quality_score", 0.5))
+            
+            #  Combined relevance score
             image_score = (
-                text_similarity * 0.4 +
-                (concept_overlap / max(len(all_concepts), 1)) * 0.3 +
-                relevance_score * 0.2 +
-                type_bonus * 0.1
+                (concept_overlap / max(len(all_concepts), 1)) * 0.30 +  # Concept match
+                (keyword_overlap / max(len(query_keywords), 1)) * 0.25 + # Keyword match
+                relevance_score * 0.20 +                                  # Parent doc relevance
+                type_bonus * 0.15 +                                       # Image type
+                quality_score * 0.10                                      # Image quality
             )
-            if image_score > 0.15:
-                candidate_images.append({
-                    "url": img_url, 
+            
+            # Quality threshold
+            if image_score > 0.10:  # Keep threshold low for better recall
+                images_from_result.append({
+                    "url": img_url,
                     "alt": img_alt or "Image",
                     "type": img_type,
                     "caption": img_caption,
@@ -1617,38 +2528,66 @@ def _extract_and_score_images(
                     "source_title": page_title,
                     "relevance_score": round(image_score, 3),
                     "text": img_text[:500],
+                    "concept_overlap": concept_overlap,
+                    "keyword_overlap": keyword_overlap,
                 })
-                
-                logger.debug(
-                    f"✅ Added image: {img_url[:60]} "
-                    f"(score: {image_score:.3f}, type: {img_type})"
-                )
-
-    # Deduplicate by URL
-    seen_urls = set()
-    unique_images = []
-    for img in sorted(candidate_images, key=lambda x: x["relevance_score"], reverse=True):
+        
+        return images_from_result
+    
+    #  Process results in parallel
+    candidate_images = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit all processing tasks
+        future_to_result = {
+            executor.submit(process_result, (idx, result)): idx
+            for idx, result in enumerate(filtered_results)
+        }
+        
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_result):
+            try:
+                images = future.result(timeout=5)
+                candidate_images.extend(images)
+            except Exception as e:
+                logger.debug(f"Image processing error: {e}")
+    
+    #   deduplication (keep highest scored)
+    seen_urls = {}
+    
+    for img in candidate_images:
         url = img.get("url")
-        if url and url not in seen_urls:
-            seen_urls.add(url)
-            unique_images.append(img)
-
+        score = img.get("relevance_score", 0)
+        
+        if url not in seen_urls or seen_urls[url]["relevance_score"] < score:
+            seen_urls[url] = img
+    
+    # Sort by relevance score
+    unique_images = sorted(
+        seen_urls.values(),
+        key=lambda x: x.get("relevance_score", 0),
+        reverse=True
+    )
+    
     logger.info(
-        f"✅ Extracted {len(unique_images)} unique, scored images "
+        f"✅ Extracted {len(unique_images)} unique images "
         f"(from {len(candidate_images)} candidates)"
     )
     
-    # Log top images for debugging
+    # Log top images
     if unique_images:
-        logger.info("Top 3 images:")
+        logger.info("📊 Top 3 images:")
         for i, img in enumerate(unique_images[:3], 1):
             logger.info(
                 f"  {i}. {img.get('url', 'N/A')[:60]} "
                 f"(score: {img.get('relevance_score', 0):.3f}, "
-                f"type: {img.get('type', 'N/A')})"
+                f"concepts: {img.get('concept_overlap', 0)}, "
+                f"keywords: {img.get('keyword_overlap', 0)})"
             )
+    
+    return unique_images[:12]
 
-    return unique_images[:12]  
+
 
 def _build_sources(filtered_results: list, request: WidgetQueryRequest) -> list:
     """Build sources list from filtered results."""
@@ -1966,14 +2905,14 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
                 status_code=400, 
                 detail="Scraped content is too short or empty"
             )
-        # ✅ CRITICAL: Extract images from scraped content
+        #  Extract images from scraped content
         scraped_images = content.get("images", []) or []
         logger.info(
             f"✅ Scraped {len(page_text)} chars, "
             f"{len(scraped_images)} images from {request.url}"
         )
 
-        # ✅ CRITICAL: Store in knowledge base with images
+        #  Store in knowledge base with images
         if request.store_in_knowledge:
             documents_to_store = []
             
@@ -2019,7 +2958,7 @@ async def widget_scrape(request: WidgetScrapeRequest, background_tasks: Backgrou
             )
         except Exception:
             summary = page_text[:800] + "..." if len(page_text) > 800 else page_text
-        # ✅ CRITICAL: Include images in response
+        #  Include images in response
         return {
             "status": "success",
             "url": str(request.url),
@@ -2060,7 +2999,7 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
         
         # Discover URLs with requested depth
         discovered_urls = await call_maybe_async(
-            scraper_service.discover_urls,
+            scraper_service.discover_url,
             str(request.base_url),
             request.max_depth,
             request.max_urls

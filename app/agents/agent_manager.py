@@ -2,11 +2,9 @@
 Agent Manager - Central manager for all agents in the multi-agent system.
 Initializes agents, manages their lifecycle, and provides a unified interface.
 """
-
 from typing import Any, Dict, List, Optional
 import logging
 from datetime import datetime
-
 from app.agents.orchestrator_agent import OrchestratorAgent
 from app.agents.intent_agent import IntentAgent
 from app.agents.validation_agent import ValidationAgent
@@ -15,7 +13,6 @@ from app.agents.rag_agent import RAGAgent
 from app.agents.state.conversation_state import conversation_state_manager
 
 logger = logging.getLogger(__name__)
-
 
 class AgentManager:
     """
@@ -47,15 +44,13 @@ class AgentManager:
             self.intent_agent = IntentAgent()
             self.validation_agent = ValidationAgent()
             self.execution_agent = ExecutionAgent()
-            self.rag_agent = RAGAgent()  # Uses existing widget_query system
+            self.rag_agent = RAGAgent()  
             self.orchestrator = OrchestratorAgent()
             self.orchestrator.set_specialized_agents(
                 intent_agent=self.intent_agent,
                 validation_agent=self.validation_agent,
                 execution_agent=self.execution_agent,
-                rag_agent=self.rag_agent
-            )
-            
+                rag_agent=self.rag_agent)
             self.initialized = True
             self.initialization_time = datetime.utcnow()
             logger.info("✅ Multi-agent system initialized successfully")
@@ -155,7 +150,6 @@ class AgentManager:
     def get_stats(self) -> Dict[str, Any]:
         """
         Get statistics about the agent manager.
-        
         Returns:
             Dict with statistics
         """
@@ -176,12 +170,6 @@ class AgentManager:
     def cleanup_old_sessions(self, max_age_hours: int = 24) -> int:
         """
         Clean up old conversation sessions.
-        
-        Args:
-            max_age_hours: Maximum age in hours before cleanup
-            
-        Returns:
-            Number of sessions cleaned up
         """
         return conversation_state_manager.cleanup_old_sessions(max_age_hours)
     
@@ -190,7 +178,6 @@ class AgentManager:
             f"<AgentManager(initialized={self.initialized}, "
             f"requests={self.total_requests}, "
             f"active_sessions={len(conversation_state_manager.get_active_sessions())})>")
-
 # Global agent manager instance
 agent_manager: Optional[AgentManager] = None
 

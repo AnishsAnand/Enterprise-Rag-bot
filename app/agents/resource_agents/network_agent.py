@@ -1,6 +1,5 @@
 """
 Network Agent - Handles firewall operations only.
-PRODUCTION: Load balancer functionality moved to LoadBalancerAgent.
 """
 
 from typing import Any, Dict, List, Optional

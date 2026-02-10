@@ -9,7 +9,6 @@ Key benefits:
 - Automatic memory management and context retrieval
 """
 
-import json
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
@@ -21,7 +20,6 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 SessionBase = declarative_base()
-
 
 class ConversationSessionRecord(SessionBase):
     """
@@ -408,21 +406,13 @@ class MemoriSessionManager:
                 "total_sessions": total,
                 "status_breakdown": status_counts,
                 "active_last_hour": recent_active,
-                "cache_size": len(self._cache)
-            }
+                "cache_size": len(self._cache)}
         except Exception as e:
             logger.error(f"❌ Failed to get session stats: {str(e)}")
             return {}
         finally:
             db.close()
-    def search_sessions(
-        self,
-        resource_type: Optional[str] = None,
-        operation: Optional[str] = None,
-        status: Optional[str] = None,
-        user_id: Optional[str] = None,
-        limit: int = 50
-    ) -> List[Dict[str, Any]]:
+    def search_sessions(self,resource_type: Optional[str] = None,operation: Optional[str] = None,status: Optional[str] = None,user_id: Optional[str] = None,limit: int = 50) -> List[Dict[str, Any]]:
         """
         Search sessions with various filters.
         Args:

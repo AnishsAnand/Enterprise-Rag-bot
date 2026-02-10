@@ -9,7 +9,6 @@ import logging
 import json
 import re
 import os 
-
 from app.agents.base_agent import BaseAgent
 from app.services.api_executor_service import api_executor_service
 
@@ -33,22 +32,16 @@ class IntentAgent(BaseAgent):
                 "Detects user intent for CRUD operations on cloud resources. "
                 "Extracts parameters from natural language input."
             ),
-            temperature=0.1  # Low temperature for consistent intent detection
-        )
-        
+            temperature=0.1)
         # Load resource schema
         self.resource_schema = api_executor_service.resource_schema
-        
         # Setup agent
         self.setup_agent()
         self.INTENT_MODEL = os.getenv("INTENT_MODEL", "meta/Llama-3.1-8B-Instruct")
     
     def get_system_prompt(self) -> str:
-
         resources_info = self._get_resources_info()
-    
         prompt = """You are the Intent Agent, specialized in detecting user intent for cloud resource operations.
-
 **Available Resources:**
 """ + resources_info + """
 
@@ -433,18 +426,15 @@ User: "List all available data centers" or "Show available locations"
 Be precise in detecting intent and operation. Only extract parameters that you can accurately determine (like names, counts, versions) - do NOT extract parameters that require lookup or matching (like endpoints or locations)."""
     
         return prompt
-    
     def _get_resources_info(self) -> str:
         """Get formatted information about available resources."""
         resources = self.resource_schema.get("resources", {})
         info_lines = []
-        
         for resource_type, config in resources.items():
             operations = config.get("operations", [])
             info_lines.append(f"- {resource_type}: {', '.join(operations)}")
-        
         return "\n".join(info_lines) if info_lines else "No resources configured"
-    
+
     def get_tools(self) -> List[Tool]:
         """Return tools for intent agent."""
         return [
@@ -469,11 +459,8 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 func=self._validate_operation,
                 description=(
                     "Check if an operation is valid for a resource type. "
-                    "Input: JSON with resource_type and operation"
-                )
-            )
-        ]
-    
+                    "Input: JSON with resource_type and operation")) ]
+
     def _get_resource_schema(self, resource_type: str) -> str:
         """Get schema for a resource type."""
         try:
@@ -491,33 +478,26 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             data = json.loads(input_json)
             user_text = data.get("user_text", "")
             resource_type = data.get("resource_type", "")
-            
             # Get parameter definitions
             config = api_executor_service.get_resource_config(resource_type)
             if not config:
                 return json.dumps({"error": "Resource type not found"})
-            
             # Simple parameter extraction (can be enhanced with NER)
             extracted = {}
-            
             # Extract common patterns
-            # Name patterns: "named X", "name is X", "called X"
+            # Name patterns
             name_match = re.search(r'(?:named|name is|called)\s+([a-zA-Z0-9-_]+)', user_text, re.IGNORECASE)
             if name_match:
                 extracted["name"] = name_match.group(1)
-            
-            # Count/number patterns: "3 nodes", "5 workers"
+            # Count/number patterns
             count_match = re.search(r'(\d+)\s+(?:nodes?|workers?|instances?)', user_text, re.IGNORECASE)
             if count_match:
                 extracted["node_count"] = int(count_match.group(1))
-            
-            # Region patterns: "in us-east-1", "region us-west-2"
+            # Region patterns
             region_match = re.search(r'(?:in|region)\s+([a-z]+-[a-z]+-\d+)', user_text, re.IGNORECASE)
             if region_match:
                 extracted["region"] = region_match.group(1)
-            
             return json.dumps(extracted, indent=2)
-            
         except Exception as e:
             return json.dumps({"error": str(e)})
     
@@ -527,23 +507,16 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             data = json.loads(input_json)
             resource_type = data.get("resource_type", "")
             operation = data.get("operation", "")
-            
             config = api_executor_service.get_resource_config(resource_type)
             if not config:
                 return json.dumps({"valid": False, "error": "Resource type not found"})
-            
             operations = config.get("operations", [])
             valid = operation in operations
-            
             return json.dumps({
                 "valid": valid,
-                "supported_operations": operations
-            })
-            
+                "supported_operations": operations})
         except Exception as e:
             return json.dumps({"valid": False, "error": str(e)})
-        
-    
 
     LBCI_DIGIT_PATTERN = re.compile(r'\b\d{5,6}\b')
     LIST_LB_KEYWORDS = re.compile(r'\b(list|show|get|details|describe|what is|tell me about)\b.*\b(load balancer|lb|lbs|loadbalancer|loadbalancers|vayu)\b', re.I)
@@ -562,14 +535,12 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "intent_detected": True,
                 "resource_type": "load_balancer",
                 "operation": "list",
-                "extracted_params": {},  # per spec: don't extract LB name here
+                "extracted_params": {}, 
                 "confidence": 0.99,
                 "ambiguities": [],
                 "clarification_needed": None,
-                "meta": {"detection": "lb_name_pattern", "matched_text": lb_match.group(0)}
-            }
+                "meta": {"detection": "lb_name_pattern", "matched_text": lb_match.group(0)}}
 
-        # 2) LBCI 5-6 digit number in context -> assume load_balancer
         if self.LBCI_DIGIT_PATTERN.search(text):
             return {
                 "intent_detected": True,
@@ -579,10 +550,8 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "confidence": 0.95,
                 "ambiguities": [],
                 "clarification_needed": None,
-                "meta": {"detection": "lbci_digits"}
-            }
+                "meta": {"detection": "lbci_digits"} }
 
-        # 3) Explicit "list load balancers" style phrasing
         if self.LIST_LB_KEYWORDS.search(text):
             return {
                 "intent_detected": True,
@@ -592,11 +561,8 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "confidence": 0.9,
                 "ambiguities": [],
                 "clarification_needed": None,
-                "meta": {"detection": "list_lb_keywords"}
-            }
+                "meta": {"detection": "list_lb_keywords"}}
 
-        # 4) Add other deterministic rules here (endpoints, datacenters)
-        # Example: "list endpoints" -> endpoint:list
         if re.search(r'\b(list|show|get)\b.*\b(endpoints|datacenters|locations|dcs|data centers)\b', text, re.I):
             return {
                 "intent_detected": True,
@@ -606,9 +572,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "confidence": 0.9,
                 "ambiguities": [],
                 "clarification_needed": None,
-                "meta": {"detection": "list_endpoints"}
-            }
-
+                "meta": {"detection": "list_endpoints"}}
         return None
 
     async def execute(self,input_text: str,context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -620,9 +584,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
     - Otherwise call the LLM via parent, parse output robustly, enrich with schema info.
     - On internal error, return a SAFE fallback that does NOT auto-run potentially destructive operations.
     """
-        LB_NAME_PATTERN = re.compile(r"(EG_.*?_LB_SEG_\d+|LB_.*?\d+)", re.I)
-        DETAILS_KEYWORDS = re.compile(r"\b(details?|info|show|describe)\b", re.I)
-
         if LB_NAME_PATTERN.search(input_text):
             if DETAILS_KEYWORDS.search(input_text):
                 operation = "get_details"
@@ -638,8 +599,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         try:
             safe_preview = (input_text or "")[:120]
             logger.info("🎯 IntentAgent analyzing input (trimmed): %s", safe_preview)
-
-        # 0) Guard: empty input
             if not input_text or not input_text.strip():
                 return {
                 "agent_name": self.agent_name,
@@ -657,14 +616,12 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             }
 
         # 1) Deterministic short-circuit rules (run BEFORE any LLM call)
-        #    _detect_deterministic_intent should return a dict when a rule applies.
             deterministic = None
             try:
                 deterministic = self._detect_deterministic_intent(input_text)
             except Exception as e:
             # Defensive: log but continue to LLM path (do not crash)
                 logger.warning("⚠️ Deterministic intent detection failed: %s", str(e))
-
             if deterministic:
             # Normalize deterministic intent shape
                 intent_data = {
@@ -676,28 +633,21 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "ambiguities": deterministic.get("ambiguities", []),
                 "clarification_needed": deterministic.get("clarification_needed", None),
                 # keep meta for observability, safe to include
-                "meta": deterministic.get("meta", {"detection": "rule"})
-            }
-
+                "meta": deterministic.get("meta", {"detection": "rule"})}
                 logger.info("🔒 Deterministic intent detected (rule): %s", intent_data.get("meta"))
                 return {
                 "agent_name": self.agent_name,
                 "success": True,
                 "intent_detected": intent_data["intent_detected"],
                 "intent_data": intent_data,
-                "output": "Deterministic intent detection applied"
-            }
+                "output": "Deterministic intent detection applied"}
 
         # 2) Otherwise call LLM via parent agent
-        #    (Do not assume the parent accepts model arg; BaseAgent should manage model selection.)
             result = await super().execute(input_text, context)
-
         # Support common possible keys for text output
             output_text = result.get("output") or result.get("text") or result.get("response") or ""
-
         # 3) Parse intent JSON robustly
             intent_data = self._parse_intent_output(output_text)
-
         # Ensure consistent structure if LLM returned something unexpected
             if not isinstance(intent_data, dict):
                 intent_data = {
@@ -707,51 +657,41 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "extracted_params": {},
                 "confidence": 0.0,
                 "ambiguities": [],
-                "clarification_needed": None
-            }
-
+                "clarification_needed": None }
         # 4) If intent detected, enrich with operation/schema info (defensive)
             if intent_data.get("intent_detected"):
                 resource_type = intent_data.get("resource_type")
                 operation = intent_data.get("operation")
-
             # Normalize: if resource_type is list, pick first for lookup
                 lookup_resource_type = resource_type[0] if isinstance(resource_type, list) and resource_type else resource_type
-
                 if lookup_resource_type and operation:
                     try:
                         operation_config = api_executor_service.get_operation_config(
-                        lookup_resource_type, operation
-                    )
+                        lookup_resource_type, operation)
                         if operation_config:
                             params = operation_config.get("parameters", {})
                             intent_data.setdefault("required_params", params.get("required", []))
                             intent_data.setdefault("optional_params", params.get("optional", []))
                             logger.info(
                             "✅ Intent detected: %s %s | required=%s",
-                            operation, lookup_resource_type, intent_data["required_params"]
-                        )
+                            operation, lookup_resource_type, intent_data["required_params"])
                         else:
                             logger.warning("⚠️ No operation config found for %s.%s", lookup_resource_type, operation)
                     except Exception as e:
                     # Don't fail the whole function if enrichment fails
                         logger.warning("⚠️ Failed to enrich intent with schema: %s", str(e))
-
         # 5) Return standardized final result
             return {
             "agent_name": self.agent_name,
             "success": True,
             "intent_detected": bool(intent_data.get("intent_detected", False)),
             "intent_data": intent_data,
-            "output": output_text
-        }
-
+            "output": output_text}
         except Exception as exc:
         # Robust logging and safe fallback. Do NOT return malformed keys or a truthy intent that
         # would cause automatic execution. Keep fallback non-executing and request clarification.
             logger.exception("❌ IntentAgent failed during execute: %s", str(exc))
             fallback_intent = self._fallback_intent("Internal error during intent detection")
-
         # Normalize fallback shape, but prefer NOT to mark intent_detected True.
         # This prevents accidental auto-execution of downstream operations.
             normalized_fallback = {
@@ -761,16 +701,13 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             "extracted_params": fallback_intent.get("extracted_params", {}),
             "confidence": float(fallback_intent.get("confidence", 0.0)),
             "ambiguities": fallback_intent.get("ambiguities", ["Internal error"]),
-            "clarification_needed": fallback_intent.get("clarification_needed", "Could you rephrase your request?")
-        }
-
+            "clarification_needed": fallback_intent.get("clarification_needed", "Could you rephrase your request?") }
             return {
             "agent_name": self.agent_name,
             "success": True,
             "intent_detected": normalized_fallback["intent_detected"],
             "intent_data": normalized_fallback,
-            "output": "Intent detection fallback applied due to internal error"
-        }
+            "output": "Intent detection fallback applied due to internal error"}
 
     def _fallback_intent(self, reason: str) -> Dict[str, Any]:
         """

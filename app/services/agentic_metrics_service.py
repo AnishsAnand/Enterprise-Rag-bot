@@ -2,13 +2,11 @@
 Agentic Metrics Service - Evaluation metrics for agentic AI systems.
 
 Implements the three key metrics from Azure AI Evaluation library:
-1. Task Adherence - Did the agent answer the right question?
-2. Tool Call Accuracy - Did the agent use tools correctly?
-3. Intent Resolution - Did the agent understand the user's goal?
-
+1. Task Adherence
+2. Tool Call Accuracy
+3. Intent Resolution 
 Reference: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/evaluating-agentic-ai-systems-a-deep-dive-into-agentic-metrics/4403923
 """
-
 import logging
 import json
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,7 +15,6 @@ from datetime import datetime
 from enum import Enum
 import asyncio
 
-# Prometheus metrics - lazy import to avoid circular dependencies
 _prom_metrics = None
 def _get_prometheus_metrics():
     """Lazy load Prometheus metrics to avoid circular imports."""
@@ -32,7 +29,6 @@ def _get_prometheus_metrics():
 
 logger = logging.getLogger(__name__)
 
-
 class MetricScore(Enum):
     """Score levels for agentic metrics."""
     EXCELLENT = 5
@@ -40,7 +36,6 @@ class MetricScore(Enum):
     ACCEPTABLE = 3
     POOR = 2
     FAILED = 1
-
 
 @dataclass
 class ToolCall:
@@ -51,7 +46,6 @@ class ToolCall:
     timestamp: str
     success: bool
     error: Optional[str] = None
-
 
 @dataclass
 class AgentTrace:
@@ -74,7 +68,6 @@ class AgentTrace:
         """Convert trace to dictionary for storage/analysis."""
         return asdict(self)
 
-
 @dataclass
 class EvaluationResult:
     """Result of evaluating an agent trace."""
@@ -94,26 +87,23 @@ class EvaluationResult:
         """Convert result to dictionary."""
         return asdict(self)
 
-
 class AgenticMetricsEvaluator:
     """
     Evaluator for agentic AI systems using LLM-based assessment.
-    
+
     Implements three key metrics:
     - Task Adherence: How well the response satisfies the original request
     - Tool Call Accuracy: Whether tools were used correctly
     - Intent Resolution: Whether the agent understood the user's goal
-    
+
     Features:
     - LLM-based evaluation using your existing AI service
     - PostgreSQL persistence for evaluation results
     - In-memory caching for active traces
     """
-    
     def __init__(self, ai_service=None, enable_persistence: bool = True):
         """
         Initialize the evaluator.
-        
         Args:
             ai_service: Optional AI service for LLM-based evaluation.
                        If not provided, will import from app.services.ai_service
@@ -122,11 +112,9 @@ class AgenticMetricsEvaluator:
         self.ai_service = ai_service
         self._traces: Dict[str, AgentTrace] = {}
         self._evaluation_results: List[EvaluationResult] = []
-        
         # PostgreSQL persistence
         self.enable_persistence = enable_persistence
         self._persistence = None
-        
         if enable_persistence:
             try:
                 from app.services.agentic_metrics_persistence import get_metrics_persistence
@@ -137,7 +125,6 @@ class AgenticMetricsEvaluator:
                 self._persistence = None
         else:
             logger.info("✅ AgenticMetricsEvaluator initialized (in-memory only)")
-    
     async def _get_ai_service(self):
         """Lazy load AI service."""
         if self.ai_service is None:
@@ -153,12 +140,10 @@ class AgenticMetricsEvaluator:
     ) -> AgentTrace:
         """
         Start tracing an agent execution.
-        
         Args:
             session_id: Unique session identifier
             user_query: The user's original query
             agent_name: Name of the agent being traced
-            
         Returns:
             AgentTrace object to record execution details
         """
@@ -183,7 +168,6 @@ class AgenticMetricsEvaluator:
     ) -> None:
         """
         Record a tool call made during agent execution.
-        
         Args:
             session_id: Session ID for the trace
             tool_name: Name of the tool called
@@ -195,7 +179,6 @@ class AgenticMetricsEvaluator:
         if session_id not in self._traces:
             logger.warning(f"⚠️ No trace found for session {session_id}")
             return
-        
         tool_call = ToolCall(
             tool_name=tool_name,
             tool_args=tool_args,
@@ -216,7 +199,6 @@ class AgenticMetricsEvaluator:
     ) -> None:
         """
         Record detected intent for the session.
-        
         Args:
             session_id: Session ID
             intent: Detected intent string
@@ -226,7 +208,6 @@ class AgenticMetricsEvaluator:
         if session_id not in self._traces:
             logger.warning(f"⚠️ No trace found for session {session_id}")
             return
-        
         trace = self._traces[session_id]
         trace.intent_detected = intent
         trace.resource_type = resource_type
@@ -241,7 +222,6 @@ class AgenticMetricsEvaluator:
     ) -> None:
         """
         Record an intermediate step in agent execution.
-        
         Args:
             session_id: Session ID
             step_name: Name/type of the step
@@ -253,9 +233,8 @@ class AgenticMetricsEvaluator:
         self._traces[session_id].intermediate_steps.append({
             "step_name": step_name,
             "timestamp": datetime.utcnow().isoformat(),
-            **step_data
-        })
-    
+            **step_data})
+        
     def complete_trace(
         self,
         session_id: str,
@@ -265,26 +244,22 @@ class AgenticMetricsEvaluator:
     ) -> Optional[AgentTrace]:
         """
         Complete the trace for a session.
-        
         Args:
             session_id: Session ID
             final_response: The agent's final response
             success: Whether the overall execution succeeded
             error: Error message if failed
-            
         Returns:
             Completed AgentTrace or None if not found
         """
         if session_id not in self._traces:
             logger.warning(f"⚠️ No trace found for session {session_id}")
             return None
-        
         trace = self._traces[session_id]
         trace.final_response = final_response
         trace.end_time = datetime.utcnow().isoformat()
         trace.success = success
         trace.error = error
-        
         # Persist trace to PostgreSQL
         if self._persistence:
             try:
@@ -307,7 +282,7 @@ class AgenticMetricsEvaluator:
         
         logger.info(f"✅ Completed trace for session {session_id}")
         return trace
-    
+
     def get_trace(self, session_id: str) -> Optional[AgentTrace]:
         """Get a trace by session ID."""
         return self._traces.get(session_id)
@@ -329,8 +304,7 @@ class AgenticMetricsEvaluator:
         Args:
             user_query: The original user query
             agent_response: The agent's final response
-            context: Optional additional context
-            
+            context: Optional additional context 
         Returns:
             Tuple of (score 0-1, reasoning string)
         """
@@ -371,17 +345,13 @@ Respond in this exact JSON format:
             response = await ai_service._call_chat_with_retries(
                 prompt=evaluation_prompt,
                 max_tokens=500,
-                temperature=0.1
-            )
-            
+                temperature=0.1)
             # Parse JSON response
             result = json.loads(response)
-            score = result.get("total_score", 5) / 10.0  # Normalize to 0-1
+            score = result.get("total_score", 5) / 10.0 
             reasoning = result.get("reasoning", "Evaluation completed")
-            
             logger.info(f"📊 Task Adherence Score: {score:.2f}")
             return (score, reasoning)
-            
         except json.JSONDecodeError:
             logger.error("❌ Failed to parse task adherence evaluation response")
             return (0.5, "Evaluation parsing failed - default score applied")
@@ -389,44 +359,32 @@ Respond in this exact JSON format:
             logger.error(f"❌ Task adherence evaluation failed: {e}")
             return (0.5, f"Evaluation error: {str(e)}")
     
-    async def evaluate_tool_call_accuracy(
-        self,
-        user_query: str,
-        tool_calls: List[ToolCall],
-        expected_tools: Optional[List[str]] = None
-    ) -> Tuple[float, str]:
+    async def evaluate_tool_call_accuracy(self,user_query: str,tool_calls: List[ToolCall],expected_tools: Optional[List[str]] = None) -> Tuple[float, str]:
         """
         Evaluate the accuracy of tool/function calls made by the agent.
-        
         Assesses:
         - Tool Selection: Were the right tools chosen?
         - Argument Accuracy: Were arguments correct and well-formatted?
         - Logical Consistency: Were tool calls in a sensible order?
         - Necessity: Were unnecessary tools avoided?
-        
         Args:
             user_query: The original user query
             tool_calls: List of tool calls made
             expected_tools: Optional list of expected tool names
-            
         Returns:
             Tuple of (score 0-1, reasoning string)
         """
         if not tool_calls:
             return (1.0, "No tool calls required or made - N/A for this metric")
-        
         ai_service = await self._get_ai_service()
-        
-        # Format tool calls for evaluation
+
         tool_calls_formatted = []
         for tc in tool_calls:
             tool_calls_formatted.append({
                 "tool": tc.tool_name,
                 "args": tc.tool_args,
                 "success": tc.success,
-                "result_preview": str(tc.tool_result)[:200] if tc.tool_result else None
-            })
-        
+                "result_preview": str(tc.tool_result)[:200] if tc.tool_result else None})
         evaluation_prompt = f"""You are an AI evaluation expert. Evaluate the accuracy of tool calls made by an AI agent.
 
 USER REQUEST: "{user_query}"
@@ -485,41 +443,28 @@ Respond in this exact JSON format:
             logger.error(f"❌ Tool call accuracy evaluation failed: {e}")
             return (0.5, f"Evaluation error: {str(e)}")
     
-    async def evaluate_intent_resolution(
-        self,
-        user_query: str,
-        detected_intent: Optional[str],
-        resource_type: Optional[str],
-        operation: Optional[str],
-        initial_actions: List[Dict[str, Any]] = None
-    ) -> Tuple[float, str]:
+    async def evaluate_intent_resolution(self,user_query: str,detected_intent: Optional[str],resource_type: Optional[str],operation: Optional[str],initial_actions: List[Dict[str, Any]] = None) -> Tuple[float, str]:
         """
         Evaluate how well the agent understood the user's underlying goal.
-        
         Assesses:
         - Intent Detection: Did the agent correctly identify the intent?
         - Goal Understanding: Did it understand the underlying need?
         - Plan Quality: Did initial actions reflect correct understanding?
-        
         Args:
             user_query: The original user query
             detected_intent: What intent the agent detected
             resource_type: Resource type identified
             operation: Operation type identified
             initial_actions: First actions/decisions made
-            
         Returns:
             Tuple of (score 0-1, reasoning string)
         """
         ai_service = await self._get_ai_service()
-        
         intent_info = {
             "detected_intent": detected_intent,
             "resource_type": resource_type,
             "operation": operation,
-            "initial_actions": initial_actions or []
-        }
-        
+            "initial_actions": initial_actions or []}
         evaluation_prompt = f"""You are an AI evaluation expert. Evaluate how well the agent understood the user's underlying goal.
 
 USER REQUEST: "{user_query}"
@@ -557,26 +502,16 @@ Respond in this exact JSON format:
     "missed_aspects": ["<what was missed or misunderstood>"],
     "reasoning": "<brief explanation>"
 }}"""
-
         try:
-            response = await ai_service._call_chat_with_retries(
-                prompt=evaluation_prompt,
-                max_tokens=600,
-                temperature=0.1
-            )
-            
+            response = await ai_service._call_chat_with_retries(prompt=evaluation_prompt,max_tokens=600,temperature=0.1)           
             result = json.loads(response)
             score = result.get("total_score", 5) / 10.0
-            correct = result.get("correct_aspects", [])
             missed = result.get("missed_aspects", [])
             reasoning = result.get("reasoning", "Evaluation completed")
-            
             if missed:
                 reasoning += f" Missed: {', '.join(missed)}"
-            
             logger.info(f"📊 Intent Resolution Score: {score:.2f}")
             return (score, reasoning)
-            
         except json.JSONDecodeError:
             logger.error("❌ Failed to parse intent resolution evaluation")
             return (0.5, "Evaluation parsing failed - default score applied")
@@ -584,45 +519,27 @@ Respond in this exact JSON format:
             logger.error(f"❌ Intent resolution evaluation failed: {e}")
             return (0.5, f"Evaluation error: {str(e)}")
     
-    async def evaluate_trace(
-        self,
-        trace: AgentTrace
-    ) -> EvaluationResult:
+    async def evaluate_trace(self,trace: AgentTrace) -> EvaluationResult:
         """
         Evaluate a complete agent trace using all three metrics.
-        
         Args:
-            trace: Complete AgentTrace to evaluate
-            
+            trace: Complete AgentTrace to evaluate 
         Returns:
             EvaluationResult with all metric scores
         """
         logger.info(f"📊 Evaluating trace for session {trace.session_id}")
-        
         # Run all evaluations in parallel
         task_adherence_task = self.evaluate_task_adherence(
             user_query=trace.user_query,
             agent_response=trace.final_response,
-            context={
-                "resource_type": trace.resource_type,
-                "operation": trace.operation,
-                "success": trace.success
-            }
-        )
-        
-        tool_call_accuracy_task = self.evaluate_tool_call_accuracy(
-            user_query=trace.user_query,
-            tool_calls=trace.tool_calls
-        )
-        
+            context={"resource_type": trace.resource_type,"operation": trace.operation,"success": trace.success})
+        tool_call_accuracy_task = self.evaluate_tool_call_accuracy(user_query=trace.user_query,tool_calls=trace.tool_calls)
         intent_resolution_task = self.evaluate_intent_resolution(
             user_query=trace.user_query,
             detected_intent=trace.intent_detected,
             resource_type=trace.resource_type,
             operation=trace.operation,
-            initial_actions=trace.intermediate_steps[:3] if trace.intermediate_steps else []
-        )
-        
+            initial_actions=trace.intermediate_steps[:3] if trace.intermediate_steps else [])
         # Await all evaluations
         (task_score, task_reasoning), \
         (tool_score, tool_reasoning), \
@@ -631,11 +548,8 @@ Respond in this exact JSON format:
             tool_call_accuracy_task,
             intent_resolution_task
         )
-        
         # Calculate weighted overall score
-        # Task Adherence: 40%, Tool Accuracy: 30%, Intent Resolution: 30%
         overall_score = (task_score * 0.4) + (tool_score * 0.3) + (intent_score * 0.3)
-        
         result = EvaluationResult(
             session_id=trace.session_id,
             agent_name=trace.agent_name,
@@ -651,20 +565,15 @@ Respond in this exact JSON format:
                 "tool_calls_count": len(trace.tool_calls),
                 "execution_success": trace.success,
                 "resource_type": trace.resource_type,
-                "operation": trace.operation
-            }
-        )
-        
+                "operation": trace.operation})
         # Store in memory
         self._evaluation_results.append(result)
-        
         # Persist to PostgreSQL
         if self._persistence:
             try:
                 self._persistence.save_evaluation(result.to_dict())
             except Exception as e:
                 logger.error(f"❌ Failed to persist evaluation: {e}")
-        
         # Track in Prometheus
         prom = _get_prometheus_metrics()
         if prom:
@@ -673,23 +582,19 @@ Respond in this exact JSON format:
                 task_adherence=task_score,
                 tool_accuracy=tool_score,
                 intent_resolution=intent_score,
-                overall_score=overall_score
-            )
+                overall_score=overall_score)
         
         logger.info(f"✅ Evaluation complete - Overall Score: {overall_score:.2f}")
         logger.info(f"   Task Adherence: {task_score:.2f}")
         logger.info(f"   Tool Call Accuracy: {tool_score:.2f}")
         logger.info(f"   Intent Resolution: {intent_score:.2f}")
-        
         return result
-    
+
     async def evaluate_session(self, session_id: str) -> Optional[EvaluationResult]:
         """
         Evaluate a session by its ID.
-        
         Args:
             session_id: Session ID to evaluate
-            
         Returns:
             EvaluationResult or None if trace not found
         """
@@ -697,37 +602,27 @@ Respond in this exact JSON format:
         if not trace:
             logger.warning(f"⚠️ No trace found for session {session_id}")
             return None
-        
         return await self.evaluate_trace(trace)
-    
-    async def batch_evaluate(
-        self,
-        traces: List[AgentTrace]
-    ) -> List[EvaluationResult]:
+
+    async def batch_evaluate(self,traces: List[AgentTrace]) -> List[EvaluationResult]:
         """
         Evaluate multiple traces in batch.
-        
         Args:
-            traces: List of AgentTrace objects
-            
+            traces: List of AgentTrace objects 
         Returns:
             List of EvaluationResult objects
         """
         logger.info(f"📊 Batch evaluating {len(traces)} traces")
         
         results = await asyncio.gather(*[
-            self.evaluate_trace(trace) for trace in traces
-        ])
-        
+            self.evaluate_trace(trace) for trace in traces])
         return list(results)
     
     def get_evaluation_summary(self, from_database: bool = True) -> Dict[str, Any]:
         """
         Get summary statistics of all evaluations.
-        
         Args:
             from_database: If True and persistence is available, get stats from PostgreSQL
-        
         Returns:
             Dict with aggregate metrics and statistics
         """
@@ -739,19 +634,15 @@ Respond in this exact JSON format:
                 return db_summary
             except Exception as e:
                 logger.warning(f"⚠️ Database summary failed, using in-memory: {e}")
-        
         # Fall back to in-memory results
         if not self._evaluation_results:
             return {"message": "No evaluations performed yet", "count": 0, "source": "memory"}
-        
         results = self._evaluation_results
         count = len(results)
-        
         avg_task = sum(r.task_adherence for r in results) / count
         avg_tool = sum(r.tool_call_accuracy for r in results) / count
         avg_intent = sum(r.intent_resolution for r in results) / count
         avg_overall = sum(r.overall_score for r in results) / count
-        
         return {
             "total_evaluations": count,
             "average_scores": {
@@ -769,68 +660,55 @@ Respond in this exact JSON format:
             },
             "by_agent": self._get_scores_by_agent(),
             "by_operation": self._get_scores_by_operation(),
-            "source": "memory"
-        }
+            "source": "memory"}
     
     def _get_scores_by_agent(self) -> Dict[str, Dict[str, float]]:
         """Get average scores grouped by agent."""
         agent_scores: Dict[str, List[float]] = {}
-        
         for result in self._evaluation_results:
             if result.agent_name not in agent_scores:
                 agent_scores[result.agent_name] = []
             agent_scores[result.agent_name].append(result.overall_score)
-        
         return {
             agent: {
                 "average": round(sum(scores) / len(scores), 3),
                 "count": len(scores)
             }
-            for agent, scores in agent_scores.items()
-        }
+            for agent, scores in agent_scores.items()}
     
     def _get_scores_by_operation(self) -> Dict[str, Dict[str, float]]:
         """Get average scores grouped by operation type."""
         op_scores: Dict[str, List[float]] = {}
-        
         for result in self._evaluation_results:
             operation = result.metadata.get("operation", "unknown")
             if operation not in op_scores:
                 op_scores[operation] = []
             op_scores[operation].append(result.overall_score)
-        
         return {
             op: {
                 "average": round(sum(scores) / len(scores), 3),
-                "count": len(scores)
-            }
-            for op, scores in op_scores.items()
-        }
+                "count": len(scores)}
+            for op, scores in op_scores.items()}
     
     def export_results(self, format: str = "json") -> str:
         """
         Export evaluation results.
-        
         Args:
-            format: Output format ('json' or 'jsonl')
-            
+            format: Output format ('json' or 'jsonl')  
         Returns:
             String representation of results
         """
         results_data = [r.to_dict() for r in self._evaluation_results]
-        
         if format == "jsonl":
             return "\n".join(json.dumps(r) for r in results_data)
         else:
             return json.dumps(results_data, indent=2)
-    
+        
     def clear_results(self) -> None:
         """Clear all stored traces and evaluation results."""
         self._traces.clear()
         self._evaluation_results.clear()
         logger.info("🗑️ Cleared all traces and evaluation results")
 
-
 # Singleton instance
 agentic_metrics_evaluator = AgenticMetricsEvaluator()
-

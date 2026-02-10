@@ -13,7 +13,7 @@ class ConversationStatus(Enum):
     """Status of the conversation flow."""
     INITIATED = "initiated"
     COLLECTING_PARAMS = "collecting_params"
-    AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options (e.g., endpoints)
+    AWAITING_SELECTION = "awaiting_selection"  # Waiting for user to select from options 
     AWAITING_FILTER_SELECTION = "awaiting_filter_selection"  # Waiting for user to select BU/Env/Zone filter
     AWAITING_ENGAGEMENT_SELECTION = "awaiting_engagement_selection"  # Waiting for user to select engagement (ENG users)
     VALIDATING = "validating"
@@ -65,7 +65,6 @@ class ConversationState:
         # Agent tracking
         self.active_agent: Optional[str] = None
         self.agent_handoffs: List[Dict[str, str]] = []
-        
         # Filter selection tracking (for BU/Environment/Zone filtering)
         self.pending_filter_options: Optional[List[Dict[str, Any]]] = None
         self.pending_filter_type: Optional[str] = None  # "bu", "environment", "zone"
@@ -160,7 +159,6 @@ class ConversationState:
     def get_missing_params_message(self) -> str:
         """
         Generate a user-friendly message about missing parameters.
-        
         Returns:
             Message describing missing parameters
         """

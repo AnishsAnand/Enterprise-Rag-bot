@@ -13,19 +13,16 @@ import logging
 import json
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-
 from sqlalchemy import create_engine, Column, String, Text, DateTime, Float, Boolean, Integer, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
-
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 # Create base for metrics tables
 MetricsBase = declarative_base()
-
 
 class AgenticEvaluationRecord(MetricsBase):
     """
@@ -37,37 +34,29 @@ class AgenticEvaluationRecord(MetricsBase):
     - Intent Resolution (0-1): Did the agent understand the user's goal?
     """
     __tablename__ = "agentic_evaluation_results"
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(String(255), nullable=False, index=True)
     agent_name = Column(String(255), nullable=False, index=True)
-    
     # User query and response
     user_query = Column(Text, nullable=True)
     agent_response = Column(Text, nullable=True)
-    
     # The three key metrics (0.0 to 1.0)
     task_adherence = Column(Float, nullable=False)
     task_adherence_reasoning = Column(Text, nullable=True)
-    
     tool_call_accuracy = Column(Float, nullable=False)
     tool_call_accuracy_reasoning = Column(Text, nullable=True)
-    
     intent_resolution = Column(Float, nullable=False)
     intent_resolution_reasoning = Column(Text, nullable=True)
-    
     # Overall weighted score
     overall_score = Column(Float, nullable=False)
-    
     # Metadata
     resource_type = Column(String(100), nullable=True, index=True)
     operation = Column(String(50), nullable=True, index=True)
     tool_calls_count = Column(Integer, default=0)
     execution_success = Column(Boolean, default=True)
-    
     # Extra metadata as JSON
     extra_metadata = Column(JSON, nullable=True)
-    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     evaluation_timestamp = Column(String(50), nullable=True)
@@ -92,9 +81,7 @@ class AgenticEvaluationRecord(MetricsBase):
             "tool_calls_count": self.tool_calls_count,
             "execution_success": self.execution_success,
             "metadata": self.extra_metadata,
-            "created_at": self.created_at.isoformat() if self.created_at else None
-        }
-
+            "created_at": self.created_at.isoformat() if self.created_at else None}
 
 class AgenticTraceRecord(MetricsBase):
     """
@@ -108,27 +95,21 @@ class AgenticTraceRecord(MetricsBase):
     session_id = Column(String(255), nullable=False, unique=True, index=True)
     user_query = Column(Text, nullable=False)
     agent_name = Column(String(255), nullable=False)
-    
     # Intent information
     intent_detected = Column(String(255), nullable=True)
     resource_type = Column(String(100), nullable=True)
     operation = Column(String(50), nullable=True)
-    
     # Tool calls as JSON array
     tool_calls = Column(JSON, nullable=True)
-    
     # Intermediate steps as JSON array
     intermediate_steps = Column(JSON, nullable=True)
-    
     # Final response
     final_response = Column(Text, nullable=True)
-    
     # Execution metadata
     success = Column(Boolean, default=True)
     error = Column(Text, nullable=True)
     start_time = Column(String(50), nullable=True)
     end_time = Column(String(50), nullable=True)
-    
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -150,9 +131,7 @@ class AgenticTraceRecord(MetricsBase):
             "error": self.error,
             "start_time": self.start_time,
             "end_time": self.end_time,
-            "created_at": self.created_at.isoformat() if self.created_at else None
-        }
-
+            "created_at": self.created_at.isoformat() if self.created_at else None}
 
 class AgenticMetricsPersistence:
     """
@@ -169,37 +148,30 @@ class AgenticMetricsPersistence:
             database_url: PostgreSQL connection string. Defaults to app settings.
         """
         self.database_url = database_url or settings.DATABASE_URL
-        
         # Create engine with appropriate settings
         if self.database_url.startswith("sqlite"):
             self.engine = create_engine(
                 self.database_url,
                 connect_args={"check_same_thread": False},
-                poolclass=StaticPool
-            )
+                poolclass=StaticPool)
         else:
             self.engine = create_engine(
                 self.database_url,
                 pool_size=5,
                 max_overflow=10,
-                pool_pre_ping=True
-            )
+                pool_pre_ping=True)
         
         # Create session factory
         self.SessionFactory = sessionmaker(bind=self.engine)
-        
         # Create tables if they don't exist
         MetricsBase.metadata.create_all(self.engine)
-        
-        logger.info(f"✅ AgenticMetricsPersistence initialized with database")
+        logger.info(f"✅ Agentic Metrics Persistence initialized with database")
     
     def save_evaluation(self, evaluation_result: Dict[str, Any]) -> int:
         """
         Save an evaluation result to PostgreSQL.
-        
         Args:
             evaluation_result: EvaluationResult as dictionary
-            
         Returns:
             ID of the saved record
         """
@@ -221,26 +193,21 @@ class AgenticMetricsPersistence:
                 tool_calls_count=evaluation_result.get("metadata", {}).get("tool_calls_count", 0),
                 execution_success=evaluation_result.get("metadata", {}).get("execution_success", True),
                 extra_metadata=evaluation_result.get("metadata"),
-                evaluation_timestamp=evaluation_result.get("timestamp")
-            )
+                evaluation_timestamp=evaluation_result.get("timestamp"))
             
             session.add(record)
             session.commit()
-            
             logger.info(f"💾 Saved evaluation for session {record.session_id} (ID: {record.id})")
             return record.id
-            
         except Exception as e:
             session.rollback()
             logger.error(f"❌ Failed to save evaluation: {e}")
             raise
         finally:
             session.close()
-    
     def save_trace(self, trace_dict: Dict[str, Any]) -> int:
         """
         Save an agent trace to PostgreSQL.
-        
         Args:
             trace_dict: AgentTrace as dictionary
             
@@ -268,7 +235,6 @@ class AgenticMetricsPersistence:
                 existing.error = trace_dict.get("error")
                 existing.start_time = trace_dict.get("start_time")
                 existing.end_time = trace_dict.get("end_time")
-                
                 session.commit()
                 logger.debug(f"📝 Updated trace for session {existing.session_id}")
                 return existing.id
@@ -287,15 +253,11 @@ class AgenticMetricsPersistence:
                     success=trace_dict.get("success", True),
                     error=trace_dict.get("error"),
                     start_time=trace_dict.get("start_time"),
-                    end_time=trace_dict.get("end_time")
-                )
-                
+                    end_time=trace_dict.get("end_time"))
                 session.add(record)
                 session.commit()
-                
                 logger.debug(f"💾 Saved trace for session {record.session_id}")
                 return record.id
-                
         except Exception as e:
             session.rollback()
             logger.error(f"❌ Failed to save trace: {e}")
@@ -310,7 +272,6 @@ class AgenticMetricsPersistence:
             record = session.query(AgenticEvaluationRecord).filter_by(
                 session_id=session_id
             ).order_by(AgenticEvaluationRecord.created_at.desc()).first()
-            
             return record.to_dict() if record else None
         finally:
             session.close()
@@ -337,14 +298,12 @@ class AgenticMetricsPersistence:
     ) -> List[Dict[str, Any]]:
         """
         Get all evaluations with optional filtering.
-        
         Args:
             limit: Maximum records to return
             offset: Number of records to skip
             agent_name: Filter by agent name
             operation: Filter by operation type
             min_score: Filter by minimum overall score
-            
         Returns:
             List of evaluation records
         """
@@ -358,11 +317,9 @@ class AgenticMetricsPersistence:
                 query = query.filter(AgenticEvaluationRecord.operation == operation)
             if min_score is not None:
                 query = query.filter(AgenticEvaluationRecord.overall_score >= min_score)
-            
             records = query.order_by(
                 AgenticEvaluationRecord.created_at.desc()
             ).offset(offset).limit(limit).all()
-            
             return [r.to_dict() for r in records]
         finally:
             session.close()
@@ -370,26 +327,21 @@ class AgenticMetricsPersistence:
     def get_summary_stats(self) -> Dict[str, Any]:
         """
         Get aggregate statistics from stored evaluations.
-        
         Returns:
             Summary statistics
         """
         session = self.SessionFactory()
         try:
             from sqlalchemy import func
-            
             # Get total count
             total = session.query(func.count(AgenticEvaluationRecord.id)).scalar() or 0
-            
             if total == 0:
                 return {"total_evaluations": 0, "message": "No evaluations stored yet"}
-            
             # Get averages
             avg_task = session.query(func.avg(AgenticEvaluationRecord.task_adherence)).scalar() or 0
             avg_tool = session.query(func.avg(AgenticEvaluationRecord.tool_call_accuracy)).scalar() or 0
             avg_intent = session.query(func.avg(AgenticEvaluationRecord.intent_resolution)).scalar() or 0
             avg_overall = session.query(func.avg(AgenticEvaluationRecord.overall_score)).scalar() or 0
-            
             # Get score distribution
             excellent = session.query(func.count(AgenticEvaluationRecord.id)).filter(
                 AgenticEvaluationRecord.overall_score >= 0.9
@@ -409,7 +361,6 @@ class AgenticMetricsPersistence:
             failed = session.query(func.count(AgenticEvaluationRecord.id)).filter(
                 AgenticEvaluationRecord.overall_score < 0.3
             ).scalar() or 0
-            
             # Get by agent
             by_agent = {}
             agent_stats = session.query(
@@ -417,10 +368,8 @@ class AgenticMetricsPersistence:
                 func.count(AgenticEvaluationRecord.id),
                 func.avg(AgenticEvaluationRecord.overall_score)
             ).group_by(AgenticEvaluationRecord.agent_name).all()
-            
             for agent_name, count, avg in agent_stats:
                 by_agent[agent_name] = {"count": count, "average": round(float(avg), 3)}
-            
             # Get by operation
             by_operation = {}
             op_stats = session.query(
@@ -428,7 +377,6 @@ class AgenticMetricsPersistence:
                 func.count(AgenticEvaluationRecord.id),
                 func.avg(AgenticEvaluationRecord.overall_score)
             ).group_by(AgenticEvaluationRecord.operation).all()
-            
             for op, count, avg in op_stats:
                 if op:
                     by_operation[op] = {"count": count, "average": round(float(avg), 3)}
@@ -486,7 +434,6 @@ class AgenticMetricsPersistence:
         finally:
             session.close()
 
-
 # Singleton instance
 _persistence_instance = None
 
@@ -496,4 +443,3 @@ def get_metrics_persistence() -> AgenticMetricsPersistence:
     if _persistence_instance is None:
         _persistence_instance = AgenticMetricsPersistence()
     return _persistence_instance
-

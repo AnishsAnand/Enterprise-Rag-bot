@@ -1,32 +1,23 @@
 """
 WebUI-compatible Config API Routes
-Provides OpenWebUI-style /api/config endpoint
-
-This endpoint returns application configuration that the frontend uses
-to determine available features, default settings, etc.
+Provides WebUI-style /api/config endpoint.
+This endpoint returns application configuration that the frontend uses to determine available features, default settings, etc.
 """
-
 import os
 import logging
-from typing import Optional, Dict, Any, List
-
-from fastapi import APIRouter, Request, Depends, HTTPException, status
+from typing import Dict, Any, List
+from fastapi import APIRouter, Request, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
 from app.core.database import get_db
-from app.core.config import settings
 
 log = logging.getLogger(__name__)
-
 router = APIRouter(tags=["config"])
-
 
 # ==================== Configuration Models ====================
 
 class OAuthProviders(BaseModel):
     providers: Dict[str, str] = {}
-
 
 class FeaturesConfig(BaseModel):
     auth: bool = True
@@ -49,36 +40,28 @@ class FeaturesConfig(BaseModel):
     enable_direct_connections: bool = False
     folder_max_file_count: int = 100
 
-
 class AudioConfig(BaseModel):
     tts: Dict[str, Any] = {
         "engine": "",
         "voice": "",
-        "split_on": "punctuation"
-    }
+        "split_on": "punctuation"}
     stt: Dict[str, Any] = {
-        "engine": ""
-    }
-
+        "engine": ""}
 
 class CodeConfig(BaseModel):
     engine: str = ""
 
-
 class FileConfig(BaseModel):
-    max_size: int = 100 * 1024 * 1024  # 100MB
+    max_size: int = 100 * 1024 * 1024 
     max_count: int = 10
     image_compression: Dict[str, int] = {
         "width": 1920,
-        "height": 1080
-    }
-
+        "height": 1080}
 
 class UIConfig(BaseModel):
     pending_user_overlay_title: str = ""
     pending_user_overlay_content: str = ""
     response_watermark: str = ""
-
 
 class ConfigResponse(BaseModel):
     status: bool = True
@@ -98,49 +81,37 @@ class ConfigResponse(BaseModel):
     ui: UIConfig = UIConfig()
     onboarding: bool = False
 
-
 # ==================== Config Endpoint ====================
 
 @router.get("/api/config")
-async def get_app_config(
-    request: Request,
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
+async def get_app_config(request: Request,db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
     Get application configuration.
-    
     This endpoint returns the same structure as OpenWebUI's /api/config
-    so that frontends can determine available features and settings.
-    
+    so that frontend can determine available features and settings.
     The response varies based on whether a user is authenticated:
     - Unauthenticated: Basic config + onboarding status
     - Authenticated: Full config including features, permissions, etc.
     """
-    
     # Check if user is authenticated
     user = None
     user_id = None
-    
     # Try to get user from various auth methods
     auth_header = request.headers.get("Authorization")
     user_id_header = request.headers.get("X-User-Id")
-    
     if user_id_header:
         user_id = user_id_header
-        user = {"id": user_id, "role": "user"}  # Simplified for now
+        user = {"id": user_id, "role": "user"} 
     elif auth_header and auth_header.startswith("Bearer "):
         # In production: decode JWT token
         user = {"id": "default_user", "role": "user"}
-    
     # Count users (for onboarding detection)
     try:
         from app.models.database_models import User
         user_count = db.query(User).count()
     except Exception:
-        user_count = 1  # Assume at least one user exists
-    
+        user_count = 1 
     onboarding = user is None and user_count == 0
-    
     # Base config (always returned)
     base_config = {
         "status": True,
@@ -148,7 +119,7 @@ async def get_app_config(
         "version": "2.0.0",
         "default_locale": os.getenv("DEFAULT_LOCALE", "en-US"),
         "oauth": {
-            "providers": {}  # Add OAuth providers here if configured
+            "providers": {}
         },
         "features": {
             "auth": True,
@@ -156,14 +127,10 @@ async def get_app_config(
             "enable_signup": os.getenv("ENABLE_SIGNUP", "true").lower() == "true",
             "enable_login_form": True,
             "enable_api_keys": True,
-            "enable_websocket": True,
-        },
-    }
-    
+            "enable_websocket": True,},}
     if onboarding:
         base_config["onboarding"] = True
         return base_config
-    
     # Extended config for authenticated users
     if user is not None:
         base_config["features"].update({
@@ -183,9 +150,7 @@ async def get_app_config(
             "enable_user_webhooks": False,
             "enable_user_status": True,
             "enable_admin_export": user.get("role") == "admin",
-            "enable_admin_chat_access": user.get("role") == "admin",
-        })
-        
+            "enable_admin_chat_access": user.get("role") == "admin",})
         # Add user-specific config
         base_config.update({
             "default_models": os.getenv("DEFAULT_MODELS", ""),
@@ -206,7 +171,7 @@ async def get_app_config(
                 },
             },
             "file": {
-                "max_size": int(os.getenv("FILE_MAX_SIZE", "104857600")),  # 100MB
+                "max_size": int(os.getenv("FILE_MAX_SIZE", "104857600")), 
                 "max_count": int(os.getenv("FILE_MAX_COUNT", "10")),
                 "image_compression": {
                     "width": 1920,
@@ -221,12 +186,9 @@ async def get_app_config(
             },
         })
         
-        # Admin-only fields
         if user.get("role") == "admin":
             base_config["active_entries"] = user_count
-    
     return base_config
-
 
 def _get_default_prompt_suggestions() -> List[Dict[str, Any]]:
     """Get default prompt suggestions for the UI - Vayu Maya cloud management queries"""
@@ -278,16 +240,11 @@ def _get_user_permissions(role: str) -> Dict[str, Any]:
             "models": False,
             "knowledge": True,
             "prompts": True,
-            "tools": False,
-        },
-    }
-    
+            "tools": False,},}
     if role == "admin":
         base_permissions["workspace"]["models"] = True
         base_permissions["workspace"]["tools"] = True
-    
     return base_permissions
-
 
 # ==================== Additional Config Endpoints ====================
 
@@ -296,9 +253,7 @@ async def get_app_version():
     """Get application version"""
     return {
         "version": "2.0.0",
-        "deployment_id": os.getenv("DEPLOYMENT_ID", "local"),
-    }
-
+        "deployment_id": os.getenv("DEPLOYMENT_ID", "local")}
 
 @router.get("/api/changelog")
 async def get_app_changelog():
@@ -309,12 +264,8 @@ async def get_app_changelog():
             "changes": [
                 "Initial release of Enterprise RAG Bot",
                 "OpenWebUI-compatible API",
-                "Chat persistence with PostgreSQL",
-            ]
-        }
-    }
-
-
+                "Chat persistence with PostgreSQL"]}}
+ 
 @router.get("/manifest.json")
 async def get_manifest():
     """PWA manifest"""
@@ -332,33 +283,4 @@ async def get_manifest():
                 "src": "/static/logo.png",
                 "type": "image/png",
                 "sizes": "500x500",
-                "purpose": "any"
-            }
-        ]
-    }
-
-
-# ==================== Model Endpoints ====================
-
-@router.get("/api/models")
-async def list_models():
-    """
-    List available models.
-    This endpoint is for frontends that expect /api/models.
-    """
-    import time
-    now = int(time.time())
-    
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": "Vayu Maya",
-                "object": "model",
-                "created": now,
-                "owned_by": "Tata Communications",
-                "name": "Vayu Maya",
-                "description": "AI-powered cloud management assistant"
-            }
-        ]
-    }
+                "purpose": "any" }]}

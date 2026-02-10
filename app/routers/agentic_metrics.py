@@ -6,10 +6,8 @@ Provides APIs for:
 - Batch evaluation of multiple sessions
 - Getting evaluation summaries and statistics
 - Exporting evaluation results
-
 Reference: https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/evaluating-agentic-ai-systems-a-deep-dive-into-agentic-metrics/4403923
 """
-
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
@@ -19,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["Agentic Metrics"])
 
-
 # =========================================================================
 # REQUEST/RESPONSE MODELS
 # =========================================================================
@@ -27,7 +24,6 @@ router = APIRouter(prefix="/api/v1/metrics", tags=["Agentic Metrics"])
 class EvaluateSessionRequest(BaseModel):
     """Request to evaluate a single session."""
     session_id: str = Field(..., description="Session ID to evaluate")
-
 
 class EvaluateManualRequest(BaseModel):
     """Request to manually evaluate an agent interaction."""
@@ -50,17 +46,14 @@ class EvaluateManualRequest(BaseModel):
         description="Operation type (optional)"
     )
 
-
 class BatchEvaluateRequest(BaseModel):
     """Request to batch evaluate multiple sessions."""
     session_ids: List[str] = Field(..., description="List of session IDs to evaluate")
-
 
 class MetricScore(BaseModel):
     """Individual metric score."""
     score: float = Field(..., ge=0, le=1, description="Score from 0 to 1")
     reasoning: str = Field(..., description="Explanation for the score")
-
 
 class EvaluationResponse(BaseModel):
     """Response for a single evaluation."""
@@ -73,7 +66,6 @@ class EvaluationResponse(BaseModel):
     timestamp: str
     metadata: Dict[str, Any] = {}
 
-
 class EvaluationSummaryResponse(BaseModel):
     """Summary statistics of all evaluations."""
     total_evaluations: int
@@ -82,17 +74,15 @@ class EvaluationSummaryResponse(BaseModel):
     by_agent: Dict[str, Dict[str, Any]]
     by_operation: Dict[str, Dict[str, Any]]
 
-
 # =========================================================================
 # API ENDPOINTS
 # =========================================================================
-
 @router.post(
     "/evaluate/session",
     response_model=EvaluationResponse,
     summary="Evaluate a session by ID",
-    description="Evaluate an agent session using Task Adherence, Tool Call Accuracy, and Intent Resolution metrics."
-)
+    description="Evaluate an agent session using Task Adherence, Tool Call Accuracy, and Intent Resolution metrics.")
+
 async def evaluate_session(request: EvaluateSessionRequest):
     """
     Evaluate a session that has been traced.
@@ -105,15 +95,11 @@ async def evaluate_session(request: EvaluateSessionRequest):
     """
     try:
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
-        
         result = await agentic_metrics_evaluator.evaluate_session(request.session_id)
-        
         if not result:
             raise HTTPException(
                 status_code=404,
-                detail=f"No trace found for session {request.session_id}"
-            )
-        
+                detail=f"No trace found for session {request.session_id}")
         return EvaluationResponse(
             session_id=result.session_id,
             agent_name=result.agent_name,
@@ -131,8 +117,7 @@ async def evaluate_session(request: EvaluateSessionRequest):
             ),
             overall_score=result.overall_score,
             timestamp=result.timestamp,
-            metadata=result.metadata
-        )
+            metadata=result.metadata)
         
     except HTTPException:
         raise
@@ -144,12 +129,11 @@ async def evaluate_session(request: EvaluateSessionRequest):
 @router.post(
     "/evaluate/manual",
     summary="Evaluate an agent interaction manually",
-    description="Evaluate an agent interaction by providing query, response, and optional metadata."
-)
+    description="Evaluate an agent interaction by providing query, response, and optional metadata.")
+
 async def evaluate_manual(request: EvaluateManualRequest):
     """
     Manually evaluate an agent interaction without a pre-existing trace.
-    
     Useful for:
     - Testing evaluation metrics
     - Evaluating historical interactions
@@ -159,9 +143,8 @@ async def evaluate_manual(request: EvaluateManualRequest):
         from app.services.agentic_metrics_service import (
             agentic_metrics_evaluator,
             AgentTrace,
-            ToolCall
-        )
-        
+            ToolCall)
+    
         # Convert tool calls if provided
         tool_calls = []
         if request.tool_calls:
@@ -172,8 +155,7 @@ async def evaluate_manual(request: EvaluateManualRequest):
                     tool_result=tc.get("tool_result"),
                     timestamp=tc.get("timestamp", ""),
                     success=tc.get("success", True),
-                    error=tc.get("error")
-                ))
+                    error=tc.get("error")))
         
         # Create a trace manually
         trace = AgentTrace(
@@ -185,12 +167,10 @@ async def evaluate_manual(request: EvaluateManualRequest):
             operation=request.operation,
             tool_calls=tool_calls,
             final_response=request.agent_response,
-            success=True
-        )
+            success=True)
         
         # Evaluate the trace
         result = await agentic_metrics_evaluator.evaluate_trace(trace)
-        
         return {
             "task_adherence": {
                 "score": result.task_adherence,
@@ -205,8 +185,7 @@ async def evaluate_manual(request: EvaluateManualRequest):
                 "reasoning": result.intent_resolution_reasoning
             },
             "overall_score": result.overall_score,
-            "evaluation_timestamp": result.timestamp
-        }
+            "evaluation_timestamp": result.timestamp}
         
     except Exception as e:
         logger.error(f"❌ Manual evaluation failed: {e}")
@@ -216,12 +195,11 @@ async def evaluate_manual(request: EvaluateManualRequest):
 @router.post(
     "/evaluate/batch",
     summary="Batch evaluate multiple sessions",
-    description="Evaluate multiple sessions at once for efficiency."
-)
+    description="Evaluate multiple sessions at once for efficiency.")
+
 async def batch_evaluate(request: BatchEvaluateRequest):
     """
     Evaluate multiple sessions in batch.
-    
     Returns evaluation results for all found sessions.
     Sessions without traces will be skipped.
     """
@@ -230,7 +208,6 @@ async def batch_evaluate(request: BatchEvaluateRequest):
         
         results = []
         not_found = []
-        
         for session_id in request.session_ids:
             trace = agentic_metrics_evaluator.get_trace(session_id)
             if trace:
@@ -241,8 +218,7 @@ async def batch_evaluate(request: BatchEvaluateRequest):
                     "task_adherence": result.task_adherence,
                     "tool_call_accuracy": result.tool_call_accuracy,
                     "intent_resolution": result.intent_resolution,
-                    "overall_score": result.overall_score
-                })
+                    "overall_score": result.overall_score})
             else:
                 not_found.append(session_id)
         
@@ -250,24 +226,20 @@ async def batch_evaluate(request: BatchEvaluateRequest):
             "evaluated": len(results),
             "not_found": len(not_found),
             "results": results,
-            "missing_sessions": not_found
-        }
+            "missing_sessions": not_found}
         
     except Exception as e:
         logger.error(f"❌ Batch evaluation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/summary",
     response_model=EvaluationSummaryResponse,
     summary="Get evaluation summary statistics",
-    description="Get aggregate statistics across all evaluations performed."
-)
+    description="Get aggregate statistics across all evaluations performed.")
 async def get_evaluation_summary():
     """
     Get summary statistics of all evaluations.
-    
     Returns:
     - Average scores for each metric
     - Score distribution (excellent, good, acceptable, poor, failed)
@@ -275,9 +247,7 @@ async def get_evaluation_summary():
     """
     try:
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
-        
         summary = agentic_metrics_evaluator.get_evaluation_summary()
-        
         if "message" in summary:
             # No evaluations yet
             return EvaluationSummaryResponse(
@@ -285,27 +255,22 @@ async def get_evaluation_summary():
                 average_scores={},
                 score_distribution={},
                 by_agent={},
-                by_operation={}
-            )
+                by_operation={})
         
         return EvaluationSummaryResponse(**summary)
-        
     except Exception as e:
         logger.error(f"❌ Failed to get evaluation summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/export",
     summary="Export evaluation results",
-    description="Export all evaluation results in JSON or JSONL format."
-)
+    description="Export all evaluation results in JSON or JSONL format.")
+
 async def export_results(
-    format: str = Query("json", enum=["json", "jsonl"], description="Export format")
-):
+    format: str = Query("json", enum=["json", "jsonl"], description="Export format")):
     """
     Export all evaluation results.
-    
     Formats:
     - json: Standard JSON array
     - jsonl: JSON Lines format (one JSON object per line)
@@ -314,22 +279,17 @@ async def export_results(
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
         
         data = agentic_metrics_evaluator.export_results(format=format)
-        
-        return {
-            "format": format,
-            "data": data
-        }
+        return {"format": format,"data": data}
         
     except Exception as e:
         logger.error(f"❌ Failed to export results: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/trace/{session_id}",
     summary="Get a trace by session ID",
-    description="Retrieve the recorded trace for a session."
-)
+    description="Retrieve the recorded trace for a session.")
+
 async def get_trace(session_id: str):
     """
     Get the trace data for a specific session.
@@ -340,60 +300,49 @@ async def get_trace(session_id: str):
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
         
         trace = agentic_metrics_evaluator.get_trace(session_id)
-        
         if not trace:
             raise HTTPException(
                 status_code=404,
-                detail=f"No trace found for session {session_id}"
-            )
-        
+                detail=f"No trace found for session {session_id}")
         return trace.to_dict()
-        
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Failed to get trace: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.delete(
     "/clear",
     summary="Clear all traces and evaluation results",
-    description="Clear all stored traces and evaluation results."
-)
+    description="Clear all stored traces and evaluation results.")
+
 async def clear_all():
     """
     Clear all stored traces and evaluation results.
-    
     Use with caution - this cannot be undone.
     """
     try:
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
         
         agentic_metrics_evaluator.clear_results()
-        
         return {"message": "All traces and evaluation results cleared"}
-        
     except Exception as e:
         logger.error(f"❌ Failed to clear results: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/history",
     summary="Get evaluation history from database",
-    description="Retrieve historical evaluations from PostgreSQL database."
-)
+    description="Retrieve historical evaluations from PostgreSQL database.")
+
 async def get_evaluation_history(
     limit: int = Query(50, ge=1, le=500, description="Maximum records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip"),
     agent_name: Optional[str] = Query(None, description="Filter by agent name"),
     operation: Optional[str] = Query(None, description="Filter by operation type"),
-    min_score: Optional[float] = Query(None, ge=0, le=1, description="Minimum overall score")
-):
+    min_score: Optional[float] = Query(None, ge=0, le=1, description="Minimum overall score")):
     """
     Get historical evaluations from the PostgreSQL database.
-    
     Supports pagination and filtering by:
     - Agent name
     - Operation type (list, create, delete, etc.)
@@ -408,26 +357,22 @@ async def get_evaluation_history(
             offset=offset,
             agent_name=agent_name,
             operation=operation,
-            min_score=min_score
-        )
-        
+            min_score=min_score)
         return {
             "count": len(evaluations),
             "limit": limit,
             "offset": offset,
-            "evaluations": evaluations
-        }
+            "evaluations": evaluations}
         
     except Exception as e:
         logger.error(f"❌ Failed to get evaluation history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/history/{session_id}",
     summary="Get a specific evaluation from database",
-    description="Retrieve a specific evaluation by session ID from PostgreSQL."
-)
+    description="Retrieve a specific evaluation by session ID from PostgreSQL.")
+
 async def get_evaluation_by_session(session_id: str):
     """
     Get a specific evaluation from the database by session ID.
@@ -437,13 +382,10 @@ async def get_evaluation_by_session(session_id: str):
         
         persistence = get_metrics_persistence()
         evaluation = persistence.get_evaluation(session_id)
-        
         if not evaluation:
             raise HTTPException(
                 status_code=404,
-                detail=f"No evaluation found for session {session_id}"
-            )
-        
+                detail=f"No evaluation found for session {session_id}")
         return evaluation
         
     except HTTPException:
@@ -452,12 +394,11 @@ async def get_evaluation_by_session(session_id: str):
         logger.error(f"❌ Failed to get evaluation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @router.get(
     "/health",
     summary="Check metrics service health",
-    description="Check if the agentic metrics service is healthy."
-)
+    description="Check if the agentic metrics service is healthy.")
+
 async def health_check():
     """
     Health check for the agentic metrics service.
@@ -466,7 +407,6 @@ async def health_check():
         from app.services.agentic_metrics_service import agentic_metrics_evaluator
         
         summary = agentic_metrics_evaluator.get_evaluation_summary()
-        
         # Check database connection
         db_status = "connected"
         try:
@@ -477,17 +417,13 @@ async def health_check():
         except Exception as e:
             db_status = f"error: {e}"
             db_evaluations = 0
-        
         return {
             "status": "healthy",
             "service": "agentic_metrics",
             "evaluations_count": summary.get("total_evaluations", summary.get("count", 0)),
             "database": {
                 "status": db_status,
-                "evaluations_stored": db_evaluations
-            }
-        }
-        
+                "evaluations_stored": db_evaluations}}
     except Exception as e:
         logger.error(f"❌ Metrics service health check failed: {e}")
         return {
@@ -495,4 +431,3 @@ async def health_check():
             "service": "agentic_metrics",
             "error": str(e)
         }
-

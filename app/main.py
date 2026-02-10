@@ -3,7 +3,6 @@ import logging
 from pathlib import Path
 from typing import List
 from contextlib import asynccontextmanager
-
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +12,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import time
 
 import uvicorn
-
 from app.core.config import settings
 from app.api.routes import (
     rag_widget,
@@ -32,9 +30,7 @@ from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
 from app.services.prometheus_metrics import metrics
 from app.core.database import init_db
-
 load_dotenv()
-
 logger = logging.getLogger("enterprise_rag_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -124,8 +120,8 @@ allowed_origins: List[str] = [
     "http://127.0.0.1:4200",
     "http://localhost:4201",      
     "http://127.0.0.1:4201",      
-    "http://localhost:3000",      # Open WebUI
-    "http://127.0.0.1:3000",      # Open WebUI (alternative)
+    "http://localhost:3000",    
+    "http://127.0.0.1:3000",     
 ]
 extra_origins = os.getenv("ALLOWED_ORIGINS", "")
 if extra_origins:
@@ -253,23 +249,18 @@ def serve_embed_script():
     """
     Deliver the embeddable JS widget script.
     Namespaced under /widget to avoid collisions with frontend routes.
-    
     Production-ready with multiple fallback locations for robustness.
     """
     candidate_paths = [
         BASE_DIR / "app" / "static" / "embed.js",
         frontend_path / "embed.js",
-        frontend_path / "assets" / "embed.js",
-    ]
-    
+        frontend_path / "assets" / "embed.js" ]
     for p in candidate_paths:
         if p and p.exists():
             logger.info("✅ Serving embed.js from: %s", p)
             return FileResponse(p, media_type="application/javascript")
-    
     logger.warning("❌ embed.js not found in candidate locations: %s", candidate_paths)
     raise HTTPException(status_code=404, detail="embed.js not found")
-
 # ===================== SPA Fallback =====================
 if embedded_static_mounted:
     @app.get("/{full_path:path}")

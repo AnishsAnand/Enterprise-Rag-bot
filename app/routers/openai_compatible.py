@@ -1,15 +1,6 @@
 """
-Production-grade OpenAI-compatible API for Open WebUI integration.
-UPDATED: Properly formats responses with step-by-step instructions and embedded images.
-
-CRITICAL CHANGES:
-1. Added OpenWebUI formatter integration for proper markdown display
-2. Enhanced RAG search to retrieve step-by-step content with images
-3. Added intelligent routing to widget endpoint for rich content
-4. Proper streaming with formatted markdown
-5. Maintains OpenAI API compatibility
+Production-grade OpenAI-compatible API for WebUI integration.
 """
-
 from fastapi import APIRouter, HTTPException, Header, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -24,8 +15,6 @@ from datetime import datetime
 import hashlib
 import asyncio
 import httpx
-
-from app.agents import get_agent_manager
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
 from app.services.rag_search_service import rag_search_service
@@ -39,11 +28,6 @@ from app.services.openwebui_formatter import (
     format_for_openwebui,
     format_agent_response_for_openwebui,
     format_error_for_openwebui
-)
-from app.utils.token_utils import (
-    get_user_id_from_request,
-    get_token_from_request,
-    extract_user_from_token
 )
 
 logger = logging.getLogger(__name__)
@@ -72,18 +56,15 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = Field(None)
     stop: Optional[List[str]] = Field(None)
 
-
 class ChatCompletionChoice(BaseModel):
     index: int
     message: Message
     finish_reason: str
 
-
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-
 
 class ChatCompletionResponse(BaseModel):
     id: str
@@ -94,18 +75,15 @@ class ChatCompletionResponse(BaseModel):
     usage: Optional[Usage] = None
     followUps: Optional[List[str]] = None  # Follow-up suggestions for the UI
 
-
 class ModelInfo(BaseModel):
     id: str
     object: str = "model"
     created: int
     owned_by: str = "Tata Communications"
 
-
 class ModelListResponse(BaseModel):
     object: str = "list"
     data: List[ModelInfo]
-
 
 # ============================================================================
 # Helper Functions
@@ -115,17 +93,14 @@ def estimate_tokens(text: str) -> int:
     """Estimate token count (1 token ≈ 4 characters)."""
     return max(1, min(8192, max(1, len(text) // 3)))
 
-
 def create_completion_id() -> str:
     """Generate unique completion ID."""
     return f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
-
 def create_stable_session_id(user_id: str, conversation_context: str) -> str:
     """Create stable session ID for conversations."""
     context_hash = hashlib.md5(f"{user_id}:{conversation_context}".encode()).hexdigest()[:16]
-    return f"openwebui_{context_hash}"
-
+    return f"webui_{context_hash}"
 
 def create_stream_chunk(
     completion_id: str,
@@ -146,28 +121,25 @@ def create_stream_chunk(
         delta = {"content": content}
     else:
         delta = {}
-    
+
     response = {
     "id": completion_id,
     "object": "chat.completion.chunk",
     "created": int(datetime.utcnow().timestamp()),
     "model": model,
-    "choices": [choice]
-}
+    "choices": [choice]}
     
     return f"data: {json.dumps(response)}\n\n"
 
 
 # ============================================================================
-# PRODUCTION FIX: Enhanced Widget Integration
+# Widget Integration
 # ============================================================================
 
 async def get_rich_content_from_widget(
     query: str,
     user_id: Optional[str],
-    session_id: str,
-    auth_token: Optional[str] = None,
-    user_type: Optional[str] = None
+    session_id: str
 ) -> Optional[Dict[str, Any]]:
     """
     Call the widget endpoint to get rich content with steps and images.
@@ -189,7 +161,6 @@ async def get_rich_content_from_widget(
             "WIDGET_INTERNAL_URL",
             "http://127.0.0.1:8000/api/widget/query",
         )
-        
         widget_payload = {
             "query": query,
             "max_results": 10,
@@ -197,17 +168,9 @@ async def get_rich_content_from_widget(
             "enable_advanced_search": True,
             "search_depth": "balanced",
             "auto_execute": True,
-            "store_interaction": False,  # Don't store from API calls
+            "store_interaction": False,  
             "session_id": session_id,
-            "user_id": user_id or "openwebui_user"
-        }
-        
-        # Build headers - pass through auth token and user type if available
-        headers = {"Content-Type": "application/json"}
-        if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
-        if user_type:
-            headers["usertype"] = user_type
+            "user_id": user_id or "webui_user"}
         
         logger.info(f"[OpenWebUI] Calling widget endpoint for rich content: {query[:50]}")
         
@@ -218,7 +181,7 @@ async def get_rich_content_from_widget(
             if response.status_code == 200:
                 widget_response = response.json()
                 logger.info(
-                    f"[OpenWebUI] Widget returned: "
+                    f"[WebUI] Widget returned: "
                     f"steps={len(widget_response.get('steps', []))}, "
                     f"images={len(widget_response.get('images', []))}, "
                     f"confidence={widget_response.get('confidence', 0)}"
@@ -226,20 +189,20 @@ async def get_rich_content_from_widget(
                 return widget_response
             else:
                 logger.warning(
-                    f"[OpenWebUI] Widget call failed: {response.status_code}"
+                    f"[WebUI] Widget call failed: {response.status_code}"
                 )
                 return None
                 
     except httpx.TimeoutException as e:
-        logger.warning(f"[OpenWebUI] Widget call timeout after 120s: {type(e).__name__}")
+        logger.warning(f"[WebUI] Widget call timeout after 120s: {type(e).__name__}")
         return None
     except Exception as e:
-        logger.warning(f"[OpenWebUI] Widget call exception: {type(e).__name__}: {e}")
+        logger.warning(f"[WebUI] Widget call exception: {type(e).__name__}: {e}")
         return None
 
 
 # ============================================================================
-# PRODUCTION FIX: Enhanced Response Builder
+# Enhanced Response Builder
 # ============================================================================
 
 async def build_rich_response(
@@ -256,7 +219,7 @@ async def build_rich_response(
     Flow:
     1. Try widget endpoint first (gets steps + images)
     2. If widget fails, fall back to direct RAG
-    3. Format everything for OpenWebUI display
+    3. Format everything for WebUI display
     
     Args:
         query: User query
@@ -284,8 +247,8 @@ async def build_rich_response(
         # Check if this is an agent response (cluster listings, etc.)
         routed_to = widget_response.get("routed_to", "")
         if routed_to == "agent_manager":
-            logger.info(f"[OpenWebUI] Agent response detected, using specialized formatting")
-            formatted_answer = format_agent_response_for_openwebui(
+            logger.info(f"[WebUI] Agent response detected, using specialized formatting")
+            formatted_answer = format_agent_response_for_webui(
                 response_text=answer,
                 execution_result=widget_response.get("execution_result"),
                 session_id=session_id,
@@ -294,10 +257,10 @@ async def build_rich_response(
         else:
             # Regular RAG response - format with steps and images
             logger.info(
-                f"[OpenWebUI] Formatting RAG response: "
+                f"[WebUI] Formatting RAG response: "
                 f"{len(steps)} steps, {len(images)} images"
             )
-            formatted_answer = format_for_openwebui(
+            formatted_answer = format_for_webui(
                 answer=answer,
                 steps=steps,
                 images=images,
@@ -325,7 +288,7 @@ async def build_rich_response(
         }
     
     # STEP 2: Widget failed - fall back to direct RAG search
-    logger.info(f"[OpenWebUI] Widget unavailable, using direct RAG search")
+    logger.info(f"[WebUI] Widget unavailable, using direct RAG search")
     
     rag_results = await rag_search_service.search(
         query=query,
@@ -337,9 +300,9 @@ async def build_rich_response(
     
     if not has_results:
         # No results found - return formatted error
-        logger.warning(f"[OpenWebUI] No RAG results found for: {query}")
+        logger.warning(f"[WebUI] No RAG results found for: {query}")
         
-        formatted_answer = format_error_for_openwebui(
+        formatted_answer = format_error_for_webui(
             error_message=(
                 "I couldn't find relevant information in the knowledge base for your query."
             ),
@@ -384,7 +347,7 @@ async def build_rich_response(
             else 0.7
         )
     except Exception as e:
-        logger.error(f"[OpenWebUI] Enhanced response generation failed: {e}")
+        logger.error(f"[WebUI] Enhanced response generation failed: {e}")
         answer = "\n\n".join(context_texts[:2])
         confidence = 0.5
     
@@ -395,7 +358,7 @@ async def build_rich_response(
             context=context_texts[:3]
         )
     except Exception as e:
-        logger.warning(f"[OpenWebUI] Step generation failed: {e}")
+        logger.warning(f"[WebUI] Step generation failed: {e}")
         # Create basic steps from answer
         if answer:
             sentences = [s.strip() for s in answer.split(".") if s.strip()]
@@ -438,8 +401,8 @@ async def build_rich_response(
     except Exception:
         summary = (answer[:600] + "...") if answer and len(answer) > 600 else answer
     
-    # Format everything for OpenWebUI
-    formatted_answer = format_for_openwebui(
+    # Format everything for WebUI
+    formatted_answer = format_for_webui(
         answer=answer or "Unable to generate response from available context.",
         steps=steps,
         images=images,
@@ -483,7 +446,7 @@ async def chat_completions(
     PRODUCTION FEATURES:
     - Proper step-by-step instructions with embedded images
     - Agent response formatting for cluster/endpoint operations
-    - Markdown optimized for OpenWebUI display
+    - Markdown optimized for WebUI display
     - Maintains OpenAI API compatibility
     - Proper error handling and fallbacks
     """
@@ -512,33 +475,7 @@ async def chat_completions(
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
-        # Extract user ID from Keycloak token in Authorization header
-        # Falls back to request_data.user or X-User-* headers
-        user_id = get_user_id_from_request(
-            authorization=request.headers.get("Authorization"),
-            x_user_id=request.headers.get("X-User-Id"),
-            x_user_email=request.headers.get("X-User-Email"),
-            default=request_data.user or "openwebui_user"
-        )
-        
-        # Get raw token for pass-through to downstream APIs
-        # Try multiple sources: Authorization header, X-Auth-Token header, X-Access-Token header
-        auth_token = get_token_from_request(request.headers.get("Authorization"))
-        if not auth_token:
-            # Fallback: Check custom headers that OpenWebUI might use
-            auth_token = request.headers.get("X-Auth-Token") or request.headers.get("X-Access-Token")
-            if auth_token:
-                logger.info(f"🔐 Using auth token from custom header (X-Auth-Token/X-Access-Token)")
-        
-        if auth_token:
-            logger.debug(f"🔐 Auth token extracted: {auth_token[:20]}...{auth_token[-10:]}")
-        else:
-            logger.warning(f"⚠️ No auth token found in request headers. Available headers: {list(request.headers.keys())}")
-        
-        # Extract user type (ENG = Engineer, CUS = Customer)
-        user_type = request.headers.get("usertype") or request.headers.get("Usertype") or request.headers.get("X-User-Type")
-        if user_type:
-            logger.info(f"👤 User type from header: {user_type}")
+        user_id = request_data.user or "openwebui_user"
         
         # Create stable session ID for conversation continuity
         # Use the FIRST user message as the anchor for session ID (not the changing history)
@@ -561,7 +498,7 @@ async def chat_completions(
         session_id = create_stable_session_id(user_id, session_anchor)
         
         logger.info(
-            f"[OpenWebUI] Chat request - ID: {completion_id}, "
+            f"[WebUI] Chat request - ID: {completion_id}, "
             f"Query: '{query[:100]}', Session: {session_id}"
         )
         
@@ -583,7 +520,7 @@ async def chat_completions(
         follow_ups = response_data.get("followUps", [])
         
         logger.info(
-            f"[OpenWebUI] Response built - "
+            f"[WebUI] Response built - "
             f"Rich: {response_data['has_rich_content']}, "
             f"Steps: {response_data['steps_count']}, "
             f"Images: {response_data['images_count']}, "
@@ -595,9 +532,9 @@ async def chat_completions(
         # =====================================================================
         if not formatted_answer or len(formatted_answer.strip()) < 20:
             logger.error(
-                f"[OpenWebUI] Response too short or empty for query: {query}"
+                f"[WebUI] Response too short or empty for query: {query}"
             )
-            formatted_answer = format_error_for_openwebui(
+            formatted_answer = format_error_for_webui(
                 error_message=(
                     "Unable to generate a comprehensive response. "
                     "Please try rephrasing your question or contact support."
@@ -644,11 +581,6 @@ async def chat_completions(
         
         if request_data.stream:
             logger.info(f"[OpenWebUI] Streaming response ({len(formatted_answer)} chars)")
-            # For streaming, append follow-ups to the response text if available
-            streaming_content = formatted_answer
-            if follow_ups:
-                follow_up_text = "\n\n---\n\n**💡 Suggested follow-ups:**\n" + "\n".join(f"• {f}" for f in follow_ups[:5])
-                streaming_content += follow_up_text
             return StreamingResponse(
                 _stream_response(
                     completion_id, 
@@ -658,7 +590,7 @@ async def chat_completions(
                 media_type="text/event-stream; charset=utf-8"
             )
         else:
-            logger.info(f"[OpenWebUI] Non-streaming response ({len(formatted_answer)} chars)")
+            logger.info(f"[WebUI] Non-streaming response ({len(formatted_answer)} chars)")
             return ChatCompletionResponse(
                 id=completion_id,
                 created=int(start_time.timestamp()),
@@ -682,13 +614,13 @@ async def chat_completions(
             )
     
     except HTTPException as e:
-        logger.exception(f"[OpenWebUI] HTTP error: {e.detail}")
+        logger.exception(f"[WebUI] HTTP error: {e.detail}")
         raise
     except Exception as e:
-        logger.exception(f"[OpenWebUI] Unhandled error: {e}")
+        logger.exception(f"[WebUI] Unhandled error: {e}")
         
         # Return formatted error response
-        error_response = format_error_for_openwebui(
+        error_response = format_error_for_webui(
             error_message=f"An unexpected error occurred: {str(e)[:100]}",
             suggestions=[
                 "Please try again in a moment",
@@ -756,7 +688,7 @@ async def _stream_response(
     Stream response in OpenAI format with proper pacing.
     
     PRODUCTION NOTE: Streams character-by-character with small delays
-    to ensure smooth display in OpenWebUI.
+    to ensure smooth display in WebUI.
     """
     
     # Send initial chunk
@@ -825,14 +757,14 @@ async def _log_rag_query(
         db.close()
         
         logger.info(
-            f"[OpenWebUI] Query logged - "
+            f"[WebUI] Query logged - "
             f"Sources: {rag_results.get('total_results', 0)}, "
             f"Confidence: {confidence:.2f}, "
             f"Time: {execution_time:.0f}ms"
         )
     
     except Exception as e:
-        logger.exception(f"[OpenWebUI] Failed to log query: {e}")
+        logger.exception(f"[WebUI] Failed to log query: {e}")
 
 
 # ============================================================================
