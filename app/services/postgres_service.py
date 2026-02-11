@@ -711,7 +711,8 @@ class PostgresService:
     async def search_documents(
     self,
     query: str,
-    n_results: Optional[int] = None
+    n_results: Optional[int] = None,
+    source_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
         """
     Production-safe, enhanced hybrid search with:
@@ -750,7 +751,7 @@ class PostgresService:
 
         try:
         # Check cache first
-            cache_key = self._generate_cache_key(query, n_results)
+            cache_key = self._generate_cache_key(query, n_results, source_filter)
             if cache_key in self._query_cache:
                 cached_results, cache_time = self._query_cache[cache_key]
                 if (datetime.now().timestamp() - cache_time) < self._cache_ttl:
@@ -816,7 +817,8 @@ class PostgresService:
             hybrid_results = await self._hybrid_search(
             embedding_str,
             key_terms,
-            initial_k
+            initial_k,
+            source_filter=source_filter,
         )
 
             if not hybrid_results:
@@ -1034,17 +1036,35 @@ class PostgresService:
             except Exception:
                 logger.debug("⚠️ Failed to restore search_config to original values")
 
+    async def search_api_specs(
+        self,
+        query: str,
+        n_results: Optional[int] = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search only API spec documents (source='api_spec').
+        Used by IntentAgent for RAG-driven API discovery (Phase 2).
+        """
+        return await self.search_documents(
+            query=query,
+            n_results=n_results or 10,
+            source_filter="api_spec",
+        )
 
     async def _hybrid_search(
         self,
         embedding_str: str,
         key_terms: List[str],
-        limit: int
+        limit: int,
+        source_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-         Faster hybrid search with reduced candidates
+         Faster hybrid search with reduced candidates.
+         source_filter: Optional filter by source column (e.g. 'api_spec' for API specs only).
         """
         results: List[Dict[str, Any]] = []
+        source_where = " AND source = 'api_spec'" if source_filter == "api_spec" else ""
+        source_where_fts = " AND source = 'api_spec'" if source_filter == "api_spec" else ""
     
         try:
             async with self.pool.acquire() as conn:
@@ -1061,6 +1081,7 @@ class PostgresService:
                         embedding <-> $1::vector AS vector_distance,
                         1.0 / (1.0 + (embedding <-> $1::vector)) AS vector_score
                     FROM {self.table_name}
+                    WHERE 1=1{source_where}
                     ORDER BY embedding <-> $1::vector
                     LIMIT $2
                 ),
@@ -1068,7 +1089,7 @@ class PostgresService:
                     SELECT 
                         id, ts_rank_cd(content_tsv, plainto_tsquery('english', $3)) AS fts_score
                     FROM {self.table_name}
-                    WHERE content_tsv @@ plainto_tsquery('english', $3)
+                    WHERE content_tsv @@ plainto_tsquery('english', $3){source_where_fts}
                     LIMIT $2
                 )
                 SELECT DISTINCT ON (v.id)
@@ -1102,6 +1123,7 @@ class PostgresService:
                     embedding <-> $1::vector AS distance,
                     1.0 / (1.0 + (embedding <-> $1::vector)) AS vector_score
                 FROM {self.table_name}
+                WHERE 1=1{source_where}
                 ORDER BY embedding <-> $1::vector
                 LIMIT $2;
                 """
@@ -1360,9 +1382,9 @@ class PostgresService:
         
         return ' '.join(list(expanded_terms)[:30])
 
-    def _generate_cache_key(self, query: str, n_results: Optional[int]) -> str:
+    def _generate_cache_key(self, query: str, n_results: Optional[int], source_filter: Optional[str] = None) -> str:
         """Generate cache key for query."""
-        key_str = f"{query.lower().strip()}:{n_results or 10}"
+        key_str = f"{query.lower().strip()}:{n_results or 10}:{source_filter or ''}"
         return hashlib.md5(key_str.encode()).hexdigest()
 
     def _update_cache(self, cache_key: str, results: List[Dict[str, Any]]):
