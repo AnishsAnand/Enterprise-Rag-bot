@@ -843,6 +843,9 @@ Respond with ONLY ONE of these:
                             operation=intent_data.get("operation"),
                             required_params=intent_data.get("required_params", []),
                             optional_params=intent_data.get("optional_params", []))
+                        # Phase 2: Store RAG-derived api_spec for downstream agents
+                        if intent_data.get("api_spec"):
+                            state.api_spec = intent_data.get("api_spec")
                         # Add extracted parameters
                         extracted_params = intent_data.get("extracted_params", {})
                         if extracted_params:

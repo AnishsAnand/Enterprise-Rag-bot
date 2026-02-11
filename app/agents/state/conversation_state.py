@@ -75,6 +75,8 @@ class ConversationState:
         # Saved endpoint/datacenter - reused for follow-up until user explicitly changes
         self.saved_endpoints: Optional[List[int]] = None
         self.saved_endpoint_names: Optional[List[str]] = None
+        # Phase 2: RAG-derived API spec for downstream agents (method, url, params, workflow)
+        self.api_spec: Optional[str] = None
         
         logger.info(f"✅ Created conversation state for session {session_id}, user {user_id}")
     
@@ -299,6 +301,7 @@ class ConversationState:
             "selected_engagement_id": self.selected_engagement_id,
             "saved_endpoints": self.saved_endpoints,
             "saved_endpoint_names": self.saved_endpoint_names,
+            "api_spec": self.api_spec,
             "metadata": metadata
         }
     
@@ -354,6 +357,7 @@ class ConversationState:
         state.selected_engagement_id = data.get("selected_engagement_id")
         state.saved_endpoints = data.get("saved_endpoints")
         state.saved_endpoint_names = data.get("saved_endpoint_names")
+        state.api_spec = data.get("api_spec")
         
         # Restore additional attributes from metadata
         metadata = data.get("metadata", {})

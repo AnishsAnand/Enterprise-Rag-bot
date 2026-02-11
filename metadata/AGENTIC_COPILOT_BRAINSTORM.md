@@ -1,6 +1,7 @@
 # Agentic Copilot: Brainstorm & Design Document
 
-> **Phase 1 Complete (main4 branch)**: Conversion script, ingestion, and `search_api_specs()` implemented.
+> **Phase 1 Complete**: Conversion script, ingestion, and `search_api_specs()` implemented.
+> **Phase 2 Complete**: IntentAgent queries RAG for API specs, enriches params from RAG, stores api_spec in ConversationState.
 > Run `python3 -m app.scripts.ingest_api_specs` to populate RAG with API specs.
 
 ## Executive Summary

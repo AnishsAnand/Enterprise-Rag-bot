@@ -1,6 +1,9 @@
 """
 Intent Agent - Detects user intent and extracts parameters from user input.
 Identifies what resource and operation the user wants to perform.
+
+Phase 2: RAG-driven API discovery - queries search_api_specs() for API context
+and uses it to augment intent detection and param enrichment.
 """
 
 from typing import Any, Dict, List, Optional
@@ -8,10 +11,9 @@ from langchain.tools import Tool
 import logging
 import json
 import re
-import os 
+import os
 from app.agents.base_agent import BaseAgent
 from app.services.api_executor_service import api_executor_service
-
 
 logger = logging.getLogger(__name__)
 LB_NAME_PATTERN = re.compile(
@@ -44,6 +46,8 @@ class IntentAgent(BaseAgent):
         prompt = """You are the Intent Agent, specialized in detecting user intent for cloud resource operations.
 **Available Resources:**
 """ + resources_info + """
+
+**When RAG API specs are provided in Context:** Use them to inform your intent detection. The specs describe available APIs, operations, parameters, and workflows. Prefer matching the user's request to the RAG specs when relevant.
 
 **Your tasks:**
 1. **Identify the resource type** the user wants to work with (k8s_cluster, firewall, kafka, gitlab, container_registry, jenkins, postgres, documentdb, etc.)
@@ -435,6 +439,53 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             info_lines.append(f"- {resource_type}: {', '.join(operations)}")
         return "\n".join(info_lines) if info_lines else "No resources configured"
 
+    async def _fetch_rag_api_specs(self, user_input: str) -> List[Dict[str, Any]]:
+        """
+        Query RAG for API specs relevant to user input (Phase 2).
+        Returns list of search results with content, metadata.
+        """
+        try:
+            from app.services.postgres_service import postgres_service
+            if not postgres_service.pool:
+                await postgres_service.initialize()
+            if postgres_service.pool:
+                # Build query: include user input + common API keywords for better retrieval
+                query = f"{user_input} API kubernetes clusters load balancer firewall kafka"
+                results = await postgres_service.search_api_specs(query, n_results=5)
+                if results:
+                    logger.info(f"📚 RAG retrieved {len(results)} API spec chunks for intent")
+                return results or []
+        except Exception as e:
+            logger.debug(f"RAG API spec fetch skipped: {e}")
+        return []
+
+    def _parse_params_from_rag_content(self, content: str) -> Dict[str, List[str]]:
+        """Extract required and optional params from RAG markdown content."""
+        result = {"required": [], "optional": []}
+        if not content:
+            return result
+        req_section = re.search(r"## Required Parameters\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE)
+        if req_section:
+            result["required"] = re.findall(r"`([a-zA-Z0-9_]+)`", req_section.group(1))
+        opt_section = re.search(r"## Optional Parameters\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE)
+        if opt_section:
+            result["optional"] = re.findall(r"`([a-zA-Z0-9_]+)`", opt_section.group(1))
+        return result
+
+    def _find_matching_rag_chunk(self, results: List[Dict], resource_type: str, operation: str) -> Optional[Dict]:
+        """Find RAG chunk that matches resource_type and operation."""
+        resource_type = (resource_type or "").lower()
+        operation = (operation or "").lower()
+        for r in results:
+            content = r.get("content", "")
+            meta = r.get("metadata", {})
+            title = (meta.get("title") or "").lower()
+            if resource_type in content.lower() and operation in content.lower():
+                return r
+            if resource_type in title and operation in title:
+                return r
+        return results[0] if results else None
+
     def get_tools(self) -> List[Tool]:
         """Return tools for intent agent."""
         return [
@@ -642,8 +693,20 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "intent_data": intent_data,
                 "output": "Deterministic intent detection applied"}
 
-        # 2) Otherwise call LLM via parent agent
-            result = await super().execute(input_text, context)
+        # 2) RAG-first: fetch API specs to augment intent (Phase 2)
+            rag_results = await self._fetch_rag_api_specs(input_text)
+            exec_context = dict(context) if context else {}
+            if rag_results:
+                rag_snippets = []
+                for i, r in enumerate(rag_results[:5]):
+                    content = (r.get("content") or "")[:1200]
+                    if content:
+                        rag_snippets.append(f"--- API Spec {i+1} ---\n{content}")
+                if rag_snippets:
+                    exec_context["rag_api_specs"] = "\n\n".join(rag_snippets)
+                    logger.info(f"📚 Including {len(rag_snippets)} RAG API specs in intent prompt")
+            # 3) Call LLM via parent agent with RAG context
+            result = await super().execute(input_text, exec_context)
         # Support common possible keys for text output
             output_text = result.get("output") or result.get("text") or result.get("response") or ""
         # 3) Parse intent JSON robustly
@@ -658,28 +721,40 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 "confidence": 0.0,
                 "ambiguities": [],
                 "clarification_needed": None }
-        # 4) If intent detected, enrich with operation/schema info (defensive)
+        # 4) If intent detected, enrich with params from RAG (preferred) or schema (fallback)
             if intent_data.get("intent_detected"):
                 resource_type = intent_data.get("resource_type")
                 operation = intent_data.get("operation")
-            # Normalize: if resource_type is list, pick first for lookup
                 lookup_resource_type = resource_type[0] if isinstance(resource_type, list) and resource_type else resource_type
                 if lookup_resource_type and operation:
-                    try:
-                        operation_config = api_executor_service.get_operation_config(
-                        lookup_resource_type, operation)
-                        if operation_config:
-                            params = operation_config.get("parameters", {})
-                            intent_data.setdefault("required_params", params.get("required", []))
-                            intent_data.setdefault("optional_params", params.get("optional", []))
+                    # Prefer RAG when we have matching API spec
+                    rag_chunk = self._find_matching_rag_chunk(rag_results, lookup_resource_type, operation) if rag_results else None
+                    if rag_chunk:
+                        content = rag_chunk.get("content", "")
+                        parsed = self._parse_params_from_rag_content(content)
+                        if parsed["required"] or parsed["optional"]:
+                            intent_data.setdefault("required_params", parsed["required"])
+                            intent_data.setdefault("optional_params", parsed["optional"])
+                            intent_data["api_spec"] = content[:2000]  # Store for downstream agents
                             logger.info(
-                            "✅ Intent detected: %s %s | required=%s",
-                            operation, lookup_resource_type, intent_data["required_params"])
-                        else:
-                            logger.warning("⚠️ No operation config found for %s.%s", lookup_resource_type, operation)
-                    except Exception as e:
-                    # Don't fail the whole function if enrichment fails
-                        logger.warning("⚠️ Failed to enrich intent with schema: %s", str(e))
+                                "✅ Intent enriched from RAG: %s %s | required=%s",
+                                operation, lookup_resource_type, intent_data["required_params"])
+                    # Fallback to schema when RAG has no params
+                    if not intent_data.get("required_params") and not intent_data.get("optional_params"):
+                        try:
+                            operation_config = api_executor_service.get_operation_config(
+                                lookup_resource_type, operation)
+                            if operation_config:
+                                params = operation_config.get("parameters", {})
+                                intent_data.setdefault("required_params", params.get("required", []))
+                                intent_data.setdefault("optional_params", params.get("optional", []))
+                                logger.info(
+                                    "✅ Intent enriched from schema: %s %s | required=%s",
+                                    operation, lookup_resource_type, intent_data["required_params"])
+                            else:
+                                logger.warning("⚠️ No operation config found for %s.%s", lookup_resource_type, operation)
+                        except Exception as e:
+                            logger.warning("⚠️ Failed to enrich intent with schema: %s", str(e))
         # 5) Return standardized final result
             return {
             "agent_name": self.agent_name,

@@ -86,6 +86,7 @@ class ConversationSessionRecord(SessionBase):
             "agent_handoffs": self.agent_handoffs or [],
             "saved_endpoints": extra.get("saved_endpoints"),
             "saved_endpoint_names": extra.get("saved_endpoint_names"),
+            "api_spec": extra.get("api_spec"),
             "metadata": extra}
 
 class MemoriSessionManager:
@@ -188,6 +189,7 @@ class MemoriSessionManager:
                 extra = state_dict.get("metadata", {})
                 extra["saved_endpoints"] = state_dict.get("saved_endpoints")
                 extra["saved_endpoint_names"] = state_dict.get("saved_endpoint_names")
+                extra["api_spec"] = state_dict.get("api_spec")
                 record.extra_data = extra
             else:
                 # Create new record
@@ -217,7 +219,8 @@ class MemoriSessionManager:
                     extra_data={
                         **dict(state_dict.get("metadata", {})),
                         "saved_endpoints": state_dict.get("saved_endpoints"),
-                        "saved_endpoint_names": state_dict.get("saved_endpoint_names")
+                        "saved_endpoint_names": state_dict.get("saved_endpoint_names"),
+                        "api_spec": state_dict.get("api_spec")
                     })
                 db.add(record)
             db.commit()
