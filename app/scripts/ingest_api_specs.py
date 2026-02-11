@@ -35,7 +35,7 @@ async def ingest_api_specs(schema_path: str = None) -> int:
     """
     if not schema_path:
         schema_path = str(
-            Path(__file__).resolve().parent.parent / "config" / "resource_schema.json"
+            Path(__file__).resolve().parent.parent.parent / "metadata" / "resource_schema_backup.json"
         )
 
     if not os.path.exists(schema_path):

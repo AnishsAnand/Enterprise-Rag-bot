@@ -6,7 +6,7 @@ Phase 2: RAG-driven API discovery - queries search_api_specs() for API context
 and uses it to augment intent detection and param enrichment.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from langchain.tools import Tool
 import logging
 import json
@@ -20,6 +20,9 @@ LB_NAME_PATTERN = re.compile(
     r"(EG_.*?_LB_SEG_\d+|LB_.*?\d+)",
     re.IGNORECASE)
 DETAILS_KEYWORDS = re.compile(r"\b(details?|info|show|describe)\b", re.IGNORECASE)
+
+# Module-level cache: resource_type -> list of operations (populated from RAG at execute time)
+_rag_resource_index: Dict[str, List[str]] = {}
 
 class IntentAgent(BaseAgent):
     """
@@ -35,7 +38,7 @@ class IntentAgent(BaseAgent):
                 "Extracts parameters from natural language input."
             ),
             temperature=0.1)
-        # Load resource schema
+        # Load resource schema (empty when using RAG-only Phase 3)
         self.resource_schema = api_executor_service.resource_schema
         # Setup agent
         self.setup_agent()
@@ -380,6 +383,16 @@ User: "Show 30 records of cluster report" or "Display 50 rows of common cluster 
 → intent_detected: true, resource_type: reports, operation: list, extracted_params: {{report_type: cluster_inventory, size: 30}} or {{report_type: common_cluster, size: 50}}
 NOTE: ALWAYS use "size" for record count, never "limit", "count", "record_count", etc.
 
+**Engagement Listing Examples (NOT business_unit):**
+
+User: "List engagements" or "Show engagements" or "What engagements do I have?"
+→ intent_detected: true, resource_type: engagement, operation: list, extracted_params: empty
+
+User: "List my engagements" or "Show all engagements" or "Which engagements are available?"
+→ intent_detected: true, resource_type: engagement, operation: list, extracted_params: empty
+
+NOTE: "engagement" = account/tenant selection (e.g. Tata Communications, Vayu Cloud). "business_unit" = department/BU within an engagement. Do NOT confuse "list engagements" with "list BUs".
+
 **Endpoint/Datacenter Listing Examples:**
 
 User: "What are the available endpoints?" or "List endpoints"
@@ -431,13 +444,63 @@ Be precise in detecting intent and operation. Only extract parameters that you c
     
         return prompt
     def _get_resources_info(self) -> str:
-        """Get formatted information about available resources."""
+        """Get formatted information about available resources (schema or RAG-derived)."""
         resources = self.resource_schema.get("resources", {})
-        info_lines = []
-        for resource_type, config in resources.items():
-            operations = config.get("operations", [])
-            info_lines.append(f"- {resource_type}: {', '.join(operations)}")
-        return "\n".join(info_lines) if info_lines else "No resources configured"
+        if resources:
+            info_lines = []
+            for resource_type, config in resources.items():
+                operations = config.get("operations", [])
+                info_lines.append(f"- {resource_type}: {', '.join(operations)}")
+            return "\n".join(info_lines)
+        # Phase 3: RAG-only mode - use index populated from RAG at execute time
+        if _rag_resource_index:
+            return "\n".join(
+                f"- {r}: {', '.join(ops)}" for r, ops in sorted(_rag_resource_index.items())
+            )
+        return "Resources are discovered from RAG API specs at runtime. See Context for available resources and operations."
+
+    def _parse_resource_operation_from_chunk(self, content: str) -> Optional[Tuple[str, str]]:
+        """Extract (resource, operation) from RAG chunk content with **Resource:** and **Operation:**."""
+        if not content:
+            return None
+        res = re.search(r"\*\*Resource:\*\*\s*([a-zA-Z0-9_]+)", content, re.IGNORECASE)
+        op = re.search(r"\*\*Operation:\*\*\s*([a-zA-Z0-9_]+)", content, re.IGNORECASE)
+        if res and op:
+            return (res.group(1).lower(), op.group(1).lower())
+        return None
+
+    async def _ensure_rag_resource_index(self) -> None:
+        """
+        Populate RAG resource index from API spec chunks (no hardcoded resources).
+        Called at execute start so tools have resource→operations mapping.
+        """
+        global _rag_resource_index
+        if _rag_resource_index:
+            return
+        try:
+            from app.services.postgres_service import postgres_service
+            if not postgres_service.pool:
+                await postgres_service.initialize()
+            if not postgres_service.pool:
+                return
+            results = await postgres_service.search_api_specs(
+                "API specification resource list create read update delete", n_results=50
+            )
+            index: Dict[str, List[str]] = {}
+            for r in results:
+                content = r.get("content", "")
+                parsed = self._parse_resource_operation_from_chunk(content)
+                if parsed:
+                    resource, op = parsed
+                    if resource not in index:
+                        index[resource] = []
+                    if op not in index[resource]:
+                        index[resource].append(op)
+            _rag_resource_index = index
+            if index:
+                logger.info(f"📚 RAG resource index populated: {len(index)} resources")
+        except Exception as e:
+            logger.debug(f"RAG resource index failed: {e}")
 
     async def _fetch_rag_api_specs(self, user_input: str) -> List[Dict[str, Any]]:
         """
@@ -449,8 +512,8 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             if not postgres_service.pool:
                 await postgres_service.initialize()
             if postgres_service.pool:
-                # Build query: include user input + common API keywords for better retrieval
-                query = f"{user_input} API kubernetes clusters load balancer firewall kafka"
+                # Build query: user input + "API" to bias toward API spec chunks
+                query = f"{user_input} API" if user_input.strip() else "API"
                 results = await postgres_service.search_api_specs(query, n_results=5)
                 if results:
                     logger.info(f"📚 RAG retrieved {len(results)} API spec chunks for intent")
@@ -513,13 +576,13 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                     "Input: JSON with resource_type and operation")) ]
 
     def _get_resource_schema(self, resource_type: str) -> str:
-        """Get schema for a resource type."""
+        """Get schema for a resource type (from schema or RAG)."""
         try:
             config = api_executor_service.get_resource_config(resource_type)
-            if not config:
-                return f"Resource type '{resource_type}' not found"
-            
-            return json.dumps(config, indent=2)
+            if config:
+                return json.dumps(config, indent=2)
+            # Phase 3: Schema empty - API specs are in RAG; return helpful message
+            return f"Resource '{resource_type}' - API specs are loaded from RAG. Use intent detection for operation and params."
         except Exception as e:
             return f"Error getting resource schema: {str(e)}"
     
@@ -529,12 +592,9 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             data = json.loads(input_json)
             user_text = data.get("user_text", "")
             resource_type = data.get("resource_type", "")
-            # Get parameter definitions
             config = api_executor_service.get_resource_config(resource_type)
-            if not config:
-                return json.dumps({"error": "Resource type not found"})
-            # Simple parameter extraction (can be enhanced with NER)
             extracted = {}
+            # Simple parameter extraction (can be enhanced with NER)
             # Extract common patterns
             # Name patterns
             name_match = re.search(r'(?:named|name is|called)\s+([a-zA-Z0-9-_]+)', user_text, re.IGNORECASE)
@@ -556,11 +616,18 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         """Validate if operation is supported for resource."""
         try:
             data = json.loads(input_json)
-            resource_type = data.get("resource_type", "")
-            operation = data.get("operation", "")
+            resource_type = (data.get("resource_type", "") or "").lower()
+            operation = (data.get("operation", "") or "").lower()
             config = api_executor_service.get_resource_config(resource_type)
             if not config:
-                return json.dumps({"valid": False, "error": "Resource type not found"})
+                # Phase 3: Use RAG-derived operations (no hardcoded list)
+                operations = _rag_resource_index.get(resource_type, [])
+                # engagement: list and get are equivalent (same API returns engagements list)
+                if resource_type == "engagement" and operation == "list" and "get" in operations:
+                    valid = True
+                else:
+                    valid = operation in operations if operations else False
+                return json.dumps({"valid": valid, "supported_operations": operations})
             operations = config.get("operations", [])
             valid = operation in operations
             return json.dumps({
@@ -635,6 +702,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
     - Otherwise call the LLM via parent, parse output robustly, enrich with schema info.
     - On internal error, return a SAFE fallback that does NOT auto-run potentially destructive operations.
     """
+        await self._ensure_rag_resource_index()
         if LB_NAME_PATTERN.search(input_text):
             if DETAILS_KEYWORDS.search(input_text):
                 operation = "get_details"

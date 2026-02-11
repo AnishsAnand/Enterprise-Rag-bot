@@ -637,6 +637,15 @@ If NO location is mentioned in user's response:
             if state.operation == "create" and state.resource_type == "k8s_cluster":
                 logger.info("🎯 Routing to customer cluster creation workflow")
                 return await self._handle_cluster_creation(input_text, state)
+            # Engagement list: no params needed, proceed directly
+            if state.operation == "list" and state.resource_type == "engagement":
+                logger.info("🎯 Engagement listing - no params needed, ready to execute")
+                return {
+                    "agent_name": self.agent_name,
+                    "success": True,
+                    "output": "Fetching available engagements...",
+                    "ready_to_execute": True
+                }
             if state.missing_params:
                 # SPECIAL HANDLING FOR ENDPOINT LISTING 
                 if state.operation == "list" and state.resource_type == "endpoint":

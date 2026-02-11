@@ -21,6 +21,10 @@ class GenericResourceAgent(BaseResourceAgent):
             "list": "list_endpoints",
             "display_name": "Endpoints/Datacenters"
         },
+        "engagement": {
+            "list": "get_engagements_list",
+            "display_name": "Engagements"
+        },
         "business_unit": {
             "list": "get_business_units_list",
             "display_name": "Business Units"
@@ -110,12 +114,22 @@ class GenericResourceAgent(BaseResourceAgent):
                     auth_token=auth_token, 
                     user_id=user_id
                 )
+            elif method_name == "get_engagements_list":
+                engagements = await api_executor_service.get_engagements_list(
+                    auth_token=auth_token,
+                    user_id=user_id
+                )
+                result = {"success": True, "data": engagements} if engagements else {"success": False, "error": "No engagements found"}
             elif method_name == "get_business_units_list":
+                endpoint_ids = params.get("endpoints") or params.get("endpoint_ids") or []
+                if isinstance(endpoint_ids, int):
+                    endpoint_ids = [endpoint_ids]
                 result = await api_executor_service.get_business_units_list(
                     ipc_engagement_id=None,
                     paas_engagement_id=selected_engagement_id,
                     user_id=user_id,
-                    auth_token=auth_token
+                    auth_token=auth_token,
+                    endpoint_ids=endpoint_ids
                 )
             elif method_name == "get_environments_list":
                 result = await api_executor_service.get_environments_list(

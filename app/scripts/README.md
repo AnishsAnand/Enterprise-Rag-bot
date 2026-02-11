@@ -1,6 +1,20 @@
 # Agentic Copilot Scripts
 
-Phase 1 of the RAG-driven agentic migration.
+Phase 1 + 2 of the RAG-driven agentic migration.
+
+## Quick Test (after ingest)
+
+```bash
+# 1. Ingest API specs (once)
+python3 -m app.scripts.ingest_api_specs
+
+# 2. Test RAG search only (no LLM)
+python3 -m app.scripts.test_rag_intent --rag-only
+
+# 3. Test full intent flow (RAG + LLM)
+python3 -m app.scripts.test_rag_intent "list clusters"
+python3 -m app.scripts.test_rag_intent "show load balancers"
+```
 
 ## Scripts
 
@@ -55,7 +69,32 @@ results = await postgres_service.search_documents(
 - [x] Ingest into RAG with `source="api_spec"`
 - [x] `search_api_specs()` and `source_filter` in `search_documents()`
 
-## Next: Phase 2
+## Phase 2 Checklist
 
-IntentAgent will query RAG for API specs before/during intent detection.
-See `metadata/AGENTIC_COPILOT_BRAINSTORM.md`.
+- [x] IntentAgent queries RAG via `search_api_specs()` before LLM
+- [x] RAG context included in intent prompt
+- [x] Params parsed from RAG when matching chunk found; schema fallback
+- [x] `api_spec` stored in ConversationState for downstream agents
+
+## Phase 3 Checklist
+
+- [x] `resource_schema.json` removed from `app/config/`
+- [x] Schema backup at `metadata/resource_schema_backup.json` for convert/ingest
+- [x] APIExecutorService uses RAG via `get_operation_config_async()` for execution
+- [x] IntentAgent uses static resource list when schema empty
+
+## Full App Test
+
+Start the app and use the chat UI or API:
+
+```bash
+# Start backend (adjust for your setup)
+uvicorn app.main:app --reload
+
+# Or via docker-compose
+docker-compose up -d
+```
+
+Then try: "list clusters", "show me load balancers", "list endpoints". Check logs for:
+- `📚 RAG retrieved N API spec chunks for intent`
+- `✅ Intent enriched from RAG` (when RAG provides params)

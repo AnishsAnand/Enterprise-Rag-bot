@@ -24,11 +24,11 @@ class APIExecutorService:
         Args:
             resource_schema_path: Path to resource schema JSON file
         """
-        self.resource_schema_path = resource_schema_path or os.path.join(
-            os.path.dirname(__file__), "../config/resource_schema.json")
-        self.resource_schema: Dict[str, Any] = {}
+        # Phase 3: RAG is source of truth. Schema file removed; config loaded from RAG at runtime.
+        self.resource_schema_path = resource_schema_path  # Optional override for tests
+        self.resource_schema: Dict[str, Any] = {"resources": {}}
         self.http_client: Optional[httpx.AsyncClient] = None
-        self._load_resource_schema()
+        # No file load - all config from RAG via get_operation_config_async()
         # API configuration
         self.api_timeout = float(os.getenv("API_EXECUTOR_TIMEOUT", "30"))
         self.max_retries = int(os.getenv("API_EXECUTOR_MAX_RETRIES", "3"))
@@ -52,6 +52,9 @@ class APIExecutorService:
         self.cached_engagement: Optional[Dict[str, Any]] = None
         self.engagement_cache_time: Optional[datetime] = None
         self.engagement_cache_duration = timedelta(hours=1)  
+        # RAG fallback cache (Phase 3) - always init even when schema is empty
+        self._rag_operation_cache: Dict[tuple, Dict[str, Any]] = {}
+        self._rag_cache_lock = asyncio.Lock()
         logger.info("✅ APIExecutorService initialized")
 
     def _load_resource_schema(self) -> None:
@@ -66,6 +69,89 @@ class APIExecutorService:
         except json.JSONDecodeError as e:
             logger.error(f"❌ Failed to parse resource schema: {str(e)}")
             self.resource_schema = {"resources": {}}
+    
+    def _parse_rag_content_to_operation_config(self, content: str) -> Optional[Dict[str, Any]]:
+        """Parse RAG markdown content to operation config (endpoint, parameters, permissions)."""
+        if not content or len(content) < 20:
+            return None
+        try:
+            method = "GET"
+            url = ""
+            method_match = re.search(r"\*\*Method:\*\*\s*(\w+)", content, re.IGNORECASE)
+            if method_match:
+                method = method_match.group(1).upper()
+            url_match = re.search(r"\*\*URL:\*\*\s*(\S+)", content, re.IGNORECASE)
+            if url_match:
+                url = url_match.group(1).strip()
+            if not url:
+                return None
+            required = []
+            req_section = re.search(r"## Required Parameters\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE)
+            if req_section:
+                required = re.findall(r"`([a-zA-Z0-9_]+)`", req_section.group(1))
+                if "None" in required:
+                    required = []
+            optional = []
+            opt_section = re.search(r"## Optional Parameters\s*\n(.*?)(?=##|$)", content, re.DOTALL | re.IGNORECASE)
+            if opt_section:
+                optional = re.findall(r"`([a-zA-Z0-9_]+)`", opt_section.group(1))
+                if "None" in optional:
+                    optional = []
+            permissions = ["admin", "developer", "viewer"]
+            perm_section = re.search(r"## Permissions\s*\n.*?Roles:\s*([^\n]+)", content, re.IGNORECASE)
+            if perm_section:
+                perm_str = perm_section.group(1).strip()
+                if perm_str and perm_str.lower() != "none":
+                    permissions = [p.strip() for p in perm_str.split(",")]
+            streaming = "stream" in url.lower() or "streaming" in content.lower()
+            return {
+                "endpoint": {"method": method, "url": url, "streaming": streaming},
+                "parameters": {"required": required, "optional": optional},
+                "permissions": permissions,
+            }
+        except Exception as e:
+            logger.debug(f"Failed to parse RAG content: {e}")
+            return None
+    
+    async def _get_operation_config_from_rag(self, resource_type: str, operation: str) -> Optional[Dict[str, Any]]:
+        """Fetch operation config from RAG when schema is empty."""
+        cache_key = (resource_type, operation)
+        async with self._rag_cache_lock:
+            if cache_key in self._rag_operation_cache:
+                return self._rag_operation_cache[cache_key]
+        try:
+            from app.services.postgres_service import postgres_service
+            if not postgres_service.pool:
+                await postgres_service.initialize()
+            if not postgres_service.pool:
+                return None
+            query = f"{resource_type} {operation} API"
+            results = await postgres_service.search_api_specs(query, n_results=3)
+            for r in results:
+                content = r.get("content", "")
+                if resource_type.lower() in content.lower() and operation.lower() in content.lower():
+                    config = self._parse_rag_content_to_operation_config(content)
+                    if config:
+                        async with self._rag_cache_lock:
+                            self._rag_operation_cache[cache_key] = config
+                        logger.info(f"📚 Loaded {resource_type}.{operation} from RAG")
+                        return config
+            if results:
+                config = self._parse_rag_content_to_operation_config(results[0].get("content", ""))
+                if config:
+                    async with self._rag_cache_lock:
+                        self._rag_operation_cache[cache_key] = config
+                    return config
+        except Exception as e:
+            logger.debug(f"RAG config fetch failed: {e}")
+        return None
+    
+    async def get_operation_config_async(self, resource_type: str, operation: str) -> Optional[Dict[str, Any]]:
+        """Get operation config from schema or RAG (Phase 3)."""
+        config = self.get_operation_config(resource_type, operation)
+        if config:
+            return config
+        return await self._get_operation_config_from_rag(resource_type, operation)
     
     def _get_user_id_from_email(self, email: str = None) -> str:
         """
@@ -1485,17 +1571,24 @@ class APIExecutorService:
                 "permissions": permissions}
         return None
     
-    def validate_parameters(self,resource_type: str,operation: str,params: Dict[str, Any]) -> Dict[str, Any]:
+    def _check_permissions_with_config(self, operation_config: Dict[str, Any], user_roles: List[str]) -> bool:
+        """Check permissions using provided operation_config."""
+        required_permissions = operation_config.get("permissions", [])
+        return any(role in required_permissions for role in user_roles)
+    
+    def validate_parameters(self,resource_type: str,operation: str,params: Dict[str, Any],operation_config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Validate parameters for an operation.
         Args:
             resource_type: Type of resource
             operation: Operation name
             params: Parameters to validate
+            operation_config: Optional pre-fetched config (avoids re-lookup)
         Returns:
             Dict with 'valid' bool and 'errors' list
         """
-        operation_config = self.get_operation_config(resource_type, operation)
+        if operation_config is None:
+            operation_config = self.get_operation_config(resource_type, operation)
         if not operation_config:
             return {
                 "valid": False,
@@ -1575,7 +1668,6 @@ class APIExecutorService:
         operation_config = self.get_operation_config(resource_type, operation)
         if not operation_config:
             return False
-
         required_permissions = operation_config.get("permissions", [])
         # Check if user has any of the required roles
         has_permission = any(role in required_permissions for role in user_roles)
@@ -1620,7 +1712,7 @@ class APIExecutorService:
                 logger.warning(f"⚠️ No API credentials found for user: {user_id}, using default/env")
         
         try:
-            operation_config = self.get_operation_config(resource_type, operation)
+            operation_config = await self.get_operation_config_async(resource_type, operation)
             if not operation_config:
                 return {
                     "success": False,
@@ -1628,7 +1720,7 @@ class APIExecutorService:
                     "timestamp": start_time.isoformat()}
             
             if user_roles is not None:
-                if not self.check_permissions(resource_type, operation, user_roles):
+                if not self._check_permissions_with_config(operation_config, user_roles):
                     is_read_only = user_roles == ["viewer"]
                     is_write_operation = operation in ["create", "update", "delete", "provision"]
                     if is_read_only and is_write_operation:
@@ -1654,8 +1746,9 @@ class APIExecutorService:
                             "required_permissions": operation_config.get("permissions", []),
                             "your_permissions": user_roles,
                             "timestamp": start_time.isoformat()}
-            # Validate parameters
-            validation_result = self.validate_parameters(resource_type, operation, params)
+            # Validate parameters (pass operation_config to avoid re-lookup)
+            validation_result = self.validate_parameters(
+                resource_type, operation, params, operation_config=operation_config)
             if not validation_result["valid"]:
                 return {
                     "success": False,
@@ -2403,7 +2496,7 @@ class APIExecutorService:
         logger.info(f"🔌 Fetching circuit ID for engagement {engagement_id}")
         return "E-IPCTEAM-1602"
     
-    async def get_business_units_list(self, ipc_engagement_id: int = None, paas_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Dict[str, Any]:
+    async def get_business_units_list(self, ipc_engagement_id: int = None, paas_engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None, endpoint_ids: List[int] = None) -> Dict[str, Any]:
         """
         Get business units (departments) listing for engagement.
         Uses per-user session storage to avoid repeated API calls.
@@ -2413,6 +2506,7 @@ class APIExecutorService:
             user_id: User ID (email) for session lookup
             force_refresh: Force fetch even if cached
             auth_token: Bearer token from UI for API authentication
+            endpoint_ids: Optional list of endpoint IDs to filter BUs by datacenter (e.g. [12] for Bengaluru)
         Returns:
             Dict with business units data including zones, environments, and VMs count
         """
@@ -2471,14 +2565,24 @@ class APIExecutorService:
                     engagement_info = data.get("data", {}).get("engagement", {})
                     bu_data = data.get("data")
                     logger.info(f"🏢 API returned {len(departments)} departments for engagement: {engagement_info}")
+                    # Filter by endpoint/datacenter if requested (e.g. BUs in Bengaluru only)
+                    did_filter = False
+                    if endpoint_ids:
+                        endpoint_ids_set = set(int(e) for e in endpoint_ids if e is not None)
+                        dept_count_before = len(departments)
+                        departments = [d for d in departments if d.get("endpoint", {}).get("id") in endpoint_ids_set]
+                        bu_data = dict(bu_data, department=departments) if isinstance(bu_data, dict) else bu_data
+                        did_filter = dept_count_before != len(departments)
+                        logger.info(f"🏢 Filtered by endpoints {endpoint_ids}: {dept_count_before} -> {len(departments)} BUs")
                     # Log first few departments for debugging
                     if departments:
                         for dept in departments[:3]:
                             logger.info(f"🏢 Sample dept: {dept.get('name')} (ID: {dept.get('id')}, endpoint: {dept.get('endpoint')})")
-                    # Update user session with business units data
-                    await self._update_user_session(
-                        user_id=user_id,
-                        business_units=bu_data)
+                    # Update user session with business units data (only cache unfiltered to avoid wrong cache hits)
+                    if not did_filter:
+                        await self._update_user_session(
+                            user_id=user_id,
+                            business_units=bu_data)
                     logger.info(f"✅ Cached {len(departments)} business units for engagement '{engagement_info.get('name')}'")
                     return {
                         "success": True,

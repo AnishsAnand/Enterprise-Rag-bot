@@ -69,6 +69,7 @@ class ExecutionAgent(BaseAgent):
             
             # Generic (fallback for other resources)
             "endpoint": self.generic_agent,
+            "engagement": self.generic_agent,
             "business_unit": self.generic_agent,
             "environment": self.generic_agent,
             "zone": self.generic_agent,}
@@ -288,7 +289,13 @@ All operations are routed through specialized resource agents for proper handlin
             
             user_type = state.user_type or context.get("user_type") if context else None
             
-            if state.resource_type in resources_needing_engagement and not state.selected_engagement_id:
+            # Skip engagement check when listing engagements (no selection needed for that)
+            needs_check = (
+                state.resource_type in resources_needing_engagement
+                and not (state.resource_type == "engagement" and state.operation == "list")
+                and not state.selected_engagement_id
+            )
+            if needs_check:
                 logger.info(f"🏢 Resource {state.resource_type} needs engagement ID - user_type={user_type}")
                 
                 # Fetch engagements

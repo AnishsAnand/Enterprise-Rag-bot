@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 # Default paths
-DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "config" / "resource_schema.json"
+# Phase 3: Schema moved to metadata (RAG is source of truth; backup for convert/ingest)
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parent.parent.parent / "metadata" / "resource_schema_backup.json"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "metadata" / "api_spec_chunks"
 
 

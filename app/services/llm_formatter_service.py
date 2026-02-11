@@ -399,6 +399,7 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
         """
         try:
             emoji_map = {
+                "engagement": "🏢",
                 "business_unit": "📁",
                 "environment": "🌍",
                 "k8s_cluster": "🚢",
@@ -436,6 +437,14 @@ End with: "💡 **Tip:** Ask about a specific cluster by name for more details."
         if not items:
             return ""
         # Resource-specific column extraction
+        if resource_type == "engagement":
+            rows = []
+            for i, m in enumerate(items, 1):
+                name = m.get("engagementName") or m.get("name") or "N/A"
+                eng_id = m.get("id") or "N/A"
+                cust = m.get("customerName") or m.get("customer") or "N/A"
+                rows.append(f"| {i} | {name} | {eng_id} | {cust} |")
+            return "| # | Engagement | ID | Customer |\n|---|---:|---:|---|\n" + "\n".join(rows)
         if resource_type == "business_unit":
             rows = []
             for i, m in enumerate(items, 1):

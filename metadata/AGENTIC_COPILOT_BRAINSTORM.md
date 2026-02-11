@@ -1,8 +1,8 @@
 # Agentic Copilot: Brainstorm & Design Document
 
-> **Phase 1 Complete**: Conversion script, ingestion, and `search_api_specs()` implemented.
-> **Phase 2 Complete**: IntentAgent queries RAG for API specs, enriches params from RAG, stores api_spec in ConversationState.
-> Run `python3 -m app.scripts.ingest_api_specs` to populate RAG with API specs.
+> **Phase 1–3 Complete**: RAG is source of truth. `resource_schema.json` removed from config.
+> Schema backup at `metadata/resource_schema_backup.json` for convert/ingest scripts only.
+> APIExecutorService loads operation config from RAG at runtime via `get_operation_config_async()`.
 
 ## Executive Summary
 
