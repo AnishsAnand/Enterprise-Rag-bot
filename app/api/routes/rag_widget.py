@@ -58,6 +58,10 @@ class BulkScrapeRequest(BaseModel):
     base_url: HttpUrl
     max_depth: int = Field(default=8, ge=1, le=20)
     max_urls: int = Field(default=500, ge=1, le=3000)
+    seed_urls: Optional[List[str]] = Field(
+        default=None,
+        description="Additional URLs to always scrape (merged with discovered URLs)"
+    )
     auto_store: bool = True
     domain_filter: Optional[str] = None
     follow_external_links: bool = Field(
@@ -1790,7 +1794,9 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
         session_id = await _get_or_create_session_id(request)
         
         # Agent routing (if not force_rag_only)
-        if not request.force_rag_only:
+        if request.force_rag_only:
+            should_route_to_agent = False
+        else:
             should_route_to_agent = await _should_route_to_agent(query, session_id)
         
         # ==================== STEP 3: Route to Agent Manager if Applicable ====================
@@ -3035,6 +3041,15 @@ async def widget_bulk_scrape(request: BulkScrapeRequest, background_tasks: Backg
                 f"(same domain only: {base_domain})"
             )
             discovered_urls = same_domain_urls
+
+        # Merge seed URLs (guarantee critical docs like zones are scraped)
+        if request.seed_urls:
+            seed_set = {u.strip() for u in request.seed_urls if u and u.strip()}
+            before = len(discovered_urls)
+            discovered_urls = list(set(discovered_urls) | seed_set)
+            logger.info(
+                f"🌱 Merged {len(seed_set)} seed URLs: {before} → {len(discovered_urls)} total"
+            )
 
         # Start bulk scraping task
         background_tasks.add_task(

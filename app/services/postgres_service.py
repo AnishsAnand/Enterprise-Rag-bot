@@ -1453,8 +1453,23 @@ class PostgresService:
                 "error": str(e)
             }
 
+    async def truncate_table(self) -> None:
+        """Clear all rows from the table (keeps table structure). Faster than delete_collection."""
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                exists = await self._table_exists(conn)
+                if exists:
+                    await conn.execute(f"TRUNCATE TABLE {self.table_name};")
+                    logger.info(f"✅ Truncated table: {self.table_name}")
+                self._query_cache.clear()
+                self._embedding_cache.clear()
+        except Exception as e:
+            logger.exception(f"❌ Truncate error: {e}")
+
     async def delete_collection(self) -> None:
-        """Delete the entire table."""
+        """Delete the entire table (DROP). Use truncate_table for faster clear+retrain."""
         if not self.pool:
             return
 

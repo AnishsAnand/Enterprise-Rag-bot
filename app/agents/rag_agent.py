@@ -110,10 +110,10 @@ Always be helpful, accurate, and transparent about the source of your informatio
             # Create request for existing RAG system
             widget_req = WidgetQueryRequest(
                 query=query,
-                max_results=5,
+                max_results=20,
                 include_sources=True,
                 enable_advanced_search=True,
-                search_depth="balanced",
+                search_depth="deep",
                 auto_execute=False, 
                 store_interaction=False)
             
@@ -149,10 +149,10 @@ Always be helpful, accurate, and transparent about the source of your informatio
             # Create request for existing RAG system
             widget_req = WidgetQueryRequest(
                 query=input_text,
-                max_results=5,
+                max_results=20,
                 include_sources=True,
                 enable_advanced_search=True,
-                search_depth="balanced",
+                search_depth="deep",
                 auto_execute=False, 
                 store_interaction=False, 
                 force_rag_only=True  

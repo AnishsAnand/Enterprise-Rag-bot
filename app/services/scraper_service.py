@@ -192,17 +192,88 @@ class WebScraperService:
             return {"url": url, "content": None, "status": "error", "error": str(e)}
         
 
-    async def discover_url(self, base_url: str, max_depth: int = 2, max_urls: int = 100) -> List[str]:
+    async def discover_url(
+        self,
+        base_url: str,
+        max_depth: int = 2,
+        max_urls: int = 100,
+        use_crawl4ai: bool = True,
+    ) -> List[str]:
+        """
+        Discover URLs via deep crawling. Uses Crawl4AI when available for comprehensive
+        sub-URL discovery (handles JS-rendered links, sitemaps, etc.). Falls back to
+        BFS discovery if Crawl4AI is not installed.
+        """
+        if use_crawl4ai:
+            urls = await self._discover_url_crawl4ai(base_url, max_depth, max_urls)
+            if urls is not None:
+                return urls
+            logger.info("⚠️ Crawl4AI unavailable, falling back to BFS discovery")
+
+        return await self._discover_url_bfs(base_url, max_depth, max_urls)
+
+    async def _discover_url_crawl4ai(
+        self, base_url: str, max_depth: int, max_urls: int
+    ) -> Optional[List[str]]:
+        """
+        Use Crawl4AI deep crawl for comprehensive URL discovery.
+        Returns None if Crawl4AI is not available.
+        """
+        try:
+            from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
+            from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
+        except ImportError:
+            return None
+
+        logger.info(
+            f"🔍 Crawl4AI deep crawl from {base_url} "
+            f"(depth={max_depth}, max_urls={max_urls or 'unlimited'})"
+        )
+
+        strategy = BFSDeepCrawlStrategy(
+            max_depth=max_depth,
+            include_external=False,
+            max_pages=max_urls if max_urls and max_urls > 0 else None,
+        )
+        config = CrawlerRunConfig(
+            deep_crawl_strategy=strategy,
+            prefetch=True,  # 5-10x faster: HTML+links only, no markdown
+            verbose=False,
+        )
+
+        discovered: List[str] = []
+        try:
+            async with AsyncWebCrawler() as crawler:
+                results = await crawler.arun(base_url, config=config)
+                if results:
+                    seen: set = set()
+                    for r in results:
+                        url = getattr(r, "url", None)
+                        if url and url not in seen:
+                            seen.add(url)
+                            discovered.append(url)
+        except Exception as e:
+            logger.warning(f"⚠️ Crawl4AI discovery failed: {e}", exc_info=False)
+            return None
+
+        logger.info(f"✅ Crawl4AI discovered {len(discovered)} URLs from {base_url}")
+        return discovered
+
+    async def _discover_url_bfs(
+        self, base_url: str, max_depth: int, max_urls: int
+    ) -> List[str]:
         """
         BFS discovery within the same domain, skipping non-HTML/static files.
+        Fallback when Crawl4AI is not available.
         """
-        logger.info(f"🔍 Discovering URLs from: {base_url}")
+        logger.info(f"🔍 Discovering URLs from: {base_url} (BFS)")
         discovered: set = set()
         to_visit: List[Tuple[str, int]] = [(base_url, 0)]
         visited: set = set()
         base_domain = urlparse(base_url).netloc
+        url_limit = max_urls if max_urls and max_urls > 0 else 100_000
 
-        while to_visit and len(discovered) < max_urls:
+        while to_visit and len(discovered) < url_limit:
             current_url, depth = to_visit.pop(0)
             if current_url in visited or depth > max_depth:
                 continue

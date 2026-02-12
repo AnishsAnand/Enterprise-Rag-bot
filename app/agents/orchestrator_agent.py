@@ -137,28 +137,17 @@ Always confirm destructive operations (delete, update) before executing."""
         if not user_input or not user_input.strip():
             return None
         
-        # FAST PRE-CHECK: If input contains resource keywords, skip LLM check entirely
-        # This prevents misclassification of obvious resource operations
+        # FAST PRE-CHECK: RAG-driven + minimal patterns. No hardcoded resource lists.
         input_lower = user_input.lower()
-        resource_keywords = [
-            "cluster", "clusters", "vm", "vms", "virtual machine", 
-            "firewall", "firewalls", "load balancer", "database", "databases",
-            "endpoint", "endpoints", "jenkins", "kafka", "gitlab", "postgres",
-            "datacenter", "data center", "registry", "volume", "storage",
-            "kubernetes", "k8s", "node", "nodes", "pod", "pods", "service"
-        ]
-        action_keywords = [
-            "list", "listing", "show", "view", "get", "fetch", "display",
-            "create", "deploy", "provision", "delete", "remove", "update",
-            "modify", "scale", "restart", "stop", "start", "check", "status"
-        ]
+        # 1) "what is X" / "what are X" = documentation → RAG (linguistic pattern, not domain-specific)
+        is_doc_question = input_lower.strip().startswith(("what is ", "what are "))
+        # 2) Terms from RAG (resources, aliases, operations) - populated from API spec chunks
+        from app.services.rag_resource_index import ensure_initialized, input_matches_rag_terms
+        await ensure_initialized()
+        has_rag_term = input_matches_rag_terms(user_input)
         
-        has_resource = any(kw in input_lower for kw in resource_keywords)
-        has_action = any(kw in input_lower for kw in action_keywords)
-        
-        # If input has resource OR action keywords, it's an operation - skip greeting check
-        if has_resource or has_action:
-            logger.debug(f"⚡ Fast-path: detected resource/action keywords in '{user_input[:30]}', skipping greeting check")
+        if is_doc_question or has_rag_term:
+            logger.debug(f"⚡ Fast-path: doc pattern or RAG term in '{user_input[:30]}', skipping greeting check")
             return None
         
         try:
@@ -706,17 +695,18 @@ A) **RESOURCE OPERATIONS**: Managing/viewing cloud resources (clusters, firewall
    - Examples: "list clusters", "show clusters in delhi", "what are the clusters in mumbai?", "how many clusters?", "create a cluster", "delete firewall", "count clusters in bengaluru"
    
 B) **DOCUMENTATION**: Questions about how to use the platform, concepts, procedures, troubleshooting, or explanations
-   - Examples: "how do I create a cluster?", "what is kubernetes?", "explain load balancing", "why did my deployment fail?", "what are the requirements?"
+   - Examples: "how do I create a cluster?", "what is kubernetes?", "what is a zone?", "what is a BU?", "explain load balancing", "why did my deployment fail?", "what are the requirements?"
 
 User Query: "{user_input}"
 
 Instructions:
 1. If the query is asking to VIEW, COUNT, LIST, CREATE, UPDATE, or DELETE actual resources → return "RESOURCE_OPERATIONS"
-2. If the query is asking HOW TO do something, WHY something works, or WHAT a concept means → return "DOCUMENTATION"
+2. If the query is asking HOW TO do something, WHY something works, or WHAT a concept/term means → return "DOCUMENTATION"
 3. "What are the clusters?" = RESOURCE_OPERATIONS (listing actual clusters)
 4. "What is a cluster?" = DOCUMENTATION (explaining the concept)
-5. "How many clusters in delhi?" = RESOURCE_OPERATIONS (counting actual clusters)
-6. "How do I create a cluster?" = DOCUMENTATION (explaining the process)
+5. "What is a zone?" / "What is a BU?" = DOCUMENTATION (explaining domain terms - answer from docs)
+6. "How many clusters in delhi?" = RESOURCE_OPERATIONS (counting actual clusters)
+7. "How do I create a cluster?" = DOCUMENTATION (explaining the process)
 
 Respond with ONLY ONE of these:
 - ROUTE: RESOURCE_OPERATIONS

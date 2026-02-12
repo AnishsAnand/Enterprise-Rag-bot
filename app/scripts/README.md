@@ -47,7 +47,40 @@ python3 -m app.scripts.ingest_api_specs --schema-path /path/to/resource_schema.j
 
 Documents are stored with `source="api_spec"` for filtered retrieval.
 
-### 3. Retrieval (in code)
+### 3. Retrain RAG (clear + bulk scrape + ingest)
+
+Full pipeline: clear knowledge base, optionally bulk-scrape URLs, ingest API specs + md files.
+
+```bash
+# Full retrain: clear + API specs + md files from metadata/api_spec_chunks
+python3 -m app.scripts.retrain_rag
+
+# With bulk scrape (scrape URLs, then ingest API specs + md)
+python3 -m app.scripts.retrain_rag --base-url https://docs.example.com
+
+# Scrape only (no API/md ingest)
+python3 -m app.scripts.retrain_rag --base-url https://docs.example.com --scrape-only
+
+# No clear (append to existing)
+python3 -m app.scripts.retrain_rag --no-clear
+
+# Hit backend APIs (server must be running)
+python3 -m app.scripts.retrain_rag --api-base http://localhost:8000 --base-url https://docs.example.com
+```
+
+Or hit the APIs directly:
+
+```bash
+# Clear knowledge base (DELETE)
+curl -X DELETE http://localhost:8000/api/rag-widget/widget/clear-knowledge
+
+# Bulk scrape (POST, runs in background)
+curl -X POST http://localhost:8000/api/rag-widget/widget/bulk-scrape \
+  -H "Content-Type: application/json" \
+  -d '{"base_url":"https://docs.example.com","max_depth":8,"max_urls":500,"auto_store":true}'
+```
+
+### 4. Retrieval (in code)
 
 ```python
 from app.services.postgres_service import postgres_service

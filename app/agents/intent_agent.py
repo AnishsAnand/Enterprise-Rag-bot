@@ -21,8 +21,8 @@ LB_NAME_PATTERN = re.compile(
     re.IGNORECASE)
 DETAILS_KEYWORDS = re.compile(r"\b(details?|info|show|describe)\b", re.IGNORECASE)
 
-# Module-level cache: resource_type -> list of operations (populated from RAG at execute time)
-_rag_resource_index: Dict[str, List[str]] = {}
+# Use shared RAG resource index (app/services/rag_resource_index.py)
+from app.services.rag_resource_index import ensure_initialized, get_resource_index
 
 class IntentAgent(BaseAgent):
     """
@@ -453,9 +453,10 @@ Be precise in detecting intent and operation. Only extract parameters that you c
                 info_lines.append(f"- {resource_type}: {', '.join(operations)}")
             return "\n".join(info_lines)
         # Phase 3: RAG-only mode - use index populated from RAG at execute time
-        if _rag_resource_index:
+        index = get_resource_index()
+        if index:
             return "\n".join(
-                f"- {r}: {', '.join(ops)}" for r, ops in sorted(_rag_resource_index.items())
+                f"- {r}: {', '.join(ops)}" for r, ops in sorted(index.items())
             )
         return "Resources are discovered from RAG API specs at runtime. See Context for available resources and operations."
 
@@ -468,39 +469,6 @@ Be precise in detecting intent and operation. Only extract parameters that you c
         if res and op:
             return (res.group(1).lower(), op.group(1).lower())
         return None
-
-    async def _ensure_rag_resource_index(self) -> None:
-        """
-        Populate RAG resource index from API spec chunks (no hardcoded resources).
-        Called at execute start so tools have resource→operations mapping.
-        """
-        global _rag_resource_index
-        if _rag_resource_index:
-            return
-        try:
-            from app.services.postgres_service import postgres_service
-            if not postgres_service.pool:
-                await postgres_service.initialize()
-            if not postgres_service.pool:
-                return
-            results = await postgres_service.search_api_specs(
-                "API specification resource list create read update delete", n_results=50
-            )
-            index: Dict[str, List[str]] = {}
-            for r in results:
-                content = r.get("content", "")
-                parsed = self._parse_resource_operation_from_chunk(content)
-                if parsed:
-                    resource, op = parsed
-                    if resource not in index:
-                        index[resource] = []
-                    if op not in index[resource]:
-                        index[resource].append(op)
-            _rag_resource_index = index
-            if index:
-                logger.info(f"📚 RAG resource index populated: {len(index)} resources")
-        except Exception as e:
-            logger.debug(f"RAG resource index failed: {e}")
 
     async def _fetch_rag_api_specs(self, user_input: str) -> List[Dict[str, Any]]:
         """
@@ -621,7 +589,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
             config = api_executor_service.get_resource_config(resource_type)
             if not config:
                 # Phase 3: Use RAG-derived operations (no hardcoded list)
-                operations = _rag_resource_index.get(resource_type, [])
+                operations = get_resource_index().get(resource_type, [])
                 # engagement: list and get are equivalent (same API returns engagements list)
                 if resource_type == "engagement" and operation == "list" and "get" in operations:
                     valid = True
@@ -702,7 +670,7 @@ Be precise in detecting intent and operation. Only extract parameters that you c
     - Otherwise call the LLM via parent, parse output robustly, enrich with schema info.
     - On internal error, return a SAFE fallback that does NOT auto-run potentially destructive operations.
     """
-        await self._ensure_rag_resource_index()
+        await ensure_initialized()
         if LB_NAME_PATTERN.search(input_text):
             if DETAILS_KEYWORDS.search(input_text):
                 operation = "get_details"
