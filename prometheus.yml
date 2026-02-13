@@ -14,19 +14,11 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # RAG Backend API (containerized)
+  # RAG Backend API - try both (backend in Docker OR running locally)
   - job_name: 'rag-backend'
     static_configs:
-      - targets: ['backend:8000']
+      - targets: ['enterprise-rag-backend:8000']
     metrics_path: /metrics
     scrape_interval: 10s
     scrape_timeout: 5s
-
-  # Optional: If running backend locally instead of Docker
-  # Uncomment below and comment out the containerized target above
-  # - job_name: 'rag-backend-local'
-  #   static_configs:
-  #     - targets: ['host.docker.internal:8000']
-  #   metrics_path: /metrics
-  #   scrape_interval: 10s
  
