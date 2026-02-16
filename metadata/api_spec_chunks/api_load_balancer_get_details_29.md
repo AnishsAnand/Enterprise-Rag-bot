@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/networkservice/loadbalancer/getDetails/{lbci}
+- **URL:** {BASE_URL_NETWORK_SERVICE}/loadbalancer/getDetails/{lbci}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get detailed configuration for a specific load balancer by LBCI (Load Balancer Circuit ID)
 

@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/engagements
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/engagements
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Fetch engagement details for authenticated user. Response contains engagementId which is used in subsequent API calls.
 

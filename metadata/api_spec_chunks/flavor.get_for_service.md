@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/getFlavorsForMsService/{service_name}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/getFlavorsForMsService/{service_name}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get available compute flavors (instance types/sizes) for a specific microservice, including optimized configurations for Kafka, databases, and other services
 

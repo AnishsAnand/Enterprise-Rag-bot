@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/fetchAllAssociatedTags/{tags}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/fetchAllAssociatedTags/{tags}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Fetch all resources associated with specific tags, useful for discovering Kafka clusters, topics, and other resources tagged with particular labels
 

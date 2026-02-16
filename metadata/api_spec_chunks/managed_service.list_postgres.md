@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSPostgres
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSPostgres
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all IKS-managed PostgreSQL database instances with their configuration, status, performance metrics, and connection details. Part of the Integrated Kubernetes Service (IKS) platform
 

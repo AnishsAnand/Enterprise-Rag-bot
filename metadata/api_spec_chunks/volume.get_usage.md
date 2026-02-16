@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/getVolumeUsage/{volume_id}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/getVolumeUsage/{volume_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get detailed usage statistics for a persistent volume, including space utilization, I/O metrics, and attachment information. Particularly useful for monitoring Kafka broker storage
 

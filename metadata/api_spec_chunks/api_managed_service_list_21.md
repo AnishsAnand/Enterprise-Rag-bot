@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{serviceType}
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/{serviceType}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List managed services by type (Kafka, GitLab, etc.). Supports streaming response.
 

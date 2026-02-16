@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/api/v1/{ipc_engagement_id}/zonelist
+- **URL:** {BASE_URL_PORTAL_SERVICE}/api/v1/{ipc_engagement_id}/zonelist
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all zones (network segments) for the engagement with CIDR, hypervisors, and status
 

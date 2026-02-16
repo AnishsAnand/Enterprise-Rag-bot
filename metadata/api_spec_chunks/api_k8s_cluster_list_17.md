@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/{engagement_id}/clusterlist/stream
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/{engagement_id}/clusterlist/stream
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all clusters for given endpoints using SSE streaming. Requires engagement_id in URL and endpoints array in payload.
 

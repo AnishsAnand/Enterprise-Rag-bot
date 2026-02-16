@@ -47,7 +47,7 @@ The Enterprise RAG Bot now supports listing managed services like **Kafka** and 
 
 ### API Details
 
-**Endpoint**: `POST https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{serviceType}`
+**Endpoint**: `POST {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/{serviceType}`
 
 **Payload**:
 ```json
@@ -134,7 +134,7 @@ Added three new resource types:
     "api_endpoints": {
       "list": {
         "method": "POST",
-        "url": "https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{serviceType}"
+        "url": "{BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/{serviceType}"
       }
     },
     "service_types": {

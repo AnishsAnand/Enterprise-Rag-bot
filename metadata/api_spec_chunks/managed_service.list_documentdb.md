@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSDocumentDB
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSDocumentDB
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all IKS-managed DocumentDB (MongoDB) instances with their configuration, replica sets, sharding details, and performance metrics
 

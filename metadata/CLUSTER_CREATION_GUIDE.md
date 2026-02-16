@@ -57,7 +57,7 @@ The system now automatically detects implicit list operations when you mention a
 ### API Endpoint
 
 ```
-POST https://ipcloud.tatacommunications.com/paasservice/api/v1/iks
+POST {BASE_URL_PAAS_SERVICE}/api/v1/iks
 ```
 
 ### Required Parameters

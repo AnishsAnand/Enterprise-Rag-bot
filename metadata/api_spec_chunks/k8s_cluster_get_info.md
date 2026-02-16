@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/cluster/{cluster_id}/getclusterinfo
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/cluster/{cluster_id}/getclusterinfo
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Retrieve detailed information about a specific Kubernetes cluster including configuration, status, nodes, and resources
 

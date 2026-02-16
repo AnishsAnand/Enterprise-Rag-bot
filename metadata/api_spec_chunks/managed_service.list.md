@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{service_type}
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/{service_type}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all managed services of a specific type (e.g., IKSGitlab, Kafka, PostgreSQL). Returns service instances with their configuration, status, and resource utilization
 

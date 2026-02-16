@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/securityservice/environmentsperengagement/{ipc_engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/securityservice/environmentsperengagement/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List environments per engagement
 

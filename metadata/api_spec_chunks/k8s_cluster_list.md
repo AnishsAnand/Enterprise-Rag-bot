@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/cluster/list
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/cluster/list
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all Kubernetes clusters with their status, location, node count, and configuration details
 

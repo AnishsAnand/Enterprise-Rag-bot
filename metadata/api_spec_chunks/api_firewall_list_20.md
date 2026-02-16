@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/networkservice/firewallconfig/details
+- **URL:** {BASE_URL_NETWORK_SERVICE}/firewallconfig/details
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List firewalls for a specific endpoint
 

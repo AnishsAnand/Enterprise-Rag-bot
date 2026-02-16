@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/configservice/templates/{zoneId}?type=Container
+- **URL:** {BASE_URL_PORTAL_SERVICE}/configservice/templates/{zoneId}?type=Container
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get OS images (templates) for zone, filtered by k8s version
 

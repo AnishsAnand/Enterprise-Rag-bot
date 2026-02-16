@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/cluster/getIksMsWithEndpoint/{endpointId}?version={k8sVersion}&type=network&clusterType=APP
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/cluster/getIksMsWithEndpoint/{endpointId}?version={k8sVersion}&type=network&clusterType=APP
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get CNI drivers for datacenter + k8s version + cluster type
 

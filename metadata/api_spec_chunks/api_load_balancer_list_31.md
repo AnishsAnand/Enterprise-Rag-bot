@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/loadbalancers/{ipc_engagement_id}
+- **URL:** {BASE_URL_NETWORK_SERVICE}/loadbalancer/list/loadbalancers/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List ALL load balancers for the IPC engagement (returns load balancers from all endpoints in one call)
 

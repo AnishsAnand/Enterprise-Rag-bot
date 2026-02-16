@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/cluster/{cluster_id}/clustermetrics
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/cluster/{cluster_id}/clustermetrics
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Retrieve real-time performance metrics and statistics for a Kubernetes cluster including CPU, memory, network, and storage utilization
 

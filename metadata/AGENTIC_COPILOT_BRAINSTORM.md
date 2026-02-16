@@ -42,7 +42,7 @@ To replace `resource_schema.json`, RAG documents must encode:
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/clusters/list
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/clusters/list
 - **Auth:** Bearer token required
 
 ## Parameters
@@ -329,7 +329,7 @@ Output: workflow includes list_endpoints; ValidationAgent will resolve "Delhi" t
 
 ## Endpoint
 - Method: POST
-- URL: https://ipcloud.tatacommunications.com/paasservice/paas/clusters/list
+- URL: {BASE_URL_PAAS_SERVICE}/paas/clusters/list
 - Auth: Bearer token (from Keycloak)
 
 ## Required Parameters

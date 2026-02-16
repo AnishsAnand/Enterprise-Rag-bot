@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/securityservice/departments/{id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all departments (business units) within an engagement, including their zones, environments, VM counts, and access permissions. Essential for organizational hierarchy and resource allocation
 
