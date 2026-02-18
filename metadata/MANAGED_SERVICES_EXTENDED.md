@@ -15,25 +15,25 @@ Extended the managed services integration to include 4 additional service types,
 ### 1. Container Registry (IKSContainerRegistry)
 - **Resource Type:** `container_registry`
 - **Service Type:** `IKSContainerRegistry`
-- **API Endpoint:** `https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSContainerRegistry`
+- **API Endpoint:** `{BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSContainerRegistry`
 - **Aliases:** container registry, registry, registries, docker registry, image registry
 
 ### 2. Jenkins (IKSJenkins)
 - **Resource Type:** `jenkins`
 - **Service Type:** `IKSJenkins`
-- **API Endpoint:** `https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSJenkins`
+- **API Endpoint:** `{BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSJenkins`
 - **Aliases:** jenkins, jenkins service, jenkins services, ci cd, continuous integration
 
 ### 3. PostgreSQL (IKSPostgres)
 - **Resource Type:** `postgres`
 - **Service Type:** `IKSPostgres`
-- **API Endpoint:** `https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSPostgres`
+- **API Endpoint:** `{BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSPostgres`
 - **Aliases:** postgres, postgresql, postgres service, postgresql database, pg
 
 ### 4. DocumentDB (IKSDocumentDB)
 - **Resource Type:** `documentdb`
 - **Service Type:** `IKSDocumentDB`
-- **API Endpoint:** `https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSDocumentDB`
+- **API Endpoint:** `{BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSDocumentDB`
 - **Aliases:** documentdb, document db, mongodb, mongo, nosql database
 
 ---

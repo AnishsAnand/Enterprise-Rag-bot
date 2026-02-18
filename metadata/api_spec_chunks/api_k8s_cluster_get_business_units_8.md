@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/securityservice/departments/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get business units (departments) listing for engagement. Returns BUs with their zones, environments, and VMs count.
 

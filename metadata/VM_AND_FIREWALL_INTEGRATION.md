@@ -384,7 +384,7 @@ Response:
 
 ### Managed Services API Pattern (POST with multiple endpoints)
 ```
-POST https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/{ServiceType}
+POST {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/{ServiceType}
 
 Payload:
 {

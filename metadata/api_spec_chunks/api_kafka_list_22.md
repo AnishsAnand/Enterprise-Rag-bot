@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/paas/listManagedServices/IKSKafka
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/paas/listManagedServices/IKSKafka
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List Kafka managed services across endpoints
 

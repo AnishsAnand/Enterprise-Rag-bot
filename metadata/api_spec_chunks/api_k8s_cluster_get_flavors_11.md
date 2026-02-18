@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/configservice/flavordetails/{zoneId}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/configservice/flavordetails/{zoneId}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get compute flavors with node types for zone
 

@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/securityservice/deptDetailsForEngagement/{ipc_engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/securityservice/deptDetailsForEngagement/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get department details with nested hierarchy: departments -> environments -> zones. Used for cluster creation workflow.
 

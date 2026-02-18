@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/engagements
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/engagements
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all engagements for authenticated user. Used for engagement selection when user has multiple accounts.
 

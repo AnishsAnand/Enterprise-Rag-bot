@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** POST
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/api/v1/iks
+- **URL:** {BASE_URL_PAAS_SERVICE}/api/v1/iks
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Create a new Kubernetes cluster
 

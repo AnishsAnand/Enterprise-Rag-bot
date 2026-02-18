@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/getTemplatesByEngagement/{ipc_engagement_id}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/getTemplatesByEngagement/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get IKS images with datacenter options and k8s versions. Requires ipc_engagement_id from get_ipc_engagement.
 

@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/zone/getZoneList/{engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/zone/getZoneList/{engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get zones (VLANs) for engagement
 

@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/configservice/getEndpointsByEngagement/{engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/configservice/getEndpointsByEngagement/{engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Fetch available endpoints (data centers) for a given engagement. User can select which endpoints to query for resources.
 

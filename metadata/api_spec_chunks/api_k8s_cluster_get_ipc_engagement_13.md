@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/paasservice/paas/getIpcEngFromPaasEng/{engagement_id}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/getIpcEngFromPaasEng/{engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Convert PAAS engagement ID to IPC engagement ID. Returns ipc_engid needed for getTemplatesByEngagement.
 

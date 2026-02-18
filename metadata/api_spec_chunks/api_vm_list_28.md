@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/instances/vmlist/{ipc_engagement_id}
+- **URL:** {BASE_URL_PORTAL_SERVICE}/instances/vmlist/{ipc_engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** List all virtual machines for the engagement
 

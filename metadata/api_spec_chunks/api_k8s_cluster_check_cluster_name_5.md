@@ -5,7 +5,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/portalservice/api/v1/check/clusterName?clusterName={clusterName}&clusterType=iks
+- **URL:** {BASE_URL_PORTAL_SERVICE}/api/v1/check/clusterName?clusterName={clusterName}&clusterType=iks
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Check if cluster name is available. Empty response = available.
 

@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** https://ipcloud.tatacommunications.com/networkservice/loadbalancer/list/virtualservices/{lbci}
+- **URL:** {BASE_URL_NETWORK_SERVICE}/loadbalancer/list/virtualservices/{lbci}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Get virtual services (VIPs, listeners) for a specific load balancer by LBCI
 
