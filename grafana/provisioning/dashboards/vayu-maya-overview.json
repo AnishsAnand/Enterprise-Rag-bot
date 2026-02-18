@@ -91,41 +91,6 @@
           "mappings": [],
           "thresholds": { "mode": "absolute", "steps": [
             { "color": "green", "value": null },
-            { "color": "yellow", "value": 5 },
-            { "color": "red", "value": 10 }
-          ]},
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
-      "id": 3,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "expr": "sum(increase(vayu_llm_estimated_cost_usd_total[$__range]))",
-          "refId": "A"
-        }
-      ],
-      "title": "Estimated Cost (USD)",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
             { "color": "yellow", "value": 2 },
             { "color": "red", "value": 5 }
           ]},
@@ -133,7 +98,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
       "id": 4,
       "options": {
         "colorMode": "value",
@@ -168,7 +133,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
       "id": 5,
       "options": {
         "colorMode": "value",
@@ -199,7 +164,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "id": 6,
       "options": {
         "colorMode": "value",
@@ -344,7 +309,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "sum(increase(vayu_agent_sessions_total[$__range]))",
+          "expr": "sum(increase(vayu_agent_sessions_total[$__range])) or vector(0)",
           "refId": "A"
         }
       ],
@@ -414,7 +379,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (vayu_agent_execution_duration_seconds_bucket))",
+          "expr": "histogram_quantile(0.95, sum by (le) (vayu_agent_execution_duration_seconds_bucket)) or vector(0)",
           "refId": "A"
         }
       ],
@@ -730,12 +695,12 @@
       "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
         {
-          "expr": "sum by (tool_name) (rate(vayu_agent_tool_calls_total{status=\"success\"}[5m])) or vector(0)",
-          "legendFormat": "{{tool_name}}",
+          "expr": "sum by (agent_name, tool_name) (vayu_agent_tool_calls_total{status=\"success\"})",
+          "legendFormat": "{{agent_name}} / {{tool_name}}",
           "refId": "A"
         }
       ],
-      "title": "Tool Calls by Tool Name",
+      "title": "Tool Calls by Agent & Tool",
       "type": "timeseries"
     }
   ],
