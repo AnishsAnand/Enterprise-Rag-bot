@@ -7,10 +7,11 @@ import logging
 import json
 from app.agents.base_agent import BaseAgent
 from app.agents.state.conversation_state import (ConversationState,ConversationStatus,conversation_state_manager)
+from app.agents.adk_integration.adk_orchestrator_mixin import ADKOrchestratorMixin
 
 logger = logging.getLogger(__name__)
 
-class OrchestratorAgent(BaseAgent):
+class OrchestratorAgent(ADKOrchestratorMixin,BaseAgent):
     """
     Main orchestrator agent 
     Routes user requests to appropriate agents and manages conversation flow.
@@ -393,7 +394,7 @@ Return ONLY a JSON array of strings, like:
         logger.info(f"❓ Clarifying question: {question}")
         return f"CLARIFICATION_NEEDED: {question}"
     
-    async def orchestrate(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None,auth_token: str = None,user_type: str = None) -> Dict[str, Any]:
+    async def orchestrate(self,user_input: str,session_id: str,user_id: str,user_roles: List[str] = None,auth_token: str = None,user_type: str = None,_pre_computed: dict = None) -> Dict[str, Any]:
         """
         Main orchestration method that coordinates the entire flow.
         Args:
@@ -491,7 +492,7 @@ Return ONLY a JSON array of strings, like:
             # Determine routing based on conversation state and input
             routing_decision = await self._decide_routing(user_input, state, user_roles)
             # Execute based on routing decision
-            result = await self._execute_routing(routing_decision, user_input, state, user_roles)
+            result = await self._execute_routing(routing_decision, user_input, state, user_roles, _adk_intent=_adk_intent)
             # Add assistant response to history
             state.add_message("assistant", result.get("response", ""), {
                 "routing": routing_decision["route"],
@@ -785,21 +786,36 @@ Respond with ONLY ONE of these:
                     "reason": "Rule-based routing: resource operation assumed (LLM error)"
                 }
     
-    async def _execute_routing(self,routing_decision: Dict[str, Any],user_input: str,state: ConversationState,user_roles: List[str]) -> Dict[str, Any]:
+    async def _execute_routing(
+        self,
+        routing_decision: Dict[str, Any],
+        user_input: str,
+        state: ConversationState,
+        user_roles: List[str],
+        _adk_intent: dict = None,          
+    ) -> Dict[str, Any]:
         """
         Execute the routing decision.
+
         Args:
             routing_decision: Routing decision dict
-            user_input: User's message
-            state: Conversation state
-            user_roles: User's roles
+            user_input:       User's message
+            state:            Conversation state
+            user_roles:       User's roles
+            _adk_intent:      Optional pre-computed intent from ADKHybridManager.
+                              When present and confidence ≥ 0.7, skips the
+                              IntentAgent LLM call entirely.  Fully backwards-
+                              compatible – None means original behaviour.
         Returns:
             Dict with execution result
         """
         route = routing_decision["route"]
         auth_token = state.auth_token  # Extract auth token from conversation state
+
         try:
-            # Handle greetings and capability questions directly
+            # ----------------------------------------------------------------
+            # GREETING – handled directly, no agent needed
+            # ----------------------------------------------------------------
             if route == "greeting":
                 greeting_type = routing_decision.get("greeting_type", "greeting")
                 response = self._get_greeting_response(greeting_type)
@@ -808,31 +824,51 @@ Respond with ONLY ONE of these:
                     "success": True,
                     "response": response,
                     "routing": "greeting",
-                    "metadata": {"greeting_type": greeting_type}
+                    "metadata": {"greeting_type": greeting_type},
                 }
-            
+
+            # ----------------------------------------------------------------
+            # INTENT – detect resource + operation, then validate / execute
+            # ----------------------------------------------------------------
             if route == "intent":
-                # Route to intent agent
-                state.handoff_to_agent("OrchestratorAgent", "IntentAgent", routing_decision["reason"])
+                state.handoff_to_agent(
+                    "OrchestratorAgent", "IntentAgent", routing_decision["reason"]
+                )
                 if self.intent_agent:
-                    # Use contextual query if provided (for follow-ups), otherwise use original user_input
+                    # Use contextual query for follow-ups, otherwise the raw input
                     query_to_use = routing_decision.get("contextual_query", user_input)
-                    # Update state.user_query to reflect the contextual query for follow-ups
                     if routing_decision.get("contextual_query"):
                         state.user_query = query_to_use
-                        logger.info(f"📝 Updated user_query to contextual query: '{query_to_use[:50]}...'")
-                    result = await self.intent_agent.execute(query_to_use, {
-                        "session_id": state.session_id,
-                        "user_id": state.user_id,
-                        "conversation_state": state.to_dict()})
-                    # STEP 1 : Update state based on intent detection
+                        logger.info(
+                            f"📝 Updated user_query to contextual query: '{query_to_use[:50]}...'"
+                        )
+
+                    # ── ADK fast-path ─────────────────────────────────────────────
+                    # If ADKHybridManager already ran IntentAgent in parallel and the
+                    # confidence is high enough, reuse that result without a second
+                    # LLM call.  Falls back to the normal path when _adk_intent is
+                    # None (all non-ADK callers) or confidence < 0.7.
+                    used_adk, result = self._build_intent_result(_adk_intent)
+                    if not used_adk:
+                        result = await self.intent_agent.execute(
+                            query_to_use,
+                            {
+                                "session_id": state.session_id,
+                                "user_id": state.user_id,
+                                "conversation_state": state.to_dict(),
+                            },
+                        )
+                    # ─────────────────────────────────────────────────────────────
+
+                    # STEP 1: Update state based on intent detection
                     if result.get("success") and result.get("intent_detected"):
                         intent_data = result.get("intent_data", {})
                         state.set_intent(
                             resource_type=intent_data.get("resource_type"),
                             operation=intent_data.get("operation"),
                             required_params=intent_data.get("required_params", []),
-                            optional_params=intent_data.get("optional_params", []))
+                            optional_params=intent_data.get("optional_params", []),
+                        )
                         # Phase 2: Store RAG-derived api_spec for downstream agents
                         if intent_data.get("api_spec"):
                             state.api_spec = intent_data.get("api_spec")
@@ -840,49 +876,85 @@ Respond with ONLY ONE of these:
                         extracted_params = intent_data.get("extracted_params", {})
                         if extracted_params:
                             state.add_parameters(extracted_params)
-                        logger.info(f"📋 State after intent: required={state.required_params}, collected={list(state.collected_params.keys())}, missing={state.missing_params}")
-                        # STEP 2: Check if we need more parameters OR if ready to execute
+                        logger.info(
+                            f"📋 State after intent: required={state.required_params}, "
+                            f"collected={list(state.collected_params.keys())}, "
+                            f"missing={state.missing_params}"
+                        )
+
+                        # STEP 2: Validate or execute
                         needs_validation = bool(state.missing_params)
                         if state.operation == "create" and state.resource_type == "k8s_cluster":
-                            # Cluster creation uses a multi-step workflow, always route to validation
                             needs_validation = True
-                            logger.info("🎯 Cluster creation detected - routing to ValidationAgent for workflow")
+                            logger.info(
+                                "🎯 Cluster creation detected - routing to ValidationAgent for workflow"
+                            )
+
                         if needs_validation:
-                            logger.info(f"🔄 Missing params detected: {state.missing_params}, routing to ValidationAgent")
+                            logger.info(
+                                f"🔄 Missing params detected: {state.missing_params}, "
+                                "routing to ValidationAgent"
+                            )
                             state.status = ConversationStatus.COLLECTING_PARAMS
-                            state.handoff_to_agent("IntentAgent", "ValidationAgent", "Need to collect missing parameters")
-                            # Immediately route to validation agent
+                            state.handoff_to_agent(
+                                "IntentAgent",
+                                "ValidationAgent",
+                                "Need to collect missing parameters",
+                            )
+
                             if self.validation_agent:
-                                validation_result = await self.validation_agent.execute(user_input, {
-                                    "session_id": state.session_id,
-                                    "conversation_state": state.to_dict(),
-                                    "auth_token": auth_token,
-                                    "user_type": state.user_type})
-                                
-                                # CHECK: If workflow was aborted to handle a different request
-                                if validation_result.get("workflow_aborted") and validation_result.get("pending_request"):
-                                    pending_request = validation_result.get("pending_request")
-                                    logger.info(f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'")
-                                    return await self.execute(pending_request, {
+                                validation_result = await self.validation_agent.execute(
+                                    user_input,
+                                    {
                                         "session_id": state.session_id,
                                         "conversation_state": state.to_dict(),
-                                        "user_roles": user_roles
-                                    })
-                                
-                                # CHECK: If workflow was paused to handle a different request
-                                if validation_result.get("workflow_paused") and validation_result.get("pending_request"):
+                                        "auth_token": auth_token,
+                                        "user_type": state.user_type,
+                                    },
+                                )
+
+                                # Workflow aborted – re-route pending request
+                                if validation_result.get("workflow_aborted") and validation_result.get(
+                                    "pending_request"
+                                ):
                                     pending_request = validation_result.get("pending_request")
-                                    logger.info(f"💾 Workflow paused - handling pending request: '{pending_request}'")
-                                    pending_result = await self.execute(pending_request, {
-                                        "session_id": state.session_id,
-                                        "conversation_state": state.to_dict(),
-                                        "user_roles": user_roles
-                                    })
-                                    combined_response = validation_result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
+                                    logger.info(
+                                        f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'"
+                                    )
+                                    return await self.execute(
+                                        pending_request,
+                                        {
+                                            "session_id": state.session_id,
+                                            "conversation_state": state.to_dict(),
+                                            "user_roles": user_roles,
+                                        },
+                                    )
+
+                                # Workflow paused – handle pending request then combine
+                                if validation_result.get("workflow_paused") and validation_result.get(
+                                    "pending_request"
+                                ):
+                                    pending_request = validation_result.get("pending_request")
+                                    logger.info(
+                                        f"💾 Workflow paused - handling pending request: '{pending_request}'"
+                                    )
+                                    pending_result = await self.execute(
+                                        pending_request,
+                                        {
+                                            "session_id": state.session_id,
+                                            "conversation_state": state.to_dict(),
+                                            "user_roles": user_roles,
+                                        },
+                                    )
+                                    combined_response = (
+                                        validation_result.get("output", "")
+                                        + "\n\n---\n\n"
+                                        + pending_result.get("response", "")
+                                    )
                                     pending_result["response"] = combined_response
                                     return pending_result
-                                
-                                # CHECK: If workflow interruption prompt was shown
+
+                                # Workflow interrupted – waiting for user choice
                                 if validation_result.get("workflow_interrupted"):
                                     logger.info("⚠️ Workflow interrupted - waiting for user choice")
                                     return {
@@ -890,29 +962,45 @@ Respond with ONLY ONE of these:
                                         "response": validation_result.get("output", ""),
                                         "routing": "validation",
                                         "workflow_interrupted": True,
-                                        "metadata": {}}
-                                
-                                # Check if validation made us ready to execute
-                                if validation_result.get("ready_to_execute") and validation_result.get("success"):
-                                    logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
-                                    state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
+                                        "metadata": {},
+                                    }
+
+                                # Ready to execute
+                                if validation_result.get("ready_to_execute") and validation_result.get(
+                                    "success"
+                                ):
+                                    logger.info(
+                                        "🚀 ValidationAgent says ready - routing to ExecutionAgent"
+                                    )
+                                    state.handoff_to_agent(
+                                        "ValidationAgent",
+                                        "ExecutionAgent",
+                                        "All parameters collected",
+                                    )
                                     state.status = ConversationStatus.EXECUTING
                                     if self.execution_agent:
-                                        exec_result = await self.execution_agent.execute("", {
-                                            "session_id": state.session_id,
-                                            "conversation_state": state.to_dict(),
-                                            "user_roles": user_roles or [],
-                                            "auth_token": auth_token,
-                                            "user_type": state.user_type
-                                        })
-                                        
-                                        # Check if awaiting selection - don't mark as completed
+                                        exec_result = await self.execution_agent.execute(
+                                            "",
+                                            {
+                                                "session_id": state.session_id,
+                                                "conversation_state": state.to_dict(),
+                                                "user_roles": user_roles or [],
+                                                "auth_token": auth_token,
+                                                "user_type": state.user_type,
+                                            },
+                                        )
                                         is_awaiting = (
-                                            state.status in [ConversationStatus.AWAITING_FILTER_SELECTION, ConversationStatus.AWAITING_ENGAGEMENT_SELECTION] or
-                                            exec_result.get("engagement_selection_required")
+                                            state.status
+                                            in [
+                                                ConversationStatus.AWAITING_FILTER_SELECTION,
+                                                ConversationStatus.AWAITING_ENGAGEMENT_SELECTION,
+                                            ]
+                                            or exec_result.get("engagement_selection_required")
                                         )
                                         if not is_awaiting and exec_result.get("success"):
-                                            state.set_execution_result(exec_result.get("execution_result", {}))
+                                            state.set_execution_result(
+                                                exec_result.get("execution_result", {})
+                                            )
                                         return {
                                             "success": True,
                                             "response": exec_result.get("output", ""),
@@ -921,8 +1009,10 @@ Respond with ONLY ONE of these:
                                             "metadata": {
                                                 "collected_params": state.collected_params,
                                                 "resource_type": state.resource_type,
-                                                "operation": state.operation}}
-                              
+                                                "operation": state.operation,
+                                            },
+                                        }
+
                                 return {
                                     "success": True,
                                     "response": validation_result.get("output", ""),
@@ -930,28 +1020,45 @@ Respond with ONLY ONE of these:
                                     "intent_data": intent_data,
                                     "metadata": {
                                         "collected_params": state.collected_params,
-                                        "missing_params": list(state.missing_params) }}
+                                        "missing_params": list(state.missing_params),
+                                    },
+                                }
+
                         else:
-                            # No missing params - proceed directly to execution!
-                            logger.info(f"✅ All params collected for {state.operation} {state.resource_type}, executing immediately")
+                            # No missing params – proceed directly to execution
+                            logger.info(
+                                f"✅ All params collected for {state.operation} "
+                                f"{state.resource_type}, executing immediately"
+                            )
                             state.status = ConversationStatus.EXECUTING
-                            state.handoff_to_agent("IntentAgent", "ExecutionAgent", "No parameters needed, executing immediately")
+                            state.handoff_to_agent(
+                                "IntentAgent",
+                                "ExecutionAgent",
+                                "No parameters needed, executing immediately",
+                            )
                             if self.execution_agent:
-                                exec_result = await self.execution_agent.execute("", {
-                                    "session_id": state.session_id,
-                                    "conversation_state": state.to_dict(),
-                                    "user_roles": user_roles or [],
-                                    "auth_token": auth_token,
-                                    "user_type": state.user_type
-                                })
-                                
-                                # Check if awaiting selection - don't mark as completed
+                                exec_result = await self.execution_agent.execute(
+                                    "",
+                                    {
+                                        "session_id": state.session_id,
+                                        "conversation_state": state.to_dict(),
+                                        "user_roles": user_roles or [],
+                                        "auth_token": auth_token,
+                                        "user_type": state.user_type,
+                                    },
+                                )
                                 is_awaiting = (
-                                    state.status in [ConversationStatus.AWAITING_FILTER_SELECTION, ConversationStatus.AWAITING_ENGAGEMENT_SELECTION] or
-                                    exec_result.get("engagement_selection_required")
+                                    state.status
+                                    in [
+                                        ConversationStatus.AWAITING_FILTER_SELECTION,
+                                        ConversationStatus.AWAITING_ENGAGEMENT_SELECTION,
+                                    ]
+                                    or exec_result.get("engagement_selection_required")
                                 )
                                 if not is_awaiting and exec_result.get("success"):
-                                    state.set_execution_result(exec_result.get("execution_result", {}))
+                                    state.set_execution_result(
+                                        exec_result.get("execution_result", {})
+                                    )
                                 return {
                                     "success": True,
                                     "response": exec_result.get("output", ""),
@@ -960,28 +1067,42 @@ Respond with ONLY ONE of these:
                                     "metadata": {
                                         "collected_params": state.collected_params,
                                         "resource_type": state.resource_type,
-                                        "operation": state.operation}}
+                                        "operation": state.operation,
+                                    },
+                                }
+
                     return {
                         "success": True,
                         "response": result.get("output", ""),
-                        "routing": route}
+                        "routing": route,
+                    }
+
                 else:
                     return {
                         "success": False,
                         "response": "Intent agent not available",
-                        "routing": route
+                        "routing": route,
                     }
+
+            # ----------------------------------------------------------------
+            # VALIDATION – collect / verify parameters
+            # ----------------------------------------------------------------
             elif route == "validation":
-                # Route to validation agent
-                state.handoff_to_agent("OrchestratorAgent", "ValidationAgent", routing_decision["reason"])
+                state.handoff_to_agent(
+                    "OrchestratorAgent", "ValidationAgent", routing_decision["reason"]
+                )
                 if self.validation_agent:
-                    result = await self.validation_agent.execute(user_input, {
-                        "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
-                        "auth_token": auth_token,
-                        "user_type": state.user_type
-                    })
-                    # CHECK: If user cancelled the workflow
+                    result = await self.validation_agent.execute(
+                        user_input,
+                        {
+                            "session_id": state.session_id,
+                            "conversation_state": state.to_dict(),
+                            "auth_token": auth_token,
+                            "user_type": state.user_type,
+                        },
+                    )
+
+                    # User cancelled
                     if result.get("cancelled"):
                         logger.info("🚫 User cancelled the workflow")
                         return {
@@ -989,35 +1110,47 @@ Respond with ONLY ONE of these:
                             "response": result.get("output", "Workflow cancelled."),
                             "routing": "cancelled",
                             "cancelled": True,
-                            "metadata": {} }
-                    
-                    # CHECK: If workflow was aborted to handle a different request
+                            "metadata": {},
+                        }
+
+                    # Workflow aborted
                     if result.get("workflow_aborted") and result.get("pending_request"):
                         pending_request = result.get("pending_request")
-                        logger.info(f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'")
-                        # Recursively process the pending request
-                        return await self.execute(pending_request, {
-                            "session_id": state.session_id,
-                            "conversation_state": state.to_dict(),
-                            "user_roles": user_roles
-                        })
-                    
-                    # CHECK: If workflow was paused to handle a different request
+                        logger.info(
+                            f"🔀 Workflow aborted - re-routing pending request: '{pending_request}'"
+                        )
+                        return await self.execute(
+                            pending_request,
+                            {
+                                "session_id": state.session_id,
+                                "conversation_state": state.to_dict(),
+                                "user_roles": user_roles,
+                            },
+                        )
+
+                    # Workflow paused
                     if result.get("workflow_paused") and result.get("pending_request"):
                         pending_request = result.get("pending_request")
-                        logger.info(f"💾 Workflow paused - handling pending request: '{pending_request}'")
-                        # Process the pending request (workflow state is preserved for later resume)
-                        pending_result = await self.execute(pending_request, {
-                            "session_id": state.session_id,
-                            "conversation_state": state.to_dict(),
-                            "user_roles": user_roles
-                        })
-                        # Combine the save message with the result
-                        combined_response = result.get("output", "") + "\n\n---\n\n" + pending_result.get("response", "")
+                        logger.info(
+                            f"💾 Workflow paused - handling pending request: '{pending_request}'"
+                        )
+                        pending_result = await self.execute(
+                            pending_request,
+                            {
+                                "session_id": state.session_id,
+                                "conversation_state": state.to_dict(),
+                                "user_roles": user_roles,
+                            },
+                        )
+                        combined_response = (
+                            result.get("output", "")
+                            + "\n\n---\n\n"
+                            + pending_result.get("response", "")
+                        )
                         pending_result["response"] = combined_response
                         return pending_result
-                    
-                    # CHECK: If workflow interruption prompt was shown (waiting for user choice)
+
+                    # Workflow interrupted
                     if result.get("workflow_interrupted"):
                         logger.info("⚠️ Workflow interrupted - waiting for user choice")
                         return {
@@ -1025,34 +1158,39 @@ Respond with ONLY ONE of these:
                             "response": result.get("output", ""),
                             "routing": "validation",
                             "workflow_interrupted": True,
-                            "metadata": {}}
-                    
-                    # CHECK: If validation says "ready to execute", route to execution NOW!
+                            "metadata": {},
+                        }
+
+                    # Ready to execute
                     if result.get("ready_to_execute") and result.get("success"):
                         logger.info("🚀 ValidationAgent says ready - routing to ExecutionAgent")
-                        # Update state to executing
-                        state.handoff_to_agent("ValidationAgent", "ExecutionAgent", "All parameters collected")
+                        state.handoff_to_agent(
+                            "ValidationAgent",
+                            "ExecutionAgent",
+                            "All parameters collected",
+                        )
                         state.status = ConversationStatus.EXECUTING
-                        # Execute immediately
                         if self.execution_agent:
-                            exec_result = await self.execution_agent.execute("", {
-                                "session_id": state.session_id,
-                                "conversation_state": state.to_dict(),
-                                "user_roles": user_roles or [],
-                                "auth_token": auth_token,
-                                "user_type": state.user_type
-                            })
-                            
-                            # Check if execution is awaiting filter selection (BU/Env/Zone)
-                            # In this case, DON'T mark as completed - state is already set to AWAITING_FILTER_SELECTION
+                            exec_result = await self.execution_agent.execute(
+                                "",
+                                {
+                                    "session_id": state.session_id,
+                                    "conversation_state": state.to_dict(),
+                                    "user_roles": user_roles or [],
+                                    "auth_token": auth_token,
+                                    "user_type": state.user_type,
+                                },
+                            )
                             exec_metadata = exec_result.get("metadata", {})
-                            is_awaiting_filter = exec_metadata.get("awaiting_filter_selection") or \
-                                                 state.status == ConversationStatus.AWAITING_FILTER_SELECTION
-                            
+                            is_awaiting_filter = exec_metadata.get(
+                                "awaiting_filter_selection"
+                            ) or state.status == ConversationStatus.AWAITING_FILTER_SELECTION
+
                             if is_awaiting_filter:
-                                logger.info("🔄 Execution returned filter options - keeping AWAITING_FILTER_SELECTION status")
-                                # Don't call set_execution_result - it would mark as COMPLETED
-                                # State is already updated by ExecutionAgent
+                                logger.info(
+                                    "🔄 Execution returned filter options - "
+                                    "keeping AWAITING_FILTER_SELECTION status"
+                                )
                             elif exec_result.get("success"):
                                 state.set_execution_result(exec_result.get("execution_result", {}))
                             return {
@@ -1063,110 +1201,136 @@ Respond with ONLY ONE of these:
                                 "metadata": {
                                     "collected_params": state.collected_params,
                                     "resource_type": state.resource_type,
-                                    "operation": state.operation}}
+                                    "operation": state.operation,
+                                },
+                            }
                         else:
                             return {
                                 "success": False,
                                 "response": "Execution agent not available",
-                                "routing": "execution" }
+                                "routing": "execution",
+                            }
 
-                    # Otherwise, return validation response (asking for more info)
+                    # Still collecting – return validation prompt
                     return {
                         "success": True,
                         "response": result.get("output", ""),
                         "routing": route,
                         "metadata": {
                             "missing_params": result.get("missing_params", []),
-                            "ready_to_execute": result.get("ready_to_execute", False)} }
+                            "ready_to_execute": result.get("ready_to_execute", False),
+                        },
+                    }
+
                 else:
                     return {
                         "success": False,
                         "response": "Validation agent not available",
-                        "routing": route }
-            
+                        "routing": route,
+                    }
+
+            # ----------------------------------------------------------------
+            # EXECUTION – run the API operation
+            # ----------------------------------------------------------------
             elif route == "execution":
-                # Route to execution agent
-                state.handoff_to_agent("OrchestratorAgent", "ExecutionAgent", routing_decision["reason"])
+                state.handoff_to_agent(
+                    "OrchestratorAgent", "ExecutionAgent", routing_decision["reason"]
+                )
                 state.status = ConversationStatus.EXECUTING
                 if self.execution_agent:
-                    result = await self.execution_agent.execute("", {
-                        "session_id": state.session_id,
-                        "conversation_state": state.to_dict(),
-                        "user_roles": user_roles or [],
-                        "auth_token": auth_token,
-                        "user_type": state.user_type
-                    })
-                    
-                    # Check if awaiting filter or engagement selection - don't mark as completed
-                    is_awaiting_selection = (
-                        state.status == ConversationStatus.AWAITING_FILTER_SELECTION or
-                        state.status == ConversationStatus.AWAITING_ENGAGEMENT_SELECTION or
-                        result.get("engagement_selection_required")
+                    result = await self.execution_agent.execute(
+                        "",
+                        {
+                            "session_id": state.session_id,
+                            "conversation_state": state.to_dict(),
+                            "user_roles": user_roles or [],
+                            "auth_token": auth_token,
+                            "user_type": state.user_type,
+                        },
                     )
-                    
+                    is_awaiting_selection = (
+                        state.status == ConversationStatus.AWAITING_FILTER_SELECTION
+                        or state.status == ConversationStatus.AWAITING_ENGAGEMENT_SELECTION
+                        or result.get("engagement_selection_required")
+                    )
                     if not is_awaiting_selection:
-                        # Update state with execution result
                         if result.get("success"):
                             state.set_execution_result(result.get("execution_result", {}))
                         else:
-                            state.set_execution_result({
-                                "success": False,
-                                "error": result.get("error", "Execution failed")
-                            })
+                            state.set_execution_result(
+                                {"success": False, "error": result.get("error", "Execution failed")}
+                            )
                     else:
-                        # Persist state with engagement selection status (already set by ExecutionAgent)
                         conversation_state_manager.update_session(state)
-                        logger.info(f"📝 State persisted with engagement_selection_required (status={state.status.value})")
-                    
+                        logger.info(
+                            f"📝 State persisted with engagement_selection_required "
+                            f"(status={state.status.value})"
+                        )
                     return {
                         "success": True,
                         "response": result.get("output", ""),
                         "routing": route,
-                        "execution_result": result.get("execution_result")}
+                        "execution_result": result.get("execution_result"),
+                    }
                 else:
                     return {
                         "success": False,
                         "response": "Execution agent not available",
-                        "routing": route}
+                        "routing": route,
+                    }
+
+            # ----------------------------------------------------------------
+            # RAG – answer from documentation
+            # ----------------------------------------------------------------
             elif route == "rag":
-                # Route to RAG agent
-                state.handoff_to_agent("OrchestratorAgent", "RAGAgent", routing_decision["reason"])
+                state.handoff_to_agent(
+                    "OrchestratorAgent", "RAGAgent", routing_decision["reason"]
+                )
                 if self.rag_agent:
-                    result = await self.rag_agent.execute(user_input, {
-                        "session_id": state.session_id
-                    })
+                    result = await self.rag_agent.execute(
+                        user_input, {"session_id": state.session_id}
+                    )
                     return {
                         "success": True,
                         "response": result.get("output", ""),
-                        "routing": route}
+                        "routing": route,
+                    }
                 else:
                     return {
                         "success": False,
                         "response": "RAG agent not available",
-                        "routing": route
+                        "routing": route,
                     }
-            
+
+            # ----------------------------------------------------------------
+            # FILTER SELECTION – BU / Environment / Zone picker
+            # ----------------------------------------------------------------
             elif route == "filter_selection":
-                # Process user's filter selection (BU/Environment/Zone)
                 return await self._handle_filter_selection(user_input, state, user_roles)
-            
+
+            # ----------------------------------------------------------------
+            # ENGAGEMENT SELECTION – ENG users with multiple engagements
+            # ----------------------------------------------------------------
             elif route == "engagement_selection":
-                # Process user's engagement selection (ENG users)
                 return await self._handle_engagement_selection(user_input, state, user_roles)
-            
+
+            # ----------------------------------------------------------------
+            # UNKNOWN ROUTE
+            # ----------------------------------------------------------------
             else:
                 return {
                     "success": False,
                     "response": f"Unknown routing: {route}",
-                    "routing": route
+                    "routing": route,
                 }
+
         except Exception as e:
             logger.error(f"❌ Routing execution failed: {str(e)}")
             return {
                 "success": False,
                 "error": str(e),
                 "response": f"Error executing routing: {str(e)}",
-                "routing": route
+                "routing": route,
             }
 
     async def _handle_filter_selection(
