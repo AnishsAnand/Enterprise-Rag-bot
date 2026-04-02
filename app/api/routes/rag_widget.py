@@ -25,7 +25,7 @@ from collections import deque
 from app.services.scraper_service import scraper_service
 from app.services.postgres_service import postgres_service
 from app.services.ai_service import ai_service
-from app.agents import get_agent_manager  
+from app.adk.runner import get_adk_runner
 import numpy as np
 
 
@@ -1768,16 +1768,16 @@ async def call_maybe_async(fn, *args, **kwargs):
 @router.post("/widget/query")
 async def widget_query(request: WidgetQueryRequest, background_tasks: BackgroundTasks, http_request: Request = None):
     """
-    Query processing with image extraction
-    
-    User authentication is extracted from the Authorization header (Keycloak token).
+    Query endpoint — all intelligence is delegated to ADK Runner.
+
+    Auth context (token, user type) is extracted from HTTP headers and
+    forwarded so that ADK can call downstream APIs on behalf of the user.
     """
     try:
         query = request.query.strip()
         if not query:
             raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        # Extract user_id from Authorization header if not provided in request body
+
         if not request.user_id and http_request:
             request.user_id = get_user_id_from_request(
                 authorization=http_request.headers.get("Authorization"),
@@ -1785,125 +1785,57 @@ async def widget_query(request: WidgetQueryRequest, background_tasks: Background
                 x_user_email=http_request.headers.get("X-User-Email"),
                 default=None
             )
-            if request.user_id:
-                logger.info(f"📋 Extracted user_id from token: {request.user_id}")
 
-        logger.info(f"Processing widget query: '{query}' (force_rag_only: {request.force_rag_only}, user: {request.user_id})")
-        
-        # Session management
+        logger.info("Processing widget query: '%s' (user: %s)", query, request.user_id)
+
         session_id = await _get_or_create_session_id(request)
-        
-        # Agent routing (if not force_rag_only)
-        if request.force_rag_only:
-            should_route_to_agent = False
-        else:
-            should_route_to_agent = await _should_route_to_agent(query, session_id)
-        
-        # ==================== STEP 3: Route to Agent Manager if Applicable ====================
-        if should_route_to_agent:
-            logger.info(f"🎯 Routing to Agent Manager")
-            # Extract auth token from Authorization header
-            auth_token = None
-            user_type = None
-            if http_request:
-                auth_header = http_request.headers.get("Authorization", "")
-                if auth_header.startswith("Bearer "):
-                    auth_token = auth_header.replace("Bearer ", "")
-                # Extract user type (ENG = Engineer, CUS = Customer)
-                user_type = http_request.headers.get("usertype") or http_request.headers.get("Usertype")
-                if user_type:
-                    logger.info(f"👤 User type from header: {user_type}")
-            return await _handle_agent_routing(
-                query=query,
-                session_id=session_id,
-                request=request,
-                background_tasks=background_tasks,
-                auth_token=auth_token,
-                user_type=user_type
-            )
-        
-        #  Standard RAG flow with fast search
-        search_results = await _perform_document_search(query, request)
-        
-        if not search_results:
-            return await _handle_no_results(query, {}, request)
 
-        #  Early filtering
-        filtered_results = _filter_search_results(search_results, request)
-        base_context = _extract_base_context(filtered_results)
-        
-        if not base_context:
-            base_context = [r.get("content", "")[:1000] for r in filtered_results[:3]]
-
-        # Generate enhanced response
-        answer, expanded_context, confidence = await _generate_enhanced_response(
-            query, base_context
-        )
-
-        # Generate steps
-        steps_data = await _generate_steps(query, expanded_context, base_context, answer)
-
-        #  Fast parallel image extraction
-        selected_images = _extract_and_score_images(
-            query=query,
-            answer=answer,
-            filtered_results=filtered_results
-        )
-
-        # Build sources
-        sources = _build_sources(filtered_results, request)
-
-        # Generate summary
-        summary = await _generate_summary(answer, expanded_context)
-
-        # Combine steps with images
-        steps_with_images = _combine_steps_with_images(steps_data, selected_images)
-
-        # Calculate confidence
-        final_confidence = _calculate_final_confidence(
-            confidence, filtered_results, answer, request
-        )
-
-        # Store interaction
-        if request.store_interaction:
-            await _store_interaction(
-                query=query,
-                answer=answer,
-                confidence=final_confidence,
-                sources=sources,
-                background_tasks=background_tasks
+        auth_token = None
+        user_type = None
+        if http_request:
+            auth_header = http_request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                auth_token = auth_header.replace("Bearer ", "")
+            user_type = (
+                http_request.headers.get("usertype")
+                or http_request.headers.get("Usertype")
             )
 
-        # Format response
-        from app.services.webui_formatter import format_for_webui
-        
-        formatted_answer = format_for_webui(
-            answer=answer or "I was unable to generate a comprehensive answer.",
-            steps=steps_with_images,
-            images=selected_images,
-            query=query,
-            confidence=final_confidence,
-            summary=summary,
-            metadata={
-                "results_found": len(search_results),
-                "results_used": len(filtered_results),
-                "search_depth": request.search_depth
-            }
+        user_roles = getattr(request, "user_roles", None) or [
+            "admin", "developer", "viewer"
+        ]
+
+        adk_runner = get_adk_runner()
+        result = await adk_runner.process_request(
+            user_input=query,
+            session_id=session_id,
+            user_id=request.user_id or "widget_user", # Here some changes needed -kv (we can remove this openwebui widget user)
+            user_roles=user_roles,
+            auth_token=auth_token,
+            user_type=user_type,
+            force_rag_only=request.force_rag_only,
         )
+
+        follow_ups = result.get("follow_ups", [])
+        metadata = result.get("metadata", {})
+        sources = result.get("sources", [])
 
         return {
             "query": query,
-            "answer": formatted_answer,
-            "steps": steps_with_images,
-            "images": selected_images,
+            "answer": result.get("response", ""),
             "sources": sources,
-            "has_sources": len(sources) > 0,
-            "confidence": round(final_confidence, 3),
-            "search_depth": request.search_depth,
-            "results_found": len(search_results),
-            "results_used": len(filtered_results),
+            "intent_detected": result.get("routing") != "rag",
+            "routed_to": result.get("routing", "adk"),
+            "conversation_active": metadata.get("awaiting_engagement_selection", False),
+            "session_id": session_id,
+            "metadata": metadata,
             "timestamp": datetime.now().isoformat(),
-            "summary": summary,
+            "results_found": result.get("results_found", 0),
+            "confidence": result.get("confidence", 0.95),
+            "has_sources": len(sources) > 0,
+            "images": result.get("images", []),
+            "steps": result.get("steps", []),
+            "followUps": follow_ups,
         }
 
     except HTTPException:
@@ -1935,22 +1867,24 @@ async def _get_or_create_session_id(request: WidgetQueryRequest) -> str:
     return session_id
 
 
-async def _should_route_to_agent(query: str, session_id: str) -> bool:
-    """
-    Determine if query should be routed to agent manager.
-    
-    Strategy: Route ALL queries to the agent manager (orchestrator).
-    The orchestrator intelligently handles:
-    - Greetings ("hi", "hello")
-    - Capability questions ("what can you do?")
-    - Resource operations ("list clusters")
-    - Documentation queries (routes to RAG internally)
-    
-    This ensures consistent, intelligent handling of all user inputs.
-    """
-    from app.agents.state.conversation_state import conversation_state_manager, ConversationStatus
-    
-    query_lower = query.lower().strip()
+# ===================== COMMENTED OUT — ADK handles all routing now =====================
+# The following functions were used by the old widget_query flow before ADK integration.
+# They are preserved here for reference but are no longer called.
+#
+# async def _should_route_to_agent(query: str, session_id: str) -> bool:
+#     """
+#     Determine if query should be routed to agent manager.
+#
+#     Strategy: Route ALL queries to the agent manager (orchestrator).
+#     The orchestrator intelligently handles:
+#     - Greetings ("hi", "hello")
+#     - Capability questions ("what can you do?")
+#     - Resource operations ("list clusters")
+#     - Documentation queries (routes to RAG internally)
+#
+#     This ensures consistent, intelligent handling of all user inputs.
+#     """
+'''
     
     # Skip empty queries
     if not query_lower:
@@ -2053,12 +1987,10 @@ async def _handle_agent_routing(query: str, session_id: str, request: WidgetQuer
     """Handle routing to agent manager and process response."""
     from app.services.webui_formatter import format_agent_response_for_webui
     
-    agent_manager = get_agent_manager(
-        vector_service=postgres_service,
-        ai_service=ai_service)
-    
+    adk_runner = get_adk_runner()
+
     user_roles = getattr(request, 'user_roles', None) or ["admin", "developer", "viewer"]
-    agent_result = await agent_manager.process_request(
+    agent_result = await adk_runner.process_request(
         user_input=query,
         session_id=session_id,
         user_id=request.user_id or "widget_user",
@@ -2749,6 +2681,9 @@ def _enhanced_similarity(query: str, text: str) -> float:
     
     score = 0.4 * seq_ratio + 0.4 * overlap + 0.2 * substring_bonus
     return min(1.0, max(0.0, score))
+'''  # END of commented-out block — all routing is now handled by ADK Runner
+# ===================== END COMMENTED OUT =====================
+
 
 @router.post("/widget/execute-task")
 async def widget_execute_task(request: TaskExecutionRequest, background_tasks: BackgroundTasks):

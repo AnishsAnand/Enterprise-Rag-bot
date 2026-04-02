@@ -122,7 +122,7 @@ class BaseResourceAgent(ABC):
     
     async def get_datacenters(self, operation: str = "list", engagement_id: int = None, user_roles: List[str] = None, auth_token: str = None, user_id: str = None, user_type: str = None) -> List[Dict[str, Any]]:
         """
-        Common utility: Get available datacenters.
+        Common utility: Get available datacenters (endpoints) for an engagement.
         Args:
             engagement_id: Optional engagement ID (fetches if not provided)
             user_roles: User roles for permission checking
@@ -141,23 +141,35 @@ class BaseResourceAgent(ABC):
                     auth_token=auth_token,
                     user_id=user_id,
                     user_type=user_type)
-            params = {}
-            if engagement_id:
-                params["engagement_id"] = engagement_id
-            result = await api_executor_service.execute_operation(
-                resource_type="endpoint",
-                operation="list",
-                params={"engagement_id": engagement_id},
-                user_roles=user_roles or [],
-                auth_token=auth_token)
-            if not result.get("success"):
-                logger.error(f"Failed to fetch datacenters: {result.get('error')}")
+            if not engagement_id:
+                logger.error("Cannot fetch datacenters without engagement_id")
                 return []
-            datacenters = result.get("data", [])
-            # Handle nested response
-            if isinstance(datacenters, dict) and "data" in datacenters:
-                datacenters = datacenters.get("data", [])
-            return datacenters if isinstance(datacenters, list) else []
+
+            url = f"https://ipcloud.tatacommunications.com/portalservice/configservice/getEndpointsByEngagement/{engagement_id}"
+            headers = await api_executor_service._get_auth_headers(
+                user_id=user_id, auth_token=auth_token
+            )
+            client = await api_executor_service._get_http_client()
+            logger.info(f"🌐 Fetching datacenters: GET {url}")
+            response = await client.get(url, headers=headers)
+            logger.info(f"📡 Datacenters response: status={response.status_code}")
+
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch datacenters: HTTP {response.status_code}")
+                return []
+
+            data = response.json()
+            endpoints = data
+            if isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], dict):
+                    endpoints = data["data"].get("endpoints", [])
+                elif "data" in data and isinstance(data["data"], list):
+                    endpoints = data["data"]
+                elif "endpoints" in data:
+                    endpoints = data["endpoints"]
+
+            logger.info(f"✅ Found {len(endpoints)} datacenters/endpoints")
+            return endpoints if isinstance(endpoints, list) else []
         except Exception as e:
             logger.error(f"Error fetching datacenters: {str(e)}")
             return []

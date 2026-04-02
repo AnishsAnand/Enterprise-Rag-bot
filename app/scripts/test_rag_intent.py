@@ -44,26 +44,23 @@ async def test_rag_search():
 
 
 async def test_intent_full(user_input: str):
-    """Test full intent flow (RAG + LLM)."""
-    from app.agents.intent_agent import IntentAgent
+    """RAG search for API specs (IntentAgent was removed; routing is ADK-only)."""
+    from app.services.postgres_service import postgres_service
 
-    agent = IntentAgent()
-    result = await agent.execute(user_input, context={"session_id": "test-session"})
+    await postgres_service.initialize()
+    if not postgres_service.pool:
+        print("❌ PostgreSQL not available.")
+        return None
 
-    print(f"\n🎯 Intent test: '{user_input}'")
+    results = await postgres_service.search_api_specs(user_input, n_results=5)
+    print(f"\n🎯 RAG API-spec search (replaces old IntentAgent test): '{user_input}'")
     print("-" * 50)
-    print("intent_detected:", result.get("intent_detected"))
-    idata = result.get("intent_data", {})
-    print("resource_type:", idata.get("resource_type"))
-    print("operation:", idata.get("operation"))
-    print("required_params:", idata.get("required_params"))
-    print("optional_params:", idata.get("optional_params"))
-    print("has_api_spec:", bool(idata.get("api_spec")))
-    if idata.get("api_spec"):
-        print("api_spec length:", len(idata["api_spec"]))
-    print()
-
-    return result
+    for i, r in enumerate(results):
+        title = (r.get("metadata") or {}).get("title", "")
+        score = r.get("relevance_score", 0)
+        snippet = (r.get("content") or "")[:500]
+        print(f"--- {i + 1} score={score:.3f} {title} ---\n{snippet}\n")
+    return results
 
 
 def main():

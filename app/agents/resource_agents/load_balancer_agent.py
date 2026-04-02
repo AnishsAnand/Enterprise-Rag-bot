@@ -1259,7 +1259,7 @@ Return ONLY the formatted markdown. NO preamble or explanation."""
                         "name": endpoint_name
                     }
     
-        logger.info(f"📍 Built endpoint map: {len(endpoint_map)} locations")
+        logger.info(f"📍 Built endpoint map: {len(endpoint_map)} locations") #I have to check here later -kv
     
     # Enrich each LB
         enriched = []

@@ -1,22 +1,7 @@
 """
 Multi-Agent System for Enterprise RAG Bot.
+
+NOTE: The top-level orchestration agents (AgentManager, OrchestratorAgent, etc.)
+have been replaced by Google ADK (see app.adk). Only the resource_agents sub-package
+is still used for domain-specific API logic.
 """
-
-from app.agents.agent_manager import AgentManager, get_agent_manager
-from app.agents.orchestrator_agent import OrchestratorAgent
-from app.agents.intent_agent import IntentAgent
-from app.agents.validation_agent import ValidationAgent
-from app.agents.execution_agent import ExecutionAgent
-from app.agents.rag_agent import RAGAgent
-from app.agents.base_agent import BaseAgent
-
-__all__ = [
-    "AgentManager",
-    "get_agent_manager",
-    "OrchestratorAgent",
-    "IntentAgent",
-    "ValidationAgent",
-    "ExecutionAgent",
-    "RAGAgent",
-    "BaseAgent"
-]

@@ -23,8 +23,9 @@ FALLBACK_MODELS = [
     "openai/gpt-oss-20b",                    # Reliable (0.345s), good token efficiency (125 tokens)
     "meta/Llama-4-Scout-17B-16E-Instruct",   # Reliable (0.466s), efficient (25 tokens)
 ]
-# Removed unreliable/unavailable models:
-# - openai/gpt-oss-120b (unreliable - returns empty responses intermittently)
+# NOTE: openai/gpt-oss-120b is now the PRIMARY model (CHAT_MODEL env var).
+# It supports native LLM tool calling and is used by the ADK agent framework.
+# Removed unavailable models:
 # - meta/llama-3.1-70b-instruct (not available - no healthy deployments)
 # - openai/gpt-4o-mini (not available - invalid model name)
 

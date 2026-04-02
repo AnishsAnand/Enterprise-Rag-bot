@@ -8,6 +8,7 @@ This directory contains Docker Compose configurations and utility scripts that s
 misc/
 ├── docker/          # Docker Compose configurations
 ├── scripts/         # Utility scripts
+├── tests/           # Manual shell smoke tests (curl / OpenAI-compatible API)
 └── README.md        # This file
 ```
 
@@ -89,7 +90,7 @@ These files support the main application located in:
 - **Frontend**: `user-frontend/`, `angular-frontend/`
 - **Configs**: `docker/` (root level)
 - **Documentation**: `metadata/`
-- **Tests**: `tests/`
+- **Manual smoke tests**: [`tests/`](tests/README.md) — shell scripts only (no legacy pytest suite)
 
 ## 📋 Configuration Reference
 
@@ -156,10 +157,17 @@ docker-compose -f misc/docker/docker-compose.yml logs [service-name]
 
 ## 🔗 Related Documentation
 
-- [Quick Start Guide](../metadata/QUICK_START.md)
-- [Deployment Success](../metadata/DEPLOYMENT_SUCCESS.md)
-- [Architecture](../metadata/ARCHITECTURE.md)
-- [OpenWebUI Integration](../metadata/OPENWEBUI_README.md)
+Current docs live under [`metadata/`](../metadata/). Highlights:
+
+- [Architecture diagram](../metadata/ARCHITECTURE_DIAGRAM.md) — high-level system view
+- [Database schema](../metadata/DATABASE_SCHEMA.md) — SQLAlchemy / app DB tables
+- [Docker volumes & migration](../metadata/DOCKER_VOLUMES_MIGRATION.md) — deployment storage notes
+- [API auth flow](../metadata/API_AUTH_FLOW.md) — Keycloak / token flow
+- [Embedding API notes](../metadata/EMBEDDING_API_ANALYSIS.md) — RAG embeddings
+- RAG API content for ingestion: [`metadata/api_spec_chunks/`](../metadata/api_spec_chunks/)
+- Ingest / retrain scripts: [`app/scripts/README.md`](../app/scripts/README.md)
+
+OpenWebUI-style compatibility is implemented in code under [`app/routers/openai_compatible.py`](../app/routers/openai_compatible.py) (there is no separate OpenWebUI README in `metadata/`).
 
 ## 📊 File Overview
 
@@ -167,6 +175,7 @@ docker-compose -f misc/docker/docker-compose.yml logs [service-name]
 |----------|-------|---------|
 | Docker Compose | 2 files | Container orchestration variants |
 | Scripts | 2 files | Automation and utility operations |
+| Tests | 3 shell scripts | See [`tests/README.md`](tests/README.md) — backend / OpenAPI smoke checks |
 
 ---
 

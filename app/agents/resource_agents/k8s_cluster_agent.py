@@ -196,20 +196,18 @@ class K8sClusterAgent(BaseResourceAgent):
             
             clusters = result.get("data", [])
             logger.info(f"✅ Found {len(clusters)} clusters")
-            # Apply intelligent filtering if user specified criteria
+
+            # Apply intelligent filtering if user specified location/criteria
             user_query = context.get("user_query", "")
             filter_criteria = self._extract_filter_criteria(user_query)
-            
             if filter_criteria and clusters:
                 logger.info(f"🔍 Applying filter: {filter_criteria}")
                 clusters = await self.filter_with_llm(clusters, filter_criteria, user_query)
                 logger.info(f"✅ After filtering: {len(clusters)} clusters")
-            # Format response with agentic LLM formatter
-            formatted_response = await self.format_response_agentic(
-                operation="list",
-                raw_data=clusters,
-                user_query=user_query,
-                context={"query_type": "general", "endpoint_names": params.get("endpoint_names", [])})
+
+            # Build a clean Markdown table directly — skip extra LLM formatting call.
+            # The ADK root LLM will wrap this into the final conversational reply.
+            formatted_response = self._format_cluster_list_markdown(clusters)
             return {
                 "success": True,
                 "data": clusters,
@@ -221,7 +219,35 @@ class K8sClusterAgent(BaseResourceAgent):
         except Exception as e:
             logger.error(f"❌ Error listing clusters: {str(e)}", exc_info=True)
             raise
-    
+
+    def _format_cluster_list_markdown(self, clusters: list) -> str:
+        """Build a Markdown table of clusters grouped by datacenter, with no LLM call."""
+        if not clusters:
+            return "No clusters found for your engagement."
+
+        # Group by datacenter/endpoint
+        by_endpoint: dict = {}
+        for c in clusters:
+            ep = c.get("displayNameEndpoint") or c.get("endpointName") or "Unknown"
+            by_endpoint.setdefault(ep, []).append(c)
+
+        lines = [f"Found **{len(clusters)} cluster(s)** across {len(by_endpoint)} datacenter(s):\n"]
+        for ep in sorted(by_endpoint.keys()):
+            ep_clusters = by_endpoint[ep]
+            lines.append(f"\n### 📍 {ep}\n")
+            lines.append("| Cluster Name | Status | Nodes | K8s Version |")
+            lines.append("|---|---|---|---|")
+            for cl in ep_clusters:
+                status_raw = (cl.get("status") or "").lower()
+                status_icon = "✅" if status_raw in ("healthy", "running", "active") else "⚠️"
+                name = cl.get("clusterName") or cl.get("name") or "N/A"
+                nodes = cl.get("nodescount") or cl.get("nodeCount") or "-"
+                version = cl.get("kubernetesVersion") or cl.get("k8sVersion") or "N/A"
+                lines.append(f"| {name} | {status_icon} {cl.get('status','N/A')} | {nodes} | {version} |")
+
+        lines.append(f"\n---\n📋 **Total: {len(clusters)} clusters**")
+        return "\n".join(lines)
+
     async def _read_cluster(
         self,
         params: Dict[str, Any],

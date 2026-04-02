@@ -42,11 +42,11 @@ FALLBACK_CHAT_MODELS = [
     "openai/gpt-oss-20b",                    # Reliable 20B model
     "meta/Llama-4-Scout-17B-16E-Instruct",   # Reliable Scout model
 ]
-# Removed unreliable/unavailable models:
-# - openai/gpt-oss-120b (unreliable - returns empty responses intermittently)
+# NOTE: openai/gpt-oss-120b is now the PRIMARY model (set via CHAT_MODEL env var).
+# It supports native tool calling and is the main model used by the ADK agents.
+# Removed unavailable models:
 # - meta/llama-3.1-70b-instruct (not available - no healthy deployments)
 # - openai/gpt-4o-mini (not available - invalid model name)
-# Previously: ["openai/gpt-oss-20b", "meta/llama-3.1-70b-instruct", "meta/Llama-3.1-8B-Instruct"]
 
 GROK_BASE_URL = os.getenv("GROK_BASE_URL", "https://models.cloudservices.tatacommunications.com/v1")
 

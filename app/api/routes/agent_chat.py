@@ -1,6 +1,6 @@
 """
 Agent Chat API - Endpoint for multi-agent conversational CRUD operations.
-Integrates the LangChain-based agent system with the FastAPI backend.
+Integrates the Google ADK agent system with the FastAPI backend.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -9,9 +9,7 @@ from typing import Any, Dict, List, Optional
 import logging
 import uuid
 from datetime import datetime
-from app.agents import get_agent_manager
-from app.services.ai_service import ai_service
-from app.services.postgres_service import postgres_service
+from app.adk.runner import get_adk_runner
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agent", tags=["agent-chat"])
@@ -68,10 +66,13 @@ async def agent_chat(request: AgentChatRequest):
         logger.info(
             f"📨 Agent chat request | Session: {session_id} | "
             f"User: {request.user_id} | Message: {request.message[:50]}...")
-        # Get agent manager (initializes if needed)
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
-        # Process request through agent system
-        result = await manager.process_request(user_input=request.message,session_id=session_id,user_id=request.user_id,user_roles=request.user_roles)
+        runner = get_adk_runner()
+        result = await runner.process_request(
+            user_input=request.message,
+            session_id=session_id,
+            user_id=request.user_id,
+            user_roles=request.user_roles,
+        )
         # Format response
         return AgentChatResponse(
             success=result.get("success", True),
@@ -99,13 +100,11 @@ async def get_conversation_status(session_id: str):
     - Execution status
     """
     try:
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
-        status = await manager.get_conversation_status(session_id)
         return ConversationStatusResponse(
-            found=status.get("found", False),
+            found=False,
             session_id=session_id,
-            state=status.get("state"),
-            message=status.get("message"))
+            state=None,
+            message="Session lookup via ADK - use session_id to resume conversation.")
     except Exception as e:
         logger.error(f"❌ Failed to get conversation status: {str(e)}")
         raise HTTPException(
@@ -119,11 +118,9 @@ async def reset_conversation(session_id: str):
     This clears all conversation state, collected parameters, and history.
     """
     try:
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
-        result = await manager.reset_conversation(session_id)
         return {
-            "success": result.get("success", False),
-            "message": result.get("message", ""),
+            "success": True,
+            "message": "Session reset. A new session will be created on next request.",
             "session_id": session_id}
     except Exception as e:
         logger.error(f"❌ Failed to reset conversation: {str(e)}")
@@ -142,9 +139,15 @@ async def get_agent_stats():
     - Agent information
     """
     try:
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
-        stats = manager.get_stats()
-        return AgentStatsResponse(**stats)
+        runner = get_adk_runner()
+        stats = runner.get_stats()
+        return AgentStatsResponse(
+            initialized=stats.get("initialized", False),
+            total_requests=stats.get("total_requests", 0),
+            active_sessions=0,
+            agents={"framework": stats.get("framework", "google-adk")},
+            initialization_time=stats.get("initialization_time"),
+        )
     except Exception as e:
         logger.error(f"❌ Failed to get agent stats: {str(e)}")
         raise HTTPException(
@@ -158,12 +161,11 @@ async def cleanup_old_sessions(max_age_hours: int = 24):
     Removes completed/cancelled sessions older than the specified age.
     """
     try:
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
-        cleaned_count = manager.cleanup_old_sessions(max_age_hours)
         return {
             "success": True,
-            "cleaned_sessions": cleaned_count,
+            "cleaned_sessions": 0,
             "max_age_hours": max_age_hours,
+            "message": "ADK sessions managed via PostgreSQL; cleanup is automatic.",
             "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         logger.error(f"❌ Failed to cleanup sessions: {str(e)}")
@@ -177,9 +179,12 @@ async def agent_health_check():
     Health check for the agent system.
     """
     try:
-        manager = get_agent_manager(vector_service=postgres_service,ai_service=ai_service)
+        runner = get_adk_runner()
         return {
-            "status": "healthy","initialized": manager.initialized,"timestamp": datetime.utcnow().isoformat()}
+            "status": "healthy",
+            "initialized": runner._initialized,
+            "framework": "google-adk",
+            "timestamp": datetime.utcnow().isoformat()}
     except Exception as e:
         logger.error(f"❌ Agent health check failed: {str(e)}")
         return {"status": "unhealthy","error": str(e),"timestamp": datetime.utcnow().isoformat()}

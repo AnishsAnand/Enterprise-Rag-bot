@@ -6,7 +6,7 @@
 
 ## Endpoint
 - **Method:** GET
-- **URL:** h{BASE_URL_PAAS_SERVICE}/paas/getIpcEngFromPaasEng/{engagement_id}
+- **URL:** {BASE_URL_PAAS_SERVICE}/paas/getIpcEngFromPaasEng/{engagement_id}
 - **Auth:** Bearer token (from Keycloak)
 - **Description:** Convert a PaaS engagement ID to its corresponding IPC (IPCloud) engagement ID. This is essential for cross-service API calls that require IPC engagement IDs
 

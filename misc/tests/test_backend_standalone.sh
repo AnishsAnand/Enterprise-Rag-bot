@@ -16,7 +16,9 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-cd /home/unixlogin/vayuMaya/Enterprise-Rag-bot
+# Project root = parent of misc/tests/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(dirname "$SCRIPT_DIR")/.."
 
 echo ""
 echo -e "${BLUE}Step 1: Clearing Python cache${NC}"

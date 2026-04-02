@@ -70,6 +70,19 @@ class APIExecutorService:
             logger.error(f"❌ Failed to parse resource schema: {str(e)}")
             self.resource_schema = {"resources": {}}
     
+    BASE_URL_MAP = {
+        "{BASE_URL_PAAS_SERVICE}": "https://ipcloud.tatacommunications.com/paasservice",
+        "{BASE_URL_PORTAL_SERVICE}": "https://ipcloud.tatacommunications.com/portalservice",
+        "{BASE_URL_NETWORK_SERVICE}": "https://ipcloud.tatacommunications.com/networkservice",
+        "{BASE_URL_CONFIG_SERVICE}": "https://ipcloud.tatacommunications.com/portalservice",
+    }
+
+    def _resolve_base_urls(self, url: str) -> str:
+        """Replace base URL placeholders with actual service URLs."""
+        for placeholder, actual_url in self.BASE_URL_MAP.items():
+            url = url.replace(placeholder, actual_url)
+        return url
+
     def _parse_rag_content_to_operation_config(self, content: str) -> Optional[Dict[str, Any]]:
         """Parse RAG markdown content to operation config (endpoint, parameters, permissions)."""
         if not content or len(content) < 20:
@@ -80,9 +93,9 @@ class APIExecutorService:
             method_match = re.search(r"\*\*Method:\*\*\s*(\w+)", content, re.IGNORECASE)
             if method_match:
                 method = method_match.group(1).upper()
-            url_match = re.search(r"\*\*URL:\*\*\s*(\S+)", content, re.IGNORECASE)
+            url_match = re.search(r"\*\*URL:\*\*\s*`?(\S+?)`?\s*$", content, re.IGNORECASE | re.MULTILINE)
             if url_match:
-                url = url_match.group(1).strip()
+                url = self._resolve_base_urls(url_match.group(1).strip().strip("`"))
             if not url:
                 return None
             required = []
@@ -457,19 +470,39 @@ class APIExecutorService:
         Set/update the selected engagement ID for a user session.
         Called when ENG user selects an engagement.
         
-        Args:
-            user_id: User ID for session
-            engagement_id: Selected engagement ID
-            engagement_data: Full engagement data dict (optional)
-            
-        Returns:
-            True if successful
+        IMPORTANT: Also clears the cached ipc_engagement_id so it is re-fetched
+        for the new engagement. Without this, list_load_balancers (and any other
+        IPC-based call) would keep returning data for the PREVIOUS engagement.
         """
-        await self._update_user_session(
-            user_id=user_id,
-            paas_engagement_id=engagement_id,
-            engagement_data=engagement_data
-        )
+        async with self.session_lock:
+            session = self.user_sessions.get(user_id, {})
+            old_id = session.get("paas_engagement_id")
+            if old_id and old_id != engagement_id:
+                # Engagement switched — clear IPC + all per-engagement resource caches.
+                # list_load_balancers (and others) reuse session["load_balancers"] without
+                # checking engagement; without this, LBs from the previous engagement are returned.
+                for key in (
+                    "ipc_engagement_id",
+                    "load_balancers",
+                    "endpoints",
+                    "business_units",
+                    "department_details",
+                    "environments_list",
+                    "zones_list",
+                ):
+                    session.pop(key, None)
+                logger.info(
+                    "Engagement switched %s → %s for user %s: cleared IPC + per-engagement caches",
+                    old_id, engagement_id, user_id,
+                )
+            session["paas_engagement_id"] = engagement_id
+            session["engagement_source_user_type"] = "ENG"
+
+            if engagement_data:
+                session["engagement_data"] = engagement_data
+            session["cached_at"] = datetime.utcnow()
+            self.user_sessions[user_id] = session
+
         logger.info(f"✅ Set engagement ID {engagement_id} for user {user_id}")
         return True
     
@@ -491,15 +524,40 @@ class APIExecutorService:
         """
         if not user_id:
             user_id = self._get_user_id_from_email()
-        
-        # Check user session cache first (works for both ENG and CUS once selected)
+
+        ut = (user_type or "").upper()
+
+        # Per-user cache must not mix ENG-selected (or legacy) PAAS ids with CUS requests.
+        # Same user_id after testing as ENG would otherwise keep using the last ENG engagement.
         if not force_refresh:
             session = await self._get_user_session(user_id)
             if session and "paas_engagement_id" in session:
                 paas_id = session["paas_engagement_id"]
-                logger.debug(f"✅ Using cached PAAS engagement ID from session: {paas_id}")
-                return paas_id
-        
+                src = session.get("engagement_source_user_type")
+                if ut == "CUS":
+                    if src == "CUS":
+                        logger.debug(
+                            "Using cached PAAS engagement ID for CUS: %s", paas_id
+                        )
+                        return paas_id
+                    logger.info(
+                        "CUS: ignoring cached PAAS id %s (cache source=%s; refetching engagements)",
+                        paas_id,
+                        src,
+                    )
+                else:
+                    # ENG or unset user_type: use cache unless it was only for CUS
+                    if src == "CUS":
+                        logger.info(
+                            "ENG: ignoring CUS-scoped PAAS cache %s — refetching",
+                            paas_id,
+                        )
+                    else:
+                        logger.debug(
+                            "Using cached PAAS engagement ID from session: %s", paas_id
+                        )
+                        return paas_id
+
         # Fetch engagements from API
         logger.info(f"🔍 Fetching engagement details from API (user_type: {user_type})...")
         engagements = await self.get_engagements_list(auth_token=auth_token, user_id=user_id)
@@ -512,11 +570,13 @@ class APIExecutorService:
         if user_type == "CUS" or len(engagements) == 1:
             engagement = engagements[0]
             paas_engagement_id = engagement.get("id")
-            
+            src = "CUS" if user_type == "CUS" else "ENG"
+
             await self._update_user_session(
                 user_id=user_id,
                 paas_engagement_id=paas_engagement_id,
-                engagement_data=engagement
+                engagement_data=engagement,
+                engagement_source_user_type=src,
             )
             # Also update legacy cache for backward compatibility
             self.cached_engagement = engagement
@@ -526,7 +586,19 @@ class APIExecutorService:
             return paas_engagement_id
         
         # ENG (Engineer) with multiple engagements: Need to prompt for selection
-        # Cache the engagements so we don't need to fetch them again
+        # Re-read session — we may have skipped cache above (e.g. CUS→ENG transition)
+        # while set_engagement_id already stored paas_engagement_id + ENG source.
+        session2 = await self._get_user_session(user_id)
+        if session2:
+            src2 = session2.get("engagement_source_user_type")
+            pid2 = session2.get("paas_engagement_id")
+            if src2 == "ENG" and pid2 is not None:
+                logger.info(
+                    "Using PAAS engagement %s from session after multi-eng fetch (ENG selection)",
+                    pid2,
+                )
+                return pid2
+
         self._pending_engagements = engagements
         self._pending_engagements_user = user_id
         logger.info(f"🔄 ENG user has {len(engagements)} engagements - selection required")
@@ -588,7 +660,7 @@ class APIExecutorService:
     
     async def get_ipc_engagement_id(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None) -> Optional[int]:
         """
-        Convert PAAS engagement ID to IPC engagement ID.
+        Convert PAAS engagement ID to IPC engagement ID via direct HTTP call.
         Uses per-user session storage to avoid repeated API calls.
         Args:
             engagement_id: PAAS Engagement ID (fetches if not provided)
@@ -598,8 +670,11 @@ class APIExecutorService:
         Returns:
             IPC Engagement ID or None if failed
         """
+        import httpx
+
         if not user_id:
             user_id = self._get_user_id_from_email()
+
         # Check user session cache first
         if not force_refresh:
             session = await self._get_user_session(user_id)
@@ -607,34 +682,80 @@ class APIExecutorService:
                 ipc_id = session["ipc_engagement_id"]
                 logger.debug(f"✅ Using cached IPC engagement ID from session: {ipc_id}")
                 return ipc_id
+
         # Get PAAS engagement ID if not provided
         if engagement_id is None:
             engagement_id = await self.get_engagement_id(user_id=user_id, auth_token=auth_token)
             if not engagement_id:
                 return None
-        logger.info(f"🔄 Converting PAAS engagement {engagement_id} to IPC engagement ID...")
-        result = await self.execute_operation(
-            resource_type="k8s_cluster",
-            operation="get_ipc_engagement",
-            params={"engagement_id": engagement_id},
-            user_roles=None,
-            auth_token=auth_token
-        )
-        if result.get("success") and result.get("data"):
-            data = result["data"]
-            if data.get("status") == "success" and data.get("data"):
-                ipc_engid = data["data"].get("ipc_engid")
+
+        logger.info(f"🔄 Converting PAAS engagement {engagement_id} to IPC engagement ID (direct call)...")
+
+        base_url = os.getenv("PAAS_BASE_URL", "https://ipcloud.tatacommunications.com/paasservice")
+        url = f"{base_url}/paas/getIpcEngFromPaasEng/{engagement_id}"
+        headers = {"Content-Type": "application/json"}
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        else:
+            logger.error("❌ get_ipc_engagement_id: auth_token is missing — cannot call API")
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, headers=headers)
+                logger.info(f"🌐 IPC engagement API: GET {url} → HTTP {resp.status_code}")
+
+                if resp.status_code == 401:
+                    logger.error(
+                        f"❌ IPC engagement 401 Unauthorized for PaaS engagement {engagement_id}. "
+                        "The auth token may not have access to the IPC layer for this engagement."
+                    )
+                    return None
+                if resp.status_code == 404:
+                    logger.error(
+                        f"❌ IPC engagement not found (404) for PaaS engagement {engagement_id}. "
+                        "This engagement may not have an IPC mapping."
+                    )
+                    return None
+                if not resp.is_success:
+                    logger.error(
+                        f"❌ IPC engagement API failed: HTTP {resp.status_code} for engagement {engagement_id}"
+                    )
+                    return None
+
+                data = resp.json()
+                # The API returns {"status": "success", "data": {"ipc_engid": ...}} or similar
+                ipc_engid = None
+                if isinstance(data, dict):
+                    inner = data.get("data") or data
+                    ipc_engid = (
+                        inner.get("ipc_engid")
+                        or inner.get("ipcEngagementId")
+                        or inner.get("ipcEngId")
+                        or inner.get("ipc_engagement_id")
+                    )
+
                 if ipc_engid:
-                    # Update user session with IPC engagement ID
                     await self._update_user_session(
                         user_id=user_id,
                         ipc_engagement_id=ipc_engid,
-                        paas_engagement_id=engagement_id)
-                    
-                    logger.info(f"✅ Cached IPC engagement ID: {ipc_engid}")
+                        paas_engagement_id=engagement_id,
+                    )
+                    logger.info(f"✅ IPC engagement ID: {ipc_engid} (for PaaS {engagement_id})")
                     return ipc_engid
-        logger.error("❌ Failed to get IPC engagement ID")
-        return None
+
+                logger.error(
+                    f"❌ IPC engagement ID not found in response for PaaS engagement {engagement_id}. "
+                    f"Response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}"
+                )
+                return None
+
+        except httpx.TimeoutException:
+            logger.error(f"❌ IPC engagement API timed out for engagement {engagement_id}")
+            return None
+        except Exception as e:
+            logger.error(f"❌ IPC engagement API error for engagement {engagement_id}: {e}", exc_info=True)
+            return None
     async def get_endpoints(self, engagement_id: int = None, user_id: str = None, force_refresh: bool = False, auth_token: str = None, user_type: str = None) -> Optional[List[Dict[str, Any]]]:
         """
         Get available endpoints (data centers) for an engagement.
@@ -1720,6 +1841,8 @@ class APIExecutorService:
                     "timestamp": start_time.isoformat()}
             
             if user_roles is not None:
+                required_perms = operation_config.get("permissions", [])
+                logger.info(f"🔐 Permission check: {resource_type}.{operation} | user_roles={user_roles} | required={required_perms}")
                 if not self._check_permissions_with_config(operation_config, user_roles):
                     is_read_only = user_roles == ["viewer"]
                     is_write_operation = operation in ["create", "update", "delete", "provision"]
@@ -2544,7 +2667,7 @@ class APIExecutorService:
             url = f"https://ipcloud.tatacommunications.com/portalservice/securityservice/departments/{ipc_engagement_id}"
             logger.info(f"🏢 Fetching business units from: {url} (IPC engagement ID: {ipc_engagement_id})")
             # Get auth token - prefer passed token
-            token = auth_token or await self._get_or_refresh_token(user_id)
+            token = auth_token or await self._get_or_refresh_token(user_id) # I have check this part later -kv
             if not token:
                 return {
                     "success": False,

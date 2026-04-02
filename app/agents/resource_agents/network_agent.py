@@ -98,11 +98,23 @@ class NetworkAgent(BaseResourceAgent):
                 if not ipc_engagement_id:
                     return {
                         "success": False,
-                        "error": "Failed to get IPC engagement ID",
-                        "response": "Unable to retrieve IPC engagement information."}
+                        "error": "IPC engagement mapping not found",
+                        "response": (
+                            f"Unable to list firewalls: the IPC engagement mapping for your PaaS engagement "
+                            f"(ID: {engagement_id}) could not be retrieved. "
+                            "This typically means your account does not have firewall resources configured "
+                            "in this engagement, or your token does not have access to the IPC layer. "
+                            "Please contact your administrator if you believe this is an error."
+                        )
+                    }
             # Get endpoints if not provided
             if not endpoint_ids:
-                datacenters = await self.get_datacenters(auth_token=auth_token, user_id=user_id, user_type=user_type)
+                datacenters = await self.get_datacenters(
+                    auth_token=auth_token,
+                    user_id=user_id,
+                    user_type=user_type,
+                    engagement_id=engagement_id,  # pass engagement_id so it doesn't fall back to "default" user
+                )
                 endpoint_ids = [dc.get("endpointId") for dc in datacenters if dc.get("endpointId")]
             logger.info(f"🔍 Listing firewalls for endpoints: {endpoint_ids}")
             # Call API executor service

@@ -152,6 +152,7 @@ async def get_rich_content_from_widget(
     """
     try:
         # Construct widget request
+        #  Here we need to work on something to make it robust and handle the errors gracefully - Kv
         widget_url = os.getenv(
             "WIDGET_INTERNAL_URL",
             "http://127.0.0.1:8000/api/widget/query",
@@ -165,19 +166,20 @@ async def get_rich_content_from_widget(
             "auto_execute": True,
             "store_interaction": False,  
             "session_id": session_id,
-            "user_id": user_id or "webui_user"}
+            "user_id": user_id or "webui_user"} # Here we need to work on something to make it robust and handle the errors gracefully - Kv (we can remove this opewebui user)
         
         # Prepare headers for widget call
         headers = {}
         if auth_token:
             headers["Authorization"] = auth_token
         if user_type:
-            headers["X-User-Type"] = user_type
+            headers["usertype"] = user_type
         
         logger.info(f"[OpenWebUI] Calling widget endpoint for rich content: {query[:50]}")
         
-        # Make async HTTP call to widget (longer timeout for SSE/streaming operations)
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        # ADK with LLM tool calling can take up to 3-4 min for large resource lists.
+        # Timeout must exceed the worst-case ADK run time.
+        async with httpx.AsyncClient(timeout=360.0) as client:
             response = await client.post(widget_url, json=widget_payload, headers=headers)
             
             if response.status_code == 200:
@@ -196,7 +198,7 @@ async def get_rich_content_from_widget(
                 return None
                 
     except httpx.TimeoutException as e:
-        logger.warning(f"[WebUI] Widget call timeout after 120s: {type(e).__name__}")
+        logger.warning(f"[WebUI] Widget call timeout after 360s: {type(e).__name__}")
         return None
     except Exception as e:
         logger.warning(f"[WebUI] Widget call exception: {type(e).__name__}: {e}")
@@ -246,10 +248,17 @@ async def build_rich_response(
         summary = widget_response.get("summary")
         confidence = widget_response.get("confidence", 0.0)
         
-        # Check if this is an agent response (cluster listings, etc.)
+        # Check if this is an agent response (cluster listings, resource data, etc.)
+        # ADK routes return "adk_native" or "adk"; old agent manager returned "agent_manager"
         routed_to = widget_response.get("routed_to", "")
-        if routed_to == "agent_manager":
-            logger.info(f"[WebUI] Agent response detected, using specialized formatting")
+        is_agent_response = routed_to in (
+            "agent_manager", "adk_native", "adk", "engagement", "greeting",
+        )
+
+        if is_agent_response:
+            logger.info(f"[WebUI] Agent/ADK response detected (routed_to={routed_to}), using direct formatting")
+            # ADK responses are already fully formatted Markdown — pass through directly
+            # Do NOT run through format_for_openwebui which treats it as a RAG doc answer
             formatted_answer = format_agent_response_for_openwebui(
                 response_text=answer,
                 execution_result=widget_response.get("execution_result"),
@@ -257,7 +266,7 @@ async def build_rich_response(
                 metadata=widget_response.get("metadata", {})
             )
         else:
-            # Regular RAG response - format with steps and images
+            # Pure RAG documentation response - format with steps and images
             logger.info(
                 f"[WebUI] Formatting RAG response: "
                 f"{len(steps)} steps, {len(images)} images"
@@ -276,7 +285,6 @@ async def build_rich_response(
                     "routed_to": routed_to or "rag_system",
                     "has_sources": widget_response.get("has_sources", False)
                 }
-            
             )
         
         return {
@@ -479,9 +487,43 @@ async def chat_completions(
         
         user_id = request_data.user or "openwebui_user"
         
-        # Extract authentication token and user type from headers
+        # Extract authentication token and user type from headers.
+        # The frontend sends 'usertype' header directly (set by Angular HTTP interceptor).
         auth_token = request.headers.get("Authorization", "")
-        user_type = request.headers.get("X-User-Type", "CUS")  # Default to CUS if not provided
+
+        user_type = (
+            request.headers.get("usertype")
+            or request.headers.get("Usertype")
+            or request.headers.get("X-User-Type")
+            or None
+        )
+
+        # NOTE: JWT-decode fallback was here but is now redundant — the Angular
+        # frontend sends the 'usertype' header explicitly. Kept as comment in case
+        # a future client does NOT send the header and fallback is needed again.
+        #
+        # if not user_type and auth_token:
+        #     try:
+        #         import jwt as pyjwt
+        #         token_str = auth_token.replace("Bearer ", "").replace("bearer ", "")
+        #         payload = pyjwt.decode(token_str, options={"verify_signature": False})
+        #         user_type = (
+        #             payload.get("user_type") or payload.get("usertype")
+        #             or payload.get("userType") or payload.get("type")
+        #         )
+        #         if not user_type:
+        #             roles = [r.lower() for r in payload.get("realm_access", {}).get("roles", [])]
+        #             if "eng" in roles or "engineer" in roles:
+        #                 user_type = "ENG"
+        #             elif "cus" in roles or "customer" in roles:
+        #                 user_type = "CUS"
+        #     except Exception:
+        #         pass
+
+        if not user_type:
+            user_type = "CUS"
+        logger.info("[OpenWebUI] Resolved usertype=%s from %s",
+                    user_type, "header" if request.headers.get("usertype") or request.headers.get("X-User-Type") else "default")
         
         # Create stable session ID for conversation continuity
         # Use the FIRST user message as the anchor for session ID (not the changing history)

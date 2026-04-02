@@ -86,7 +86,21 @@ class VirtualMachineAgent(BaseResourceAgent):
                     auth_token=auth_token,
                     user_id=user_id
                 )
-                logger.info(f"✅ Using IPC engagement ID: {ipc_engagement_id} (from selected: {selected_engagement_id})")
+                if ipc_engagement_id:
+                    logger.info(f"✅ Using IPC engagement ID: {ipc_engagement_id} (from PaaS: {selected_engagement_id})")
+                else:
+                    logger.error(f"❌ IPC engagement mapping failed for PaaS engagement {selected_engagement_id}")
+                    return {
+                        "success": False,
+                        "error": "IPC engagement mapping not found",
+                        "response": (
+                            f"Unable to list VMs: the IPC engagement mapping for your PaaS engagement "
+                            f"(ID: {selected_engagement_id}) could not be retrieved. "
+                            "This typically means your account does not have VM resources configured "
+                            "in this engagement, or your token does not have access to the IPC layer. "
+                            "Please contact your administrator if you believe this is an error."
+                        )
+                    }
             
             logger.info(f"🔍 Listing VMs with filters: endpoint={endpoint_filter}, zone={zone_filter}, dept={department_filter}")
             result = await api_executor_service.list_vms(

@@ -30,6 +30,7 @@ from app.services.ai_service import ai_service
 from app.services.postgres_service import postgres_service
 from app.services.prometheus_metrics import metrics
 from app.core.database import init_db
+from app.adk.runner import get_adk_runner
 load_dotenv()
 logger = logging.getLogger("enterprise_rag_bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -93,6 +94,23 @@ async def lifespan(app: FastAPI):
         logger.info("✅ PostgreSQL Vector Stats - Documents: %d", doc_count)
     except Exception as e:
         logger.exception("⚠️ Could not retrieve stats: %s", e)
+
+    # Initialize ADK Runner (Google Agent Development Kit)
+    try:
+        from app.adk.session_service import PostgresSessionService
+        session_service = PostgresSessionService(
+            pool_getter=lambda: postgres_service.pool
+        )
+        adk_runner = get_adk_runner(session_service=session_service)
+        logger.info("✅ ADK Runner initialized (framework=google-adk)")
+    except Exception as e:
+        logger.exception("⚠️ ADK Runner initialization failed (falling back to InMemory): %s", e)
+        try:
+            get_adk_runner()
+            logger.info("✅ ADK Runner initialized with InMemorySessionService")
+        except Exception as e2:
+            logger.exception("❌ ADK Runner fallback also failed: %s", e2)
+
     logger.info("=" * 70)
     logger.info("✅ Enterprise RAG Bot startup sequence complete")
     logger.info("📚 API documentation: http://localhost:8000/docs")

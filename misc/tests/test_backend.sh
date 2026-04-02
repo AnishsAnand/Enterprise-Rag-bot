@@ -9,7 +9,7 @@ echo ""
 echo "📋 Test 1: List all clusters"
 curl -s -X POST http://localhost:8001/api/widget/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "list all clusters"}' | jq '.response' | head -20
+  -d '{"query": "list all clusters"}' | jq '.answer' | head -20
 
 echo ""
 echo "---"
@@ -19,7 +19,7 @@ echo ""
 echo "📍 Test 2: List clusters in Delhi"
 curl -s -X POST http://localhost:8001/api/widget/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "list clusters in delhi"}' | jq '.response' | head -20
+  -d '{"query": "list clusters in delhi"}' | jq '.answer' | head -20
 
 echo ""
 echo "---"
@@ -29,7 +29,7 @@ echo ""
 echo "🏗️ Test 3: Start cluster creation"
 curl -s -X POST http://localhost:8001/api/widget/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "create a cluster"}' | jq '.response' | head -30
+  -d '{"query": "create a cluster"}' | jq '.answer' | head -30
 
 echo ""
 echo "========================================"
